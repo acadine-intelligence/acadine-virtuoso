@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets and private runtime state
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+runtime/
+private/
+uploads/
+
+# Build and verification output
+dist/
+build/
+*.egg-info/
+coverage/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.scratch/
+*.bak
+*.backup
+*.orig
+*.pre-*
+.buildos/verification/*.json
+.buildos/verification/logs/
+.buildos/reviews/*.json
+!.buildos/verification/.gitkeep
+!.buildos/reviews/.gitkeep
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/

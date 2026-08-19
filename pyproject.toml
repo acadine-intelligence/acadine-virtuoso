@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acadine-virtuoso"
+version = "0.1.0.dev0"
+description = "Local-first active-recall and adaptive-practice CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Acadine" }]
+dependencies = [
+  "fsrs==6.3.2",
+  "typing-extensions==4.16.0",
+]
+
+[project.urls]
+Repository = "https://github.com/acadine-hermes/acadine-virtuoso"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+virtuoso = ["py.typed"]

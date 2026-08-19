@@ -1,0 +1,158 @@
+{
+  "schema_version": 2,
+  "product": {
+    "slug": "acadine-virtuoso",
+    "name": "Acadine Virtuoso",
+    "kind": "standalone",
+    "owner": "Jonathan / Acadine",
+    "canonical_root": ".",
+    "mission": "Turn user-owned knowledge and real work into timed active-recall challenges, attributable learning evidence, and adaptive practice that improves reliable recall speed and transfer.",
+    "core_output": "One inspectable active-recall challenge or compact practice bundle, followed by an append-only attempt record and a scheduler proposal tied to the exact algorithm, context, assistance, and learner result.",
+    "hero_workflow": "Initialize a local workspace, add a manually authored focus item, start a session that shows the prompt before any answer, attempt recall under a timer, use the retry-hint-feedback ladder if needed, grade correctness and confidence with help attribution, then inspect the recorded evidence and next-review proposal.",
+    "differentiation": "Virtuoso is a local-first mental gym rather than a passive due queue or LMS: Markdown remains human-owned, SQLite holds derived state, active recall precedes teaching, real project transfer is first-class, and scheduler and practice behavior are replaceable through versioned modules.",
+    "non_goals": [
+      "Reimplement FSRS or claim a novel scheduling algorithm before comparable evidence exists",
+      "Require Obsidian, Hermes, an Obsidian plugin, cloud storage, or an agent harness for the core CLI",
+      "Treat XP, completion, retrieval, tests, or agent-produced work as proof of mastery",
+      "Assign moral worth, a hidden virtue score, or a psychological profile to the learner",
+      "Silently commit the learner's day, rewrite a project plan, or mutate another tool's scheduler",
+      "Build a visual application, social network, streak system, or leaderboard in v0"
+    ]
+  },
+  "problem": {
+    "target_user": "Jonathan first, then self-directed technical learners who keep knowledge in Markdown and want practice tied to current work",
+    "painful_job": "At the start of a focused learning session, turn a large body of notes and active project context into one worthwhile challenge that tests recall before revealing help and records what the attempt actually demonstrated.",
+    "current_workaround": "Use Obsidian notes, a small path-bound SM-2-lite script, manually chosen exercises, project work, and separate reflections; due dates, response latency, assistance, transfer evidence, and project relevance are not joined into one inspectable loop.",
+    "evidence": [
+      "Jonathan's 2026-08-19 voice and chat discussion explicitly asked for a mental-gym CLI built around active recall, testing effect, recall latency, project application, modularity, and optional direction-led learning.",
+      "The local Core vault already contains five Virtuoso pilot items plus learner-state and evidence-ledger structures under 07-learning/virtuoso.",
+      "The existing local script at projects/hermes-tools/virtuoso/virtuoso.py schedules Markdown items but does not run the active-recall journey, isolate workspaces, or provide a product extension contract."
+    ],
+    "frequency": "Daily or several times per week whenever a learner begins focused study or encounters a transferable concept in project work.",
+    "consequence": "Passive familiarity is mistaken for retrieval, recall remains slow, practice drifts away from active work, and evidence about what the learner did independently is lost or conflated with agent assistance.",
+    "value_hypothesis": "If Virtuoso makes the next challenge relevant, hides answers until an attempt, records latency and help, and schedules follow-up from attributable outcomes, learners will retrieve important concepts more reliably and apply them independently in real work with less manual queue maintenance.",
+    "success_metric": "During a two-week dogfood run of at least ten real sessions, every session produces inspectable evidence, at least three sessions lead to authentic project application, and Jonathan chooses Virtuoso for at least 8 of 10 eligible focused-learning sessions while reporting that the recommendation or challenge was worth the setup cost.",
+    "kill_criteria": "Stop or rescope the v0 if it adds more than two minutes of administration per session, is not chosen for at least 8 of 10 eligible sessions, cannot distinguish unaided retrieval from guided work, or does not produce better next actions than the current manual workflow."
+  },
+  "research": {
+    "sources": [
+      "Direct Jonathan voice/chat source preserved at vaults/acadine-core/14-tasks/00-active/virtuoso_chat_transcript_2026-08-19.md and synthesized in the Core Virtuoso PRD discovery note.",
+      "Existing deployed reference at projects/hermes-tools/virtuoso/virtuoso.py and vaults/acadine-core/07-learning/virtuoso, inspected 2026-08-19.",
+      "Open Spaced Repetition py-fsrs official repository and PyPI package, FSRS 6.3.2, retrieved 2026-08-19: https://github.com/open-spaced-repetition/py-fsrs and https://pypi.org/project/fsrs/.",
+      "Anki official FAQ describing SM-2 and FSRS scheduler choices, retrieved 2026-08-19: https://faqs.ankiweb.net/what-spaced-repetition-algorithm.",
+      "Local learning-system notes and the Acadine Core PRD/design plan referenced by .project-meta.json."
+    ],
+    "alternatives": [
+      "Anki or Obsidian flashcards: mature atomic recall scheduling, but weak linkage to current projects, assistance attribution, practical bundles, and local agent workflows.",
+      "The existing Virtuoso SM-2-lite script: useful due queue and evidence append, but path-bound, not packaged, not interactive, and not modular.",
+      "Manual project-based learning: authentic transfer, but inconsistent retrieval timing, hard to compare outcomes, and expensive to maintain.",
+      "A full adaptive course platform such as Math Academy: strong guided progression inside its curriculum, but not a local interoperability layer for arbitrary Markdown, projects, and harnesses."
+    ],
+    "workflow_observations": [
+      "The answer must stay hidden until the learner attempts retrieval; teaching first defeats the primary testing-effect job.",
+      "Correctness alone is insufficient: latency, confidence, open notes, hints, and agent help change what the result means.",
+      "Memory scheduling, capability evidence, project priority, and XP require separate owners and may inform one another only through explicit projections.",
+      "Markdown should own learner prose while SQLite owns append-only attempts, scheduler state, derived priority, XP, and sync history.",
+      "The safest v0 extension boundary is an external command module with a manifest and JSON protocol; in-process third-party code would expand the trust boundary before the core contract is proven."
+    ],
+    "market_gap": "A user-owned, harness-neutral active-recall CLI that joins Markdown knowledge, attributable evidence, multiple scheduler contexts, and authentic project transfer without becoming another cloud LMS or passive flashcard queue.",
+    "constraints": [
+      "Local-first and offline for the core journey; no personal learning content in the public repository.",
+      "Python 3.11 project-local virtual environment; never use the Hermes runtime environment.",
+      "Use an established FSRS implementation rather than recreating its algorithm.",
+      "No Obsidian plugin dependency and no mutation of another tool's native scheduler state.",
+      "External modules receive only declared inputs, run as argv without a shell, and cannot directly write core state.",
+      "Scheduled processing may propose focus but learner confirmation owns commitments."
+    ]
+  },
+  "acceptance": {
+    "criteria": [
+      "Given a clean checkout and Python 3.11, when the operator bootstraps and runs virtuoso init, then a self-contained local workspace with Markdown, SQLite, configuration, and no personal data is created deterministically.",
+      "Given a manually authored recall item, when the learner starts practice, then the prompt appears before answer or feedback, elapsed recall time is captured by the program, and the answer is revealed only after an explicit attempt.",
+      "Given a failed or partial attempt, when the learner requests support, then Virtuoso follows retry unaided, optional hint, worked feedback, and smaller follow-up challenge while recording exactly which support was used.",
+      "Given a completed attempt, when it is recorded, then correctness, latency, confidence, context, open-notes state, and help attribution are appended to SQLite evidence without claiming competence, and the scheduler proposal records algorithm, version, configuration, and learning context.",
+      "Given a declared external module, when Virtuoso loads it, then incompatible schema versions, undeclared capabilities, shell commands, malformed output, and direct state-write requests fail closed while a valid JSON command module can return a typed proposal.",
+      "Given the same fixture workspace, intent, and clock, when selection runs twice, then it returns the same ranked action and explanation; missing inputs produce explicit uncertainty rather than invented readiness.",
+      "Given no Hermes or Obsidian installation, when the learner completes the hero workflow, then the core journey still works; optional adapters cannot become required dependencies."
+    ]
+  },
+  "experience": {
+    "surfaces": ["cli"],
+    "direction": "A calm mental gym: one challenge at a time, answer hidden, timer visible only after the attempt, reasons and uncertainty in plain language, and no pressure mechanics.",
+    "design_references": [
+      "Math Academy for adaptive challenge and visible progression without copying its curriculum",
+      "LeetCode for executable problem framing and concrete acceptance",
+      "Anki for fast keyboard-driven recall grading",
+      "Unix CLI conventions for composability, scriptable JSON output, and clear exit codes"
+    ],
+    "tokens": {
+      "color": ["terminal default", "cyan current challenge", "green demonstrated", "amber partial or help used", "red not demonstrated or blocked", "muted provenance"],
+      "typography": ["plain terminal text", "sentence-case labels", "tabular latency and schedule fields", "no decorative logo in a practice session"],
+      "spacing": ["one blank line around the prompt", "compact evidence summary", "80-column readable output", "one primary next action"]
+    },
+    "states": ["loading", "empty", "error", "success", "disabled", "stale", "destructive", "recovery"],
+    "visual_evidence": [],
+    "accessibility_target": "Complete keyboard operation, no color-only meaning, plain-text fallback, stable prompts, and screen-reader-readable output"
+  },
+  "architecture": {
+    "system_context": "A standalone Python CLI and importable domain library operate on a learner-selected local workspace. Markdown stores authored focus items, prompts, hints, answers, reflections, and optional direction prose. SQLite stores append-only attempts, scheduler states, derived proposals, module receipts, XP events, and sync history. Optional Obsidian, Hermes, project, and external-resource adapters project context through typed read contracts; they do not own the core or mutate commitments.",
+    "data_model": "Workspace contains authored LearningItems and Connections. LearningItem references Focus and Concept nodes and can produce PracticeChallenges. Attempt records prompt version, timestamps, latency, response, result, confidence, notes state, and SupportUsed. SchedulerProposal records item, algorithm, version, configuration, learning context, inputs, due proposal, and reason; algorithm-specific SchedulerState is isolated by scheduler id. EvidenceEvent is append-only and derives CapabilityView without erasing history. ModuleManifest declares category, protocol version, command argv, capabilities, read projections, and output schema. FocusProposal remains uncommitted until a LearnerDecision accepts, changes, or rejects it.",
+    "api_contract": "Core Python ports are Repository, EvidenceLedger, Scheduler, Selector, PracticeFormat, and ModuleRunner. Third-party v0 extensions are out-of-process command modules declared by virtuoso.module.json using protocol virtuoso/module@0.1. Virtuoso sends one bounded JSON request on stdin and accepts one typed JSON response on stdout, invokes argv directly with shell disabled and a timeout, and persists only validated core-owned events. Initial module categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are out of scope until the external contract survives dogfooding.",
+    "hermes_integration": {
+      "mode": "hybrid",
+      "boundary": "Virtuoso owns the workspace schema, Markdown/SQLite synchronization, practice flow, scheduler portfolio, evidence, and learner decisions. Hermes may invoke the CLI, supply explicitly approved read-only session or project projections, schedule proposal runs, and test adapters. Hermes does not become the learner database, choose commitments silently, or receive private content beyond the user's declared workspace boundary."
+    },
+    "risks": [
+      "False mastery from correct answers, XP, tests, or agent work; mitigate with typed evidence attribution and separate capability views, detect through fixtures covering help and transfer states.",
+      "Scheduler complexity outruns useful practice; mitigate with py-fsrs as the atomic-recall baseline, isolated algorithm state, and a transparent fixed policy for unsupported contexts, detect through dogfood overrides and workload metrics.",
+      "Third-party modules exfiltrate or corrupt data; mitigate with external-process manifests, minimal projections, no shell, timeouts, validated output, and no direct database path, detect through adversarial module tests and receipts.",
+      "Markdown and SQLite drift or overwrite learner prose; mitigate with field ownership, content hashes, append-only sync receipts, and visible conflicts, detect through round-trip and competing-edit tests.",
+      "The CLI becomes an administrative burden; mitigate with a one-item simple mode, defaults, concise evidence, and optional richer structures, detect against the two-minute and 8-of-10 kill criteria.",
+      "Project context becomes an unauthorized commitment; mitigate by representing recommendations as proposals and requiring LearnerDecision before commitment, detect with permission and state-transition tests."
+    ],
+    "privacy": "Local-first and offline for the core workflow. Runtime databases, personal Markdown, logs, model inputs, and evidence are ignored by Git. The repository contains synthetic fixtures only. Adapters are opt-in and path-scoped; no credentials enter workspace state. Export, remote sync, publication, messaging, project mutation, and cloud processing require explicit user action."
+  },
+  "verification": {
+    "commands": [],
+    "independent_review": {
+      "required": true,
+      "policy": "A reviewer who did not implement the change must inspect the exact Git commit and report security, privacy, logic, learning-evidence attribution, extension-boundary, and contract findings"
+    },
+    "user_journeys": [
+      "From a clean checkout, bootstrap a local environment, initialize a temporary workspace, add one synthetic active-recall item, complete one unaided successful attempt and one supported failed attempt, inspect the evidence and next-review proposals, run doctor, and confirm no personal path or data entered the repository."
+    ],
+    "performance_budget": {
+      "cold_start_ms": 750,
+      "non_model_command_p95_ms": 250,
+      "module_timeout_seconds": 10,
+      "idle_cpu_percent": 0,
+      "installed_core_mb": 50
+    }
+  },
+  "operations": {
+    "install": "Planned v0: python3.11 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'.",
+    "run": "Planned v0: .venv/bin/virtuoso --workspace PATH <command>.",
+    "health": "Planned v0: .venv/bin/virtuoso --workspace PATH doctor checks schema, database, Markdown ownership, module manifests, permissions, and dependency versions without changing learning state.",
+    "rollback": "Use versioned Git commits and package releases; back up the local SQLite file before migrations and retain append-only event export so derived state can be rebuilt.",
+    "support_owner": "Jonathan / Acadine",
+    "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
+  },
+  "release": {
+    "version": "0.1.0-dev",
+    "user_acceptance": {
+      "status": "pending",
+      "evidence": ""
+    },
+    "known_limitations": [
+      "Architecture baseline only until implementation and exact-commit review are recorded.",
+      "Simple mode and manually authored recall items are the first slice; direction-led planning, project transfer workflows, two-way Obsidian synchronization, scheduled proposals, XP, and meta-scheduler optimization follow through dogfood evidence.",
+      "No Git remote or public repository has been created or pushed."
+    ]
+  },
+  "adoption": {
+    "active_users": 0,
+    "feedback_cycles": 0,
+    "metric_observations": [],
+    "decision": "pending"
+  }
+}
