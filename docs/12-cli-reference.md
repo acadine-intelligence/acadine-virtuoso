@@ -16,7 +16,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain error (`WorkspaceError`, `PracticeError`, `ModuleError`) — stderr carries `Error: <plain actionable message>`; also returned for argparse usage errors and any command path that did not produce output |
+| 2 | Domain error (`WorkspaceError`, `PracticeError`, `ModuleError`): stderr carries `Error: <plain actionable message>`; also returned for argparse usage errors and any command path that did not produce output |
 
 There are no silent partial failures: commands either complete and return 0 or fail closed with 2 and no state change.
 
@@ -82,14 +82,14 @@ virtuoso --workspace PATH practice --item ID [--agent-help none|light|substantia
 
 Interactive protocol (stdout prompts, stdin answers, in order):
 
-1. `Notes open? [y/N]:` — `y` or `n` (default n).
+1. `Notes open? [y/N]:`: `y` or `n` (default n).
 2. The challenge title and prompt are shown. The answer is not.
-3. `Your recall:` — free-text attempt. The time to first answer is recorded as `initial_latency_ms`.
-4. `Next [retry / hint / reveal]:` — repeats until `reveal` (or a `hint` followed by reveal):
-   - `retry` — another unaided attempt, recorded as `retry-unaided`.
-   - `hint` — shows the hint (if any), then `Response after hint:`.
-   - `reveal` — shows the reference answer (recorded as `worked-feedback`).
-5. `Result [demonstrated / partial / not-demonstrated]:` — self-grading. A blank recall cannot be recorded as `demonstrated`; the session fails closed instead.
+3. `Your recall:`: free-text attempt. The time to first answer is recorded as `initial_latency_ms`.
+4. `Next [retry / hint / reveal]:`: repeats until `reveal` (or a `hint` followed by reveal):
+   - `retry`: another unaided attempt, recorded as `retry-unaided`.
+   - `hint`: shows the hint (if any), then `Response after hint:`.
+   - `reveal`: shows the reference answer (recorded as `worked-feedback`).
+5. `Result [demonstrated / partial / not-demonstrated]:`: self-grading. A blank recall cannot be recorded as `demonstrated`; the session fails closed instead.
 6. `Confidence [1-5]:`
 7. If the result was not `demonstrated` and the item has a follow-up: `Follow-up response:`.
 
@@ -144,7 +144,7 @@ Links a learning item to an indexed source note, binding the item to the note's 
 
 ## Candidates (metadata-only structural proposals)
 
-Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path — reviewing and acting on a candidate is a human/agent decision made outside Virtuoso.
+Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path; reviewing and acting on a candidate is a human/agent decision made outside Virtuoso.
 
 ### `candidate generate`
 
@@ -211,7 +211,7 @@ Lists incomplete checks whose evidence date is due (default: now). `--as-of` mus
 virtuoso --workspace PATH transfer check begin --check CHECK_ID --prediction TEXT [--json]
 ```
 
-Records a pre-attempt prediction. Must happen before attempting the challenge or requesting help — prediction-before-attempt is the integrity rule that keeps the evidence meaningful.
+Records a pre-attempt prediction. Must happen before attempting the challenge or requesting help; prediction-before-attempt is the integrity rule that keeps the evidence meaningful.
 
 ### `transfer check complete`
 

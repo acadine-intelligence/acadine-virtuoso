@@ -7,7 +7,7 @@ How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Vi
 1. **Always pass `--json`.** Human output is `key: value` lines; JSON output is the stable machine contract. Parse stdout, never scrape the human format.
 2. **Check the exit code.** 0 means success; 2 means a domain error. On 2, read stderr (`Error: ...`), which is written to be actionable, and either fix the input or surface it to the human. Never retry the same failing input unchanged.
 3. **Never fabricate evidence.** Attempts, transfer events and check completions are append-only records of what a real learner did. An agent may administer a session and transcribe the learner's answers; it may not invent results, and `--agent-help` / `--assistance` must honestly reflect any help the agent gave. When an agent runs a smoke test itself, record it as `substantial`, not `none`.
-4. **Respect the boundaries.** Candidates are proposal-only — there is no apply command, and acting on one is a decision made outside Virtuoso. Sources are read-only. Scheduling and selection changes come from recorded evidence, never from an agent editing the database.
+4. **Respect the boundaries.** Candidates are proposal-only; there is no apply command, and acting on one is a decision made outside Virtuoso. Sources are read-only. Scheduling and selection changes come from recorded evidence, never from an agent editing the database.
 5. **Never edit the SQLite database directly.** All state changes go through the CLI (or the Python services behind it). The schema is fail-closed: tampering is detected on next open and the workspace refuses to start.
 
 ## Natural language to command mapping
@@ -17,10 +17,10 @@ Translate learner intent into commands like this:
 | The human says... | Run |
 |---|---|
 | "Set up my learning workspace" | `virtuoso --workspace PATH init --json` |
-| "What should I practice?" / "quiz me" / "what's next" | `next --json` — show the prompt, hide everything else |
-| "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json` — selection scoped to one focus; a track with no items returns exit 2 with a clear error |
+| "What should I practice?" / "quiz me" / "what's next" | `next --json`: show the prompt, hide everything else |
+| "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json`: selection scoped to one focus; a track with no items returns exit 2 with a clear error |
 | "Add this as a practice item" | `add --id ... --title ... --focus ... --prompt ... --answer ... [--hint ...] [--follow-up ...] --json` |
-| "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive — see the session protocol below) |
+| "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive; see the session protocol below) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |
 | "Is my workspace healthy?" | `doctor --json` |
 | "Connect my Obsidian vault / notes folder" | `source add --id ... --kind obsidian|markdown --path ROOT --json` |
@@ -31,16 +31,16 @@ Translate learner intent into commands like this:
 | "Show me the proposals" | `candidate list --json` (optionally `--kind atomic-note|link|practice`) |
 | "I used this in a real project" | `transfer record --item ... --project ... --use-case ... --outcome ... --independence ... --json` |
 | "What's due for a transfer check?" | `transfer check due --json` |
-| "Start my transfer check" | `transfer check begin --check ... --prediction "..." --json` — record the prediction BEFORE any help |
+| "Start my transfer check" | `transfer check begin --check ... --prediction "..." --json`: record the prediction BEFORE any help |
 | "Finish my transfer check" | `transfer check complete --check ... --attempt ... --assistance ... --acceptance-evidence ... --teach-back ... --outcome ... --json` |
 
 ## Running a practice session from an agent
 
 `practice` is interactive on stdin/stdout. An agent administering a session (e.g. a morning pulse in a chat) has two honest options:
 
-**Option A — relay to the human (preferred).** Tell the human to run the command in their terminal, or relay prompts and answers through the chat. The learner's own answers and self-grading are the evidence.
+**Option A: relay to the human (preferred).** Tell the human to run the command in their terminal, or relay prompts and answers through the chat. The learner's own answers and self-grading are the evidence.
 
-**Option B — drive the protocol programmatically.** Feed stdin lines in protocol order and read stdout. The sequence is:
+**Option B: drive the protocol programmatically.** Feed stdin lines in protocol order and read stdout. The sequence is:
 
 ```
 stdin:  <y|n>                     # Notes open?
@@ -62,7 +62,7 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 
 **Morning pulse.** `next --json` → present only the prompt and title → after the human answers, administer `practice` for that item → close with the printed next-review time. Optionally `transfer check due --json` first, since due checks outrank routine review.
 
-**Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/` — items are human-owned prose.
+**Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/`; items are human-owned prose.
 
 **Connect knowledge.** `source scan --id ... --json` after vault changes; `candidate generate` on notes under active study; present candidates as suggestions for the human to accept, modify or reject outside the tool.
 
