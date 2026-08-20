@@ -510,7 +510,27 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_runs",
             ):
                 db.execute(f'DROP TABLE "{table}"')
-            db.execute("DELETE FROM schema_migrations WHERE version = 7")
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE items RENAME TO items_with_retired")
+            db.execute(
+                """CREATE TABLE items (
+                    item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    focus TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO items(item_id, title, focus, relative_path, "
+                "content_hash, created_at) "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "created_at FROM items_with_retired"
+            )
+            db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
+            db.execute("DELETE FROM schema_migrations WHERE version >= 7")
             sources_before = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
 
         reopened = WorkspaceService.open(self.workspace_root)
@@ -528,7 +548,7 @@ class StructuralCandidateTests(unittest.TestCase):
                 ).fetchall()
             }
             sources_after = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertTrue(
             {"candidate_runs", "review_candidates", "candidate_source_refs"}.issubset(tables)
         )
@@ -543,7 +563,27 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_runs",
             ):
                 db.execute(f'DROP TABLE "{table}"')
-            db.execute("DELETE FROM schema_migrations WHERE version = 7")
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE items RENAME TO items_with_retired")
+            db.execute(
+                """CREATE TABLE items (
+                    item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    focus TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO items(item_id, title, focus, relative_path, "
+                "content_hash, created_at) "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "created_at FROM items_with_retired"
+            )
+            db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
+            db.execute("DELETE FROM schema_migrations WHERE version >= 7")
             db.execute("CREATE TABLE review_candidates(candidate_id TEXT PRIMARY KEY)")
 
         with self.assertRaisesRegex(

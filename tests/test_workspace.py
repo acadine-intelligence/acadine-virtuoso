@@ -89,6 +89,26 @@ class WorkspaceServiceTests(unittest.TestCase):
                 "module_run_receipts",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE items RENAME TO items_with_retired")
+            db.execute(
+                """CREATE TABLE items (
+                    item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    focus TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO items(item_id, title, focus, relative_path, "
+                "content_hash, created_at) "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "created_at FROM items_with_retired"
+            )
+            db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DELETE FROM schema_migrations WHERE version > 3")
         return service
 
@@ -107,7 +127,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (7,))
+            self.assertEqual(migration, (8,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -136,7 +156,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 8)),
+                list(range(1, 9)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -302,6 +322,23 @@ class WorkspaceServiceTests(unittest.TestCase):
             {"due_now": 1, "scheduled_total": 1, "new_items": 2},
         )
 
+    def test_doctor_workload_excludes_retired_items(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="a-new",
+            title="New only",
+            focus="focus-one",
+            prompt="P?",
+            answer="A.",
+        )
+        service.retire_item("a-new")
+        health = service.doctor()
+        self.assertEqual(
+            health["workload"],
+            {"due_now": 0, "scheduled_total": 0, "new_items": 0},
+        )
+        self.assertEqual(health["items"], 1)
+
     def test_add_item_writes_human_owned_markdown_and_index(self) -> None:
         service = WorkspaceService.init(self.root)
         item = service.add_item(
@@ -452,7 +489,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()

@@ -60,6 +60,10 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--follow-up")
     add.add_argument("--json", action="store_true")
 
+    retire = commands.add_parser("retire", help="retire an item from selection")
+    retire.add_argument("--id", required=True)
+    retire.add_argument("--json", action="store_true")
+
     next_command = commands.add_parser("next", help="recommend the next item")
     next_command.add_argument("--focus", help="restrict selection to one focus track")
     next_command.add_argument("--json", action="store_true")
@@ -258,6 +262,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 as_json=args.json,
             )
+            return 0
+        if args.command == "retire":
+            status = workspace.retire_item(args.id)
+            _emit({"item_id": args.id, "status": status}, as_json=args.json)
             return 0
         if args.command == "next":
             selection = workspace.select_next(

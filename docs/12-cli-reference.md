@@ -53,6 +53,14 @@ virtuoso --workspace PATH add --id ID --title TITLE --focus FOCUS \
   --prompt PROMPT --answer ANSWER [--hint HINT] [--follow-up FOLLOW_UP] [--json]
 ```
 
+Retire an item when it no longer earns its place: removed from selection and workload counts, Markdown and evidence untouched, reversible only by direct database edit.
+
+```
+virtuoso --workspace PATH retire --id ID [--json]
+```
+
+JSON output keys: `item_id`, `status` (`retired` on first call, `already-retired` after).
+
 - `--id`: unique lowercase-dash identifier; unsafe or duplicate ids are rejected.
 - `--focus`: the learning context / track tag (e.g. `ml-deep-learning`). Selection and scheduling are scoped by context.
 - `--prompt`: the retrieval challenge shown before any answer.
