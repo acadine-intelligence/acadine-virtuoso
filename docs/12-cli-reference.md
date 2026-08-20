@@ -137,10 +137,18 @@ virtuoso --workspace PATH source notes --id SOURCE [--json]
 ### `source link`
 
 ```
-virtuoso --workspace PATH source link --id SOURCE --path RELATIVE_PATH --item ITEM_ID [--json]
+virtuoso --workspace PATH source link --id ID --path PATH --item ITEM [--json]
 ```
 
 Links a learning item to an indexed source note, binding the item to the note's current content hash. Later `doctor` runs flag the link as stale if the note changes or is replaced by a symlink.
+
+### `source relink`
+
+```
+virtuoso --workspace PATH source relink --id ID --path PATH --item ITEM [--json]
+```
+
+Rebinds an existing stale item-source link to the note's current content hash. This is the conscious recovery path after a note edit: `source link` refuses a pair that already exists, so editing a linked note otherwise leaves the link permanently stale. `relink` refuses a link that is not stale and a note that is not indexed (scan first). It never edits the source.
 
 ## Candidates (metadata-only structural proposals)
 

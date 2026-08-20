@@ -99,6 +99,14 @@ def _parser() -> argparse.ArgumentParser:
     source_link.add_argument("--path", required=True)
     source_link.add_argument("--item", required=True)
     source_link.add_argument("--json", action="store_true")
+    source_relink = source_commands.add_parser(
+        "relink",
+        help="consciously rebind a stale item-source link to the note's current hash",
+    )
+    source_relink.add_argument("--id", required=True)
+    source_relink.add_argument("--path", required=True)
+    source_relink.add_argument("--item", required=True)
+    source_relink.add_argument("--json", action="store_true")
     source_notes = source_commands.add_parser("notes", help="list indexed note metadata")
     source_notes.add_argument("--id", required=True)
     source_notes.add_argument("--json", action="store_true")
@@ -457,6 +465,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.source_command == "link":
                 link = workspace.link_item_source(
+                    item_id=args.item,
+                    source_id=args.id,
+                    relative_path=args.path,
+                )
+                _emit(link, as_json=args.json)
+                return 0
+            if args.source_command == "relink":
+                link = workspace.relink_item_source(
                     item_id=args.item,
                     source_id=args.id,
                     relative_path=args.path,
