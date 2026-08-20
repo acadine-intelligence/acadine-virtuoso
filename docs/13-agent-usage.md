@@ -18,6 +18,7 @@ Translate learner intent into commands like this:
 |---|---|
 | "Set up my learning workspace" | `virtuoso --workspace PATH init --json` |
 | "What should I practice?" / "quiz me" / "what's next" | `next --json` — show the prompt, hide everything else |
+| "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json` — selection scoped to one focus; a track with no items returns exit 2 with a clear error |
 | "Add this as a practice item" | `add --id ... --title ... --focus ... --prompt ... --answer ... [--hint ...] [--follow-up ...] --json` |
 | "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive — see the session protocol below) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |

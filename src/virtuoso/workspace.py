@@ -3151,9 +3151,11 @@ class WorkspaceService:
             ),
         )
 
-    def select_next(self, now: datetime) -> SelectionResult:
+    def select_next(self, now: datetime, focus: str | None = None) -> SelectionResult:
         if now.tzinfo is None or now.utcoffset() is None:
             raise WorkspaceError("selection timestamp must be timezone-aware")
+        if focus is not None and not focus.strip():
+            raise WorkspaceError("focus filter must be a non-empty string")
         now_utc = now.astimezone(timezone.utc)
         scheduler = self.configuration().get("scheduler")
         if not isinstance(scheduler, dict):
@@ -3164,9 +3166,7 @@ class WorkspaceService:
             raise WorkspaceError("scheduler algorithm must be a non-empty string")
         if not isinstance(learning_context, str) or not learning_context:
             raise WorkspaceError("scheduler context must be a non-empty string")
-        with self._connect() as db:
-            rows = db.execute(
-                """
+        query = """
                 SELECT i.item_id, p.due_at
                 FROM items AS i
                 LEFT JOIN scheduler_state AS s
@@ -3175,10 +3175,14 @@ class WorkspaceService:
                  AND s.learning_context = ?
                 LEFT JOIN scheduler_proposals AS p
                   ON p.source_event_id = s.source_event_id
-                ORDER BY i.item_id
-                """,
-                (algorithm, learning_context),
-            ).fetchall()
+                """
+        params: list[object] = [algorithm, learning_context]
+        if focus is not None:
+            query += " WHERE i.focus = ?"
+            params.append(focus)
+        query += " ORDER BY i.item_id"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
 
         due: list[tuple[datetime, str]] = []
         new: list[str] = []
@@ -3202,13 +3206,19 @@ class WorkspaceService:
         new.sort()
         candidates = [item_id for _, item_id in due] + new
         if not candidates:
+            if focus is not None:
+                raise WorkspaceError(
+                    f"no learning item is due in focus '{focus}'; "
+                    "add an item with that focus or return later"
+                )
             raise WorkspaceError("no learning item is due; add an item or return later")
 
         selected_id = candidates[0]
+        scope = f" within focus '{focus}'" if focus is not None else ""
         if due and selected_id == due[0][1]:
-            rationale = "Selected the earliest due item; ties use item id."
+            rationale = f"Selected the earliest due item{scope}; ties use item id."
         else:
-            rationale = "Selected a new item in deterministic item-id order."
+            rationale = f"Selected a new item in deterministic item-id order{scope}."
         return SelectionResult(
             item=self.load_item(selected_id),
             rationale=rationale,
