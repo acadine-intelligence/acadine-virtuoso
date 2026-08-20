@@ -40,7 +40,7 @@ Check workspace health: database integrity, item freshness, source-link stalenes
 virtuoso --workspace PATH doctor [--json]
 ```
 
-JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `stale_items`, `stale_source_links`, `workspace_schema`. Read-only: never mutates evidence and never silently repairs missing schema objects.
+JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `stale_items`, `stale_source_links`, `workspace_schema`, `workload`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) answers "how much is left today": items whose latest proposal is due, items with any schedule, and items never attempted (the new pool `next` draws from). Read-only: never mutates evidence and never silently repairs missing schema objects.
 
 ## Items
 

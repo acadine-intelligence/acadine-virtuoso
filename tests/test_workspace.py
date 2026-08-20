@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import stat
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from virtuoso.workspace import WorkspaceError, WorkspaceService
@@ -228,6 +230,77 @@ class WorkspaceServiceTests(unittest.TestCase):
         health = service.doctor()
         self.assertEqual(health["status"], "needs-attention")
         self.assertEqual(health["stale_items"], ["linked-item"])
+
+    def test_doctor_reports_workload_counts(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="a-new",
+            title="New only",
+            focus="focus-one",
+            prompt="P?",
+            answer="A.",
+        )
+        service.add_item(
+            item_id="b-new",
+            title="New only two",
+            focus="focus-one",
+            prompt="P?",
+            answer="A.",
+        )
+        worked = service.add_item(
+            item_id="c-worked",
+            title="Has one attempt",
+            focus="focus-one",
+            prompt="P?",
+            answer="A.",
+        )
+        now = datetime.now(timezone.utc)
+        attempted_at = now - timedelta(days=5)
+        content_hash = hashlib.sha256(worked.path.read_bytes()).hexdigest()
+        event_id = f"attempt-{hashlib.sha256(b'c-worked').hexdigest()}"
+        attempt = {
+            "event_id": event_id,
+            "item_id": "c-worked",
+            "item_content_hash": content_hash,
+            "occurred_at": attempted_at.isoformat(),
+            "started_at": attempted_at.isoformat(),
+            "completed_at": attempted_at.isoformat(),
+            "initial_response": "attempt text",
+            "initial_latency_ms": 0,
+            "result": "demonstrated",
+            "confidence": 4,
+            "open_notes": False,
+            "agent_help": "none",
+            "support_actions": [],
+        }
+        proposal = {
+            "proposal_id": f"proposal-{event_id}",
+            "source_event_id": event_id,
+            "item_id": "c-worked",
+            "algorithm": "fsrs",
+            "algorithm_version": "6.3.2",
+            "learning_context": "atomic-recall",
+            "configuration": {},
+            "previous_state_json": None,
+            "previous_source_event_id": None,
+            "due_at": (attempted_at + timedelta(hours=1)).isoformat(),
+            "rationale": "test proposal",
+            "created_at": attempted_at.isoformat(),
+        }
+        service.record_attempt(
+            attempt=attempt,
+            proposal=proposal,
+            state_json=json.dumps(
+                {"algorithm": "fsrs", "due": proposal["due_at"], "stability": 1.0}
+            ),
+        )
+
+        health = service.doctor()
+
+        self.assertEqual(
+            health["workload"],
+            {"due_now": 1, "scheduled_total": 1, "new_items": 2},
+        )
 
     def test_add_item_writes_human_owned_markdown_and_index(self) -> None:
         service = WorkspaceService.init(self.root)

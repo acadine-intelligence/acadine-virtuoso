@@ -3330,6 +3330,35 @@ class WorkspaceService:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
+    def _workload_counts(self, now: datetime) -> dict[str, int]:
+        """Due-now / scheduled / new-item counts used by doctor and selection."""
+        now_utc = now.astimezone(timezone.utc)
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT p.due_at FROM scheduler_proposals AS p
+                JOIN items AS i ON i.item_id = p.item_id
+                """
+            ).fetchall()
+            total_items = db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        scheduled_total = 0
+        due_now = 0
+        for row in rows:
+            try:
+                due_at = self._parse_aware_datetime(
+                    row["due_at"], label="scheduler due timestamp"
+                )
+            except WorkspaceError:
+                continue
+            scheduled_total += 1
+            if due_at <= now_utc:
+                due_now += 1
+        return {
+            "due_now": due_now,
+            "scheduled_total": scheduled_total,
+            "new_items": max(total_items - scheduled_total, 0),
+        }
+
     def doctor(self) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
         config = self.configuration()
@@ -3412,6 +3441,7 @@ class WorkspaceService:
                     }
                 )
         healthy = database == "ok" and not stale_items and not stale_source_links
+        workload = self._workload_counts(datetime.now(timezone.utc))
         return {
             "status": "healthy" if healthy else "needs-attention",
             "workspace_schema": config.get("schema"),
@@ -3422,6 +3452,7 @@ class WorkspaceService:
             "transfer_events": transfer_count,
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
+            "workload": workload,
         }
 
     @staticmethod
