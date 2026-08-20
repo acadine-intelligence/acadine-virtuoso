@@ -1222,6 +1222,69 @@ class WorkspaceService:
             "linked_at": linked_at,
         }
 
+    def relink_item_source(
+        self, *, item_id: str, source_id: str, relative_path: str
+    ) -> dict[str, str]:
+        """Consciously rebind an existing item-source link to the note's current hash."""
+        normalized = Path(relative_path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            raise WorkspaceError("source relative path must stay inside its source root")
+        normalized_path = normalized.as_posix()
+        relinked_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            item = db.execute(
+                "SELECT item_id FROM items WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            if item is None:
+                raise WorkspaceError(f"no learning item with id: {item_id}")
+            document = db.execute(
+                """
+                SELECT content_hash FROM source_documents
+                WHERE source_id = ? AND relative_path = ?
+                """,
+                (source_id, normalized_path),
+            ).fetchone()
+            if document is None:
+                raise WorkspaceError(
+                    f"source note is not indexed: {source_id}/{normalized_path}; scan it first"
+                )
+            existing = db.execute(
+                """
+                SELECT source_content_hash FROM item_source_links
+                WHERE item_id = ? AND source_id = ? AND source_relative_path = ?
+                """,
+                (item_id, source_id, normalized_path),
+            ).fetchone()
+            if existing is None:
+                raise WorkspaceError(
+                    f"no item source link to relink: {item_id} -> {source_id}/{normalized_path}"
+                )
+            if existing["source_content_hash"] == document["content_hash"]:
+                raise WorkspaceError(
+                    f"item source link is not stale: {item_id} -> {source_id}/{normalized_path}"
+                )
+            db.execute(
+                """
+                UPDATE item_source_links
+                SET source_content_hash = ?, linked_at = ?
+                WHERE item_id = ? AND source_id = ? AND source_relative_path = ?
+                """,
+                (
+                    document["content_hash"],
+                    relinked_at,
+                    item_id,
+                    source_id,
+                    normalized_path,
+                ),
+            )
+        return {
+            "item_id": item_id,
+            "source_id": source_id,
+            "relative_path": normalized_path,
+            "source_content_hash": document["content_hash"],
+            "linked_at": relinked_at,
+        }
+
     def persist_candidate_run(
         self,
         *,

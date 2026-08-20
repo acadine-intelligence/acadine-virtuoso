@@ -345,6 +345,69 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
             ],
         )
 
+    def test_relink_item_source_rebinds_after_conscious_content_change(self) -> None:
+        note = self.vault / "Testing Effect.md"
+        note.write_text("# Testing Effect\n\nVersion one.\n", encoding="utf-8")
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        first = self.service.link_item_source(
+            item_id="testing-effect",
+            source_id="vault",
+            relative_path="Testing Effect.md",
+        )
+
+        note.write_text("# Testing Effect\n\nVersion two, edited by the learner.\n", encoding="utf-8")
+        self.service.scan_source("vault")
+        health = self.service.doctor()
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(len(health["stale_source_links"]), 1)
+
+        relink = self.service.relink_item_source(
+            item_id="testing-effect",
+            source_id="vault",
+            relative_path="Testing Effect.md",
+        )
+        self.assertEqual(
+            relink["source_content_hash"],
+            self.service.list_source_documents("vault")[0].content_hash,
+        )
+        self.assertNotEqual(relink["source_content_hash"], first["source_content_hash"])
+        self.assertEqual(self.service.doctor()["stale_source_links"], [])
+        self.assertEqual(self.service.doctor()["status"], "healthy")
+
+    def test_relink_rejects_link_that_is_not_stale(self) -> None:
+        note = self.vault / "Testing Effect.md"
+        note.write_text("# Testing Effect\n\nStable.\n", encoding="utf-8")
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        self.service.link_item_source(
+            item_id="testing-effect",
+            source_id="vault",
+            relative_path="Testing Effect.md",
+        )
+
+        with self.assertRaises(WorkspaceError) as caught:
+            self.service.relink_item_source(
+                item_id="testing-effect",
+                source_id="vault",
+                relative_path="Testing Effect.md",
+            )
+        self.assertIn("not stale", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
