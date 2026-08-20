@@ -714,10 +714,9 @@ class StructuralCandidateTests(unittest.TestCase):
         before = self._vault_snapshot()
 
         help_text = self._run_cli("candidate", "--help").stdout.lower()
-        for command in ("generate", "list", "show"):
+        for command in ("generate", "list", "show", "decide"):
             self.assertIn(command, help_text)
         for forbidden in (
-            "accept",
             "apply",
             "materialize",
             "create-note",
