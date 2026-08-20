@@ -30,7 +30,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 6
+_CURRENT_MIGRATION_VERSION = 7
 
 
 class WorkspaceError(RuntimeError):
@@ -740,6 +740,54 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'transfer_check_completions is append-only');
                 END""",
+            """CREATE TABLE IF NOT EXISTS candidate_runs (
+                run_id TEXT PRIMARY KEY,
+                generator_id TEXT NOT NULL,
+                generator_version TEXT NOT NULL,
+                source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE RESTRICT,
+                scope_relative_path TEXT NOT NULL,
+                snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256) = 64),
+                max_candidates INTEGER NOT NULL CHECK(max_candidates BETWEEN 1 AND 50),
+                candidate_count INTEGER NOT NULL CHECK(candidate_count >= 0),
+                omitted_count INTEGER NOT NULL CHECK(omitted_count >= 0),
+                truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+                created_at TEXT NOT NULL,
+                UNIQUE(
+                    generator_id,
+                    generator_version,
+                    source_id,
+                    scope_relative_path,
+                    snapshot_sha256,
+                    max_candidates
+                )
+            )""",
+            """CREATE TABLE IF NOT EXISTS review_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES candidate_runs(run_id) ON DELETE RESTRICT,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                kind TEXT NOT NULL CHECK(kind IN ('atomic-note','link','practice')),
+                title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 256),
+                reason_code TEXT NOT NULL,
+                rationale TEXT NOT NULL CHECK(length(rationale) BETWEEN 1 AND 2000),
+                uncertainty TEXT CHECK(uncertainty IS NULL OR length(uncertainty) <= 2000),
+                proposal_json TEXT NOT NULL CHECK(json_valid(proposal_json)),
+                authority TEXT NOT NULL DEFAULT 'proposal' CHECK(authority = 'proposal'),
+                review_state TEXT NOT NULL DEFAULT 'proposed' CHECK(review_state = 'proposed'),
+                claims_mastery INTEGER NOT NULL DEFAULT 0 CHECK(claims_mastery = 0),
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, ordinal)
+            )""",
+            """CREATE TABLE IF NOT EXISTS candidate_source_refs (
+                candidate_id TEXT NOT NULL
+                    REFERENCES review_candidates(candidate_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                role TEXT NOT NULL CHECK(role IN ('origin','target','target-option')),
+                source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE RESTRICT,
+                relative_path TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
+                PRIMARY KEY(candidate_id, ordinal)
+            )""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -798,7 +846,8 @@ class WorkspaceService:
                 3: statements[10:11],
                 4: statements[11:13],
                 5: statements[13:16],
-                6: statements[16:],
+                6: statements[16:24],
+                7: statements[24:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -808,9 +857,8 @@ class WorkspaceService:
                     for statement in migration_statements[migration_version]
                 )
 
-            # Validate the schema claimed by migration history before creating
-            # anything. Missing current or historical tables must fail closed,
-            # never be silently recreated with lost evidence.
+            # Validate the complete schema claimed by migration history before
+            # creating anything. Missing evidence must never be recreated empty.
             if latest:
                 self._validate_database_schema(
                     db, statements=statements_through(latest)
@@ -824,24 +872,6 @@ class WorkspaceService:
                         statement.replace(
                             "CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1
                         )
-                    )
-                if version == 4:
-                    db.execute(
-                        """INSERT OR IGNORE INTO attempt_timings(
-                               event_id, started_at, completed_at
-                           )
-                           SELECT event_id, occurred_at, occurred_at FROM attempts"""
-                    )
-                    db.execute(
-                        """INSERT OR IGNORE INTO module_run_receipts(
-                               receipt_id, module_id, module_version, category, kind,
-                               manifest_sha256, stdout_sha256, status, error,
-                               duration_ms, started_at, completed_at
-                           )
-                           SELECT receipt_id, module_id, module_version, category, kind,
-                                  manifest_sha256, stdout_sha256, 'succeeded', NULL,
-                                  duration_ms, occurred_at, occurred_at
-                           FROM module_receipts"""
                     )
                 self._validate_database_schema(
                     db, statements=statements_through(version)
@@ -1191,6 +1221,243 @@ class WorkspaceService:
             "source_content_hash": document["content_hash"],
             "linked_at": linked_at,
         }
+
+    def persist_candidate_run(
+        self,
+        *,
+        run: dict[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> str:
+        """Atomically persist one core-generated metadata-only candidate run."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT * FROM candidate_runs WHERE run_id = ?",
+                (run["run_id"],),
+            ).fetchone()
+            if existing is not None:
+                actual_run = (
+                    existing["generator_id"],
+                    existing["generator_version"],
+                    existing["source_id"],
+                    existing["scope_relative_path"],
+                    existing["snapshot_sha256"],
+                    existing["max_candidates"],
+                    existing["candidate_count"],
+                    existing["omitted_count"],
+                    existing["truncated"],
+                )
+                expected_run = (
+                    run["generator_id"],
+                    run["generator_version"],
+                    run["source_id"],
+                    run["scope_relative_path"],
+                    run["snapshot_sha256"],
+                    run["max_candidates"],
+                    run["candidate_count"],
+                    run["omitted_count"],
+                    int(run["truncated"]),
+                )
+                actual_candidates = [
+                    tuple(row)
+                    for row in db.execute(
+                        """
+                        SELECT candidate_id, ordinal, kind, title, reason_code,
+                               rationale, uncertainty, proposal_json, authority,
+                               review_state, claims_mastery
+                        FROM review_candidates
+                        WHERE run_id = ?
+                        ORDER BY ordinal
+                        """,
+                        (run["run_id"],),
+                    ).fetchall()
+                ]
+                expected_candidates = [
+                    (
+                        candidate["candidate_id"],
+                        candidate["ordinal"],
+                        candidate["kind"],
+                        candidate["title"],
+                        candidate["reason_code"],
+                        candidate["rationale"],
+                        candidate["uncertainty"],
+                        candidate["proposal_json"],
+                        candidate["authority"],
+                        candidate["review_state"],
+                        int(candidate["claims_mastery"]),
+                    )
+                    for candidate in candidates
+                ]
+                actual_refs = [
+                    tuple(row)
+                    for row in db.execute(
+                        """
+                        SELECT r.candidate_id, r.ordinal, r.role, r.source_id,
+                               r.relative_path, r.title, r.content_hash
+                        FROM candidate_source_refs AS r
+                        JOIN review_candidates AS c
+                          ON c.candidate_id = r.candidate_id
+                        WHERE c.run_id = ?
+                        ORDER BY c.ordinal, r.ordinal
+                        """,
+                        (run["run_id"],),
+                    ).fetchall()
+                ]
+                expected_refs = [
+                    (
+                        candidate["candidate_id"],
+                        ref_ordinal,
+                        source_ref["role"],
+                        source_ref["source_id"],
+                        source_ref["relative_path"],
+                        source_ref["title"],
+                        source_ref["content_hash"],
+                    )
+                    for candidate in candidates
+                    for ref_ordinal, source_ref in enumerate(candidate["source_refs"])
+                ]
+                if (
+                    actual_run != expected_run
+                    or actual_candidates != expected_candidates
+                    or actual_refs != expected_refs
+                ):
+                    raise WorkspaceError(
+                        "immutable candidate run id collides with different stored data"
+                    )
+                return str(existing["created_at"])
+
+            db.execute(
+                """
+                INSERT INTO candidate_runs(
+                    run_id, generator_id, generator_version, source_id,
+                    scope_relative_path, snapshot_sha256, max_candidates,
+                    candidate_count, omitted_count, truncated, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run["run_id"],
+                    run["generator_id"],
+                    run["generator_version"],
+                    run["source_id"],
+                    run["scope_relative_path"],
+                    run["snapshot_sha256"],
+                    run["max_candidates"],
+                    run["candidate_count"],
+                    run["omitted_count"],
+                    int(run["truncated"]),
+                    run["created_at"],
+                ),
+            )
+            for candidate in candidates:
+                db.execute(
+                    """
+                    INSERT INTO review_candidates(
+                        candidate_id, run_id, ordinal, kind, title, reason_code,
+                        rationale, uncertainty, proposal_json, authority,
+                        review_state, claims_mastery, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate["candidate_id"],
+                        run["run_id"],
+                        candidate["ordinal"],
+                        candidate["kind"],
+                        candidate["title"],
+                        candidate["reason_code"],
+                        candidate["rationale"],
+                        candidate["uncertainty"],
+                        candidate["proposal_json"],
+                        candidate["authority"],
+                        candidate["review_state"],
+                        int(candidate["claims_mastery"]),
+                        run["created_at"],
+                    ),
+                )
+                for ref_ordinal, source_ref in enumerate(candidate["source_refs"]):
+                    db.execute(
+                        """
+                        INSERT INTO candidate_source_refs(
+                            candidate_id, ordinal, role, source_id,
+                            relative_path, title, content_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            candidate["candidate_id"],
+                            ref_ordinal,
+                            source_ref["role"],
+                            source_ref["source_id"],
+                            source_ref["relative_path"],
+                            source_ref["title"],
+                            source_ref["content_hash"],
+                        ),
+                    )
+        return str(run["created_at"])
+
+    def candidate_records(
+        self,
+        *,
+        source_id: str | None = None,
+        kind: str | None = None,
+        run_id: str | None = None,
+        candidate_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if source_id is not None:
+            clauses.append("r.source_id = ?")
+            parameters.append(source_id)
+        if kind is not None:
+            clauses.append("c.kind = ?")
+            parameters.append(kind)
+        if run_id is not None:
+            clauses.append("c.run_id = ?")
+            parameters.append(run_id)
+        if candidate_id is not None:
+            clauses.append("c.candidate_id = ?")
+            parameters.append(candidate_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT c.candidate_id, c.run_id, c.ordinal, c.kind, c.title,
+                       c.reason_code, c.rationale, c.uncertainty,
+                       c.proposal_json, c.authority, c.review_state,
+                       c.claims_mastery, c.created_at,
+                       r.generator_id, r.generator_version,
+                       r.source_id AS run_source_id,
+                       r.scope_relative_path, r.snapshot_sha256,
+                       r.max_candidates
+                FROM review_candidates AS c
+                JOIN candidate_runs AS r ON r.run_id = c.run_id
+                """
+                + where
+                + " ORDER BY r.created_at DESC, r.run_id, c.ordinal",
+                parameters,
+            ).fetchall()
+            candidate_ids = [row["candidate_id"] for row in rows]
+            refs_by_candidate: dict[str, list[dict[str, Any]]] = {
+                value: [] for value in candidate_ids
+            }
+            if candidate_ids:
+                placeholders = ",".join("?" for _ in candidate_ids)
+                ref_rows = db.execute(
+                    """
+                    SELECT candidate_id, ordinal, role, source_id,
+                           relative_path, title, content_hash
+                    FROM candidate_source_refs
+                    WHERE candidate_id IN ("""
+                    + placeholders
+                    + ") ORDER BY candidate_id, ordinal",
+                    candidate_ids,
+                ).fetchall()
+                for ref_row in ref_rows:
+                    refs_by_candidate[ref_row["candidate_id"]].append(dict(ref_row))
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["source_refs"] = refs_by_candidate[row["candidate_id"]]
+            records.append(record)
+        return records
 
     def _source(self, source_id: str) -> SourceSummary:
         with self._connect() as db:
@@ -1599,6 +1866,14 @@ class WorkspaceService:
                 "workspace database foreign key integrity check failed; "
                 f"{len(foreign_key_errors)} violation(s) found"
             )
+        if ("review_candidates", "table") in expected_objects:
+            malformed_candidate_proposal = db.execute(
+                """SELECT candidate_id FROM review_candidates
+                   WHERE NOT json_valid(proposal_json)
+                   ORDER BY candidate_id LIMIT 1"""
+            ).fetchone()
+            if malformed_candidate_proposal is not None:
+                raise WorkspaceError("stored candidate proposal JSON is malformed")
         quick_check = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
         if quick_check != ["ok"]:
             raise WorkspaceError(

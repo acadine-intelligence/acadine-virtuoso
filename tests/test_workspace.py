@@ -68,9 +68,26 @@ class WorkspaceServiceTests(unittest.TestCase):
                     occurred_at,
                 ),
             )
-            db.execute("DROP TABLE attempt_timings")
-            db.execute("DROP TABLE module_run_receipts")
-            db.execute("DELETE FROM schema_migrations WHERE version = 4")
+            trigger_names = [
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                ).fetchall()
+            ]
+            for trigger_name in trigger_names:
+                db.execute(f'DROP TRIGGER "{trigger_name}"')
+            for table in (
+                "candidate_source_refs",
+                "review_candidates",
+                "candidate_runs",
+                "transfer_check_completions",
+                "transfer_check_predictions",
+                "transfer_checks",
+                "attempt_timings",
+                "module_run_receipts",
+            ):
+                db.execute(f'DROP TABLE "{table}"')
+            db.execute("DELETE FROM schema_migrations WHERE version > 3")
         return service
 
     def test_init_creates_owned_markdown_and_sqlite_boundaries(self) -> None:
@@ -88,7 +105,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (6,))
+            self.assertEqual(migration, (7,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -337,7 +354,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
