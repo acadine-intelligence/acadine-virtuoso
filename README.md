@@ -105,6 +105,8 @@ These three check records are raw capability evidence only. They never update re
 
 The research basis and limits behind active recall, spacing, latency, transfer, and future meta-scheduling are in `docs/10-learning-research.md`.
 
+The CLI contract and integration guidance live in `docs/12-cli-reference.md` (every command, flag, JSON shape and exit code), `docs/13-agent-usage.md` (how agents drive the CLI, including a natural-language to command mapping), and `docs/14-api-consideration.md` (why the CLI is the API for now).
+
 ## Extension boundary
 
 External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, rejects shell and command-wrapper indirection by declared name, resolved executable identity, and script-interpreter ancestry, invokes argv with `shell=False`, sends only declared projections whose supplied fields pass the protocol’s nested type checks, and requires each result kind’s declared fields. Output is captured in bounded temporary files, and the manifest hash is captured when loaded. V0 grants no descendant-process capability: on supported POSIX systems the child starts with a zero process limit and the runner always terminates its process group; module execution fails closed when that OS limit is unavailable. Core code alone decides whether to accept a returned proposal.
