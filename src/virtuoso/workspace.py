@@ -30,7 +30,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 7
+_CURRENT_MIGRATION_VERSION = 8
 
 
 class WorkspaceError(RuntimeError):
@@ -788,7 +788,11 @@ class WorkspaceService:
                 content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
                 PRIMARY KEY(candidate_id, ordinal)
             )""",
+            "ALTER TABLE items ADD COLUMN retired_at TEXT",
         )
+        # Migration 8 adds item lifecycle: a nullable retirement timestamp.
+        # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
+        # databases build identical CREATE TABLE text for validation.
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             objects = {
@@ -847,7 +851,8 @@ class WorkspaceService:
                 4: statements[11:13],
                 5: statements[13:16],
                 6: statements[16:24],
-                7: statements[24:],
+                7: statements[24:27],
+                8: statements[27:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -2727,6 +2732,29 @@ class WorkspaceService:
             content_hash=content_hash,
         )
 
+    def retire_item(self, item_id: str) -> str:
+        """Mark an item retired: excluded from selection and workload.
+
+        The Markdown file and all recorded evidence stay untouched; only
+        lifecycle state in the database changes. Retiring twice is a no-op.
+        """
+        self._validate_owned_paths(require_database=True)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT retired_at FROM items WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkspaceError(f"no learning item with id: {item_id}")
+            if row["retired_at"] is not None:
+                return "already-retired"
+            retired_at = datetime.now(timezone.utc).isoformat()
+            db.execute(
+                "UPDATE items SET retired_at = ? WHERE item_id = ?",
+                (retired_at, item_id),
+            )
+        return "retired"
+
     def load_item(self, item_id: str) -> LearningItem:
         self._validate_owned_paths(require_database=True)
         with self._connect() as db:
@@ -3240,8 +3268,9 @@ class WorkspaceService:
                   ON p.source_event_id = s.source_event_id
                 """
         params: list[object] = [algorithm, learning_context]
+        query += " WHERE i.retired_at IS NULL"
         if focus is not None:
-            query += " WHERE i.focus = ?"
+            query += " AND i.focus = ?"
             params.append(focus)
         query += " ORDER BY i.item_id"
         with self._connect() as db:
@@ -3338,9 +3367,12 @@ class WorkspaceService:
                 """
                 SELECT p.due_at FROM scheduler_proposals AS p
                 JOIN items AS i ON i.item_id = p.item_id
+                WHERE i.retired_at IS NULL
                 """
             ).fetchall()
-            total_items = db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            total_items = db.execute(
+                "SELECT COUNT(*) FROM items WHERE retired_at IS NULL"
+            ).fetchone()[0]
         scheduled_total = 0
         due_now = 0
         for row in rows:

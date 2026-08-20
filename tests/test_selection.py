@@ -148,6 +148,21 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "focus"):
             self.workspace.select_next(self.now, focus="  ")
 
+    def test_retired_item_is_never_selected(self) -> None:
+        self.workspace.retire_item("alpha")
+        selection = self.workspace.select_next(self.now)
+        self.assertEqual(selection.item.item_id, "beta")
+
+    def test_retire_requires_existing_item(self) -> None:
+        with self.assertRaisesRegex(WorkspaceError, "no learning item with id"):
+            self.workspace.retire_item("missing-item")
+
+    def test_retire_is_idempotent(self) -> None:
+        self.workspace.retire_item("alpha")
+        self.workspace.retire_item("alpha")  # must not raise
+        selection = self.workspace.select_next(self.now)
+        self.assertEqual(selection.item.item_id, "beta")
+
 
 if __name__ == "__main__":
     unittest.main()

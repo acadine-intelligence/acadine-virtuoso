@@ -68,6 +68,26 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_runs",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE items RENAME TO items_with_retired")
+            db.execute(
+                """CREATE TABLE items (
+                    item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    focus TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO items(item_id, title, focus, relative_path, "
+                "content_hash, created_at) "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "created_at FROM items_with_retired"
+            )
+            db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DELETE FROM schema_migrations WHERE version > 5")
 
     @staticmethod
@@ -97,7 +117,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
 
         reopened = WorkspaceService.open(self.root)
 
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8])
         with sqlite3.connect(reopened.db_path) as db:
             tables = {
                 row[0]
@@ -229,7 +249,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(after, before)
         self.assertEqual(trigger_count, 8)
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8])
 
     def test_v5_open_rejects_missing_historical_table_before_v6_creation(
         self,
@@ -266,7 +286,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
         self._downgrade_fixture_to_v4(service)
         with sqlite3.connect(service.db_path) as db:
             db.execute(
@@ -300,7 +320,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
         with sqlite3.connect(service.db_path) as db:
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE transfer_check_completions")
@@ -391,7 +411,27 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_runs",
             ):
                 db.execute(f'DROP TABLE "{table}"')
-            db.execute("DELETE FROM schema_migrations WHERE version = 7")
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE items RENAME TO items_with_retired")
+            db.execute(
+                """CREATE TABLE items (
+                    item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    focus TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO items(item_id, title, focus, relative_path, "
+                "content_hash, created_at) "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "created_at FROM items_with_retired"
+            )
+            db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
+            db.execute("DELETE FROM schema_migrations WHERE version >= 8")
             db.execute("DROP TABLE transfer_check_completions")
 
         with self.assertRaisesRegex(
@@ -405,7 +445,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                    WHERE type = 'table' AND name = 'transfer_check_completions'"""
             ).fetchone()
         self.assertIsNone(completion)
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7])
 
     def test_open_rejects_altered_append_only_trigger_definition(self) -> None:
         service, _event = self._workspace_with_transfer()
@@ -430,7 +470,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                    WHERE type = 'trigger' AND name = 'transfer_checks_reject_delete'"""
             ).fetchone()[0]
         self.assertIn("altered trigger", sql)
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
 
 
 class DelayedTransferCheckCreationTests(unittest.TestCase):
