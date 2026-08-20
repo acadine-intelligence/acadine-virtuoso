@@ -25,8 +25,8 @@
     "current_workaround": "Use Obsidian notes, a small path-bound SM-2-lite script, manually chosen exercises, project work, and separate reflections; due dates, response latency, assistance, transfer evidence, and project relevance are not joined into one inspectable loop.",
     "evidence": [
       "Jonathan's 2026-08-19 voice and chat discussion explicitly asked for a mental-gym CLI built around active recall, testing effect, recall latency, project application, modularity, and optional direction-led learning.",
-      "The local Core vault already contains five Virtuoso pilot items plus learner-state and evidence-ledger structures under 07-learning/virtuoso.",
-      "The existing local script at projects/hermes-tools/virtuoso/virtuoso.py schedules Markdown items but does not run the active-recall journey, isolate workspaces, or provide a product extension contract."
+      "Private dogfood material already includes pilot items plus learner-state and evidence-ledger structures; none of that private content is shipped in this repository.",
+      "A prior local scheduling script established the basic Markdown due-queue workflow but did not run the active-recall journey, isolate workspaces, or provide a product extension contract."
     ],
     "frequency": "Daily or several times per week whenever a learner begins focused study or encounters a transferable concept in project work.",
     "consequence": "Passive familiarity is mistaken for retrieval, recall remains slow, practice drifts away from active work, and evidence about what the learner did independently is lost or conflated with agent assistance.",
@@ -36,11 +36,15 @@
   },
   "research": {
     "sources": [
-      "Direct Jonathan voice/chat source preserved at vaults/acadine-core/14-tasks/00-active/virtuoso_chat_transcript_2026-08-19.md and synthesized in the Core Virtuoso PRD discovery note.",
-      "Existing deployed reference at projects/hermes-tools/virtuoso/virtuoso.py and vaults/acadine-core/07-learning/virtuoso, inspected 2026-08-19.",
+      "Private 2026-08-19 product-discovery discussion and its internal PRD synthesis; private source material is not included in this repository.",
+      "A private deployed scheduling reference and pilot learning workspace, inspected 2026-08-19; paths and learner content are intentionally omitted.",
       "Open Spaced Repetition py-fsrs official repository and PyPI package, FSRS 6.3.2, retrieved 2026-08-19: https://github.com/open-spaced-repetition/py-fsrs and https://pypi.org/project/fsrs/.",
       "Anki official FAQ describing SM-2 and FSRS scheduler choices, retrieved 2026-08-19: https://faqs.ankiweb.net/what-spaced-repetition-algorithm.",
-      "Local learning-system notes and the Acadine Core PRD/design plan referenced by .project-meta.json."
+      "Yang et al. (2021) classroom testing meta-analysis: https://doi.org/10.1037/bul0000309.",
+      "Adesope et al. (2017) practice-testing meta-analysis: https://doi.org/10.3102/0034654316689306.",
+      "Cepeda et al. (2006, 2008) distributed-practice synthesis and retention-interval study: https://doi.org/10.1037/0033-2909.132.3.354 and https://doi.org/10.1111/j.1467-9280.2008.02209.x.",
+      "Tabibian et al. (2019) adaptive spaced-repetition optimization: https://doi.org/10.1073/pnas.1815156116.",
+      "Private learning-system notes and the internal PRD/design plan; neither is shipped as product authority."
     ],
     "alternatives": [
       "Anki or Obsidian flashcards: mature atomic recall scheduling, but weak linkage to current projects, assistance attribution, practical bundles, and local agent workflows.",
@@ -61,7 +65,7 @@
       "Python 3.11 project-local virtual environment; never use the Hermes runtime environment.",
       "Use an established FSRS implementation rather than recreating its algorithm.",
       "No Obsidian plugin dependency and no mutation of another tool's native scheduler state.",
-      "External modules receive only declared inputs, run as argv without a shell, and cannot directly write core state.",
+      "External modules receive only declared inputs, run as explicitly approved trusted local executables with shell disabled, and return proposals that only core code may persist; they are not OS-sandboxed.",
       "Scheduled processing may propose focus but learner confirmation owns commitments."
     ]
   },
@@ -71,8 +75,12 @@
       "Given a manually authored recall item, when the learner starts practice, then the prompt appears before answer or feedback, elapsed recall time is captured by the program, and the answer is revealed only after an explicit attempt.",
       "Given a failed or partial attempt, when the learner requests support, then Virtuoso follows retry unaided, optional hint, worked feedback, and smaller follow-up challenge while recording exactly which support was used.",
       "Given a completed attempt, when it is recorded, then correctness, latency, confidence, context, open-notes state, and help attribution are appended to SQLite evidence without claiming competence, and the scheduler proposal records algorithm, version, configuration, and learning context.",
-      "Given a declared external module, when Virtuoso loads it, then incompatible schema versions, undeclared capabilities, shell commands, malformed output, and direct state-write requests fail closed while a valid JSON command module can return a typed proposal.",
+      "Given a declared trusted local executable, when Virtuoso loads and explicitly invokes it, then unknown fields or schema versions, undeclared capabilities, shell commands, missing consent, malformed or oversized output, timeout, and private-state projections fail closed while a valid typed proposal is hash-bound to the manifest bytes loaded before execution.",
       "Given the same fixture workspace, intent, and clock, when selection runs twice, then it returns the same ranked action and explanation; missing inputs produce explicit uncertainty rather than invented readiness.",
+      "Given an explicit Markdown or Obsidian source root, when the learner connects and scans it, then Virtuoso stores only bounded note metadata, hashes, and wikilinks, never writes to the source, never copies note bodies into SQLite, and rejects Markdown symlinks.",
+      "Given a learning item linked to an indexed note hash, when that note changes or disappears, then doctor reports the stale provenance link without deleting the learning item or source prose.",
+      "Given a real project application, when the learner records it, then Virtuoso appends an event bound to the exact item hash with outcome, independence, artifact reference, reflection, and a delayed-check date while explicitly refusing to claim mastery.",
+      "Given an existing project-transfer event, when the learner authors a changed or novel delayed check, records a prediction before the due challenge, and completes it, then Virtuoso immutably appends the event, check, prediction, and completion with causal UTC timestamps: check creation cannot precede its source event, prediction cannot precede either due time or check creation, and completion cannot precede check creation or prediction. Late check creation is allowed but cannot be backdated; the independent attempt, assistance, fixed scorer and acceptance evidence, teach-back, outcome, artifact reference, and claims_mastery false remain separate from memory scheduling and project selection.",
       "Given no Hermes or Obsidian installation, when the learner completes the hero workflow, then the core journey still works; optional adapters cannot become required dependencies."
     ]
   },
@@ -96,7 +104,7 @@
   },
   "architecture": {
     "system_context": "A standalone Python CLI and importable domain library operate on a learner-selected local workspace. Markdown stores authored focus items, prompts, hints, answers, reflections, and optional direction prose. SQLite stores append-only attempts, scheduler states, derived proposals, module receipts, XP events, and sync history. Optional Obsidian, Hermes, project, and external-resource adapters project context through typed read contracts; they do not own the core or mutate commitments.",
-    "data_model": "Workspace contains authored LearningItems and Connections. LearningItem references Focus and Concept nodes and can produce PracticeChallenges. Attempt records prompt version, timestamps, latency, response, result, confidence, notes state, and SupportUsed. SchedulerProposal records item, algorithm, version, configuration, learning context, inputs, due proposal, and reason; algorithm-specific SchedulerState is isolated by scheduler id. EvidenceEvent is append-only and derives CapabilityView without erasing history. ModuleManifest declares category, protocol version, command argv, capabilities, read projections, and output schema. FocusProposal remains uncommitted until a LearnerDecision accepts, changes, or rejects it.",
+    "data_model": "Workspace contains authored LearningItems and Connections. LearningItem references Focus and Concept nodes and can produce PracticeChallenges. Attempt records prompt version, timestamps, latency, response, result, confidence, notes state, and SupportUsed. SchedulerProposal records item, algorithm, version, configuration, learning context, inputs, due proposal, and reason; algorithm-specific SchedulerState is isolated by scheduler id. EvidenceEvent is append-only and derives CapabilityView without erasing history. TransferEvidence records an exact item hash, project, use case, outcome, independence, optional artifact reference and reflection, and a delayed-check date while permanently refusing a mastery claim. DelayedTransferCheck immutably inherits one source event date and stores a changed/novel challenge, criteria, and scorer; TransferCheckPrediction and TransferCheckCompletion append prediction-before-attempt, independent attempt, assistance, scorer-bound acceptance evidence, teach-back, outcome, artifact reference, and timestamps while fixing claims_mastery false. Transfer events, checks, predictions, and completions reject update or deletion. Their UTC timestamps enforce source event <= check creation <= completion and max(due time, check creation) <= prediction <= completion; a check may be created late but cannot be backdated. The delayed-check queue is capability evidence, not SchedulerState or project priority. Source records an explicit read-only Markdown/Obsidian root; SourceDocument stores only relative path, title, hash, wikilinks, modification time, and byte size; ItemSourceLink binds a learner-authored item to the exact source hash and remains visible when the note drifts. ModuleManifest declares category, protocol version, command argv, capabilities, read projections, and output schema. FocusProposal remains uncommitted until a LearnerDecision accepts, changes, or rejects it.",
     "api_contract": "Core Python ports are Repository, EvidenceLedger, Scheduler, Selector, PracticeFormat, and ModuleRunner. Third-party v0 extensions are out-of-process command modules declared by virtuoso.module.json using protocol virtuoso/module@0.1. Virtuoso sends one bounded JSON request on stdin and accepts one typed JSON response on stdout, invokes argv directly with shell disabled and a timeout, and persists only validated core-owned events. Initial module categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are out of scope until the external contract survives dogfooding.",
     "hermes_integration": {
       "mode": "hybrid",
@@ -113,7 +121,23 @@
     "privacy": "Local-first and offline for the core workflow. Runtime databases, personal Markdown, logs, model inputs, and evidence are ignored by Git. The repository contains synthetic fixtures only. Adapters are opt-in and path-scoped; no credentials enter workspace state. Export, remote sync, publication, messaging, project mutation, and cloud processing require explicit user action."
   },
   "verification": {
-    "commands": [],
+    "commands": [
+      {
+        "name": "compile",
+        "argv": [".venv/bin/python", "-m", "compileall", "-q", "src", "tests"],
+        "required": true
+      },
+      {
+        "name": "unit-and-journey-tests",
+        "argv": [".venv/bin/python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "required": true
+      },
+      {
+        "name": "installed-cli-smoke",
+        "argv": [".venv/bin/virtuoso", "--help"],
+        "required": true
+      }
+    ],
     "independent_review": {
       "required": true,
       "policy": "A reviewer who did not implement the change must inspect the exact Git commit and report security, privacy, logic, learning-evidence attribution, extension-boundary, and contract findings"
@@ -130,9 +154,9 @@
     }
   },
   "operations": {
-    "install": "Planned v0: python3.11 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'.",
-    "run": "Planned v0: .venv/bin/virtuoso --workspace PATH <command>.",
-    "health": "Planned v0: .venv/bin/virtuoso --workspace PATH doctor checks schema, database, Markdown ownership, module manifests, permissions, and dependency versions without changing learning state.",
+    "install": "python3.11 -m venv .venv && .venv/bin/python -m pip install -e .",
+    "run": ".venv/bin/virtuoso --workspace PATH <command>",
+    "health": ".venv/bin/virtuoso --workspace PATH doctor --json checks the workspace schema, SQLite integrity, item hashes, and evidence counts without changing learning state.",
     "rollback": "Use versioned Git commits and package releases; back up the local SQLite file before migrations and retain append-only event export so derived state can be rebuilt.",
     "support_owner": "Jonathan / Acadine",
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
@@ -144,9 +168,9 @@
       "evidence": ""
     },
     "known_limitations": [
-      "Architecture baseline only until implementation and exact-commit review are recorded.",
-      "Simple mode and manually authored recall items are the first slice; direction-led planning, project transfer workflows, two-way Obsidian synchronization, scheduled proposals, XP, and meta-scheduler optimization follow through dogfood evidence.",
-      "No Git remote or public repository has been created or pushed."
+      "The simple-mode active-recall slice, read-only Markdown/Obsidian source index, and attributed project-transfer event capture are implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
+      "Connected sources currently provide path-scoped metadata, wikilinks, hash provenance, and stale-link detection. Delayed transfer checks are manually authored; late creation is allowed without backdating, and prediction begins only at or after both the inherited date and creation time. They append immutable prediction and attributable completion evidence; they do not execute scorers, dereference artifacts, retry/supersede checks, update FSRS, rank projects, or derive capability/mastery. Search, explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization follow through dogfood evidence.",
+      "The initial GitHub repository is private; public release, packaging, and distribution remain pending."
     ]
   },
   "adoption": {

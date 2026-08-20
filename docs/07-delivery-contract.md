@@ -1,4 +1,4 @@
-# Delivery contract: first active-recall slice
+# Delivery contract: active recall, source index, and project-transfer checks
 
 ## Observable outcomes
 
@@ -7,12 +7,21 @@ This iteration is complete only when all of the following work from a clean loca
 1. Python 3.11 bootstrap installs the pinned project and FSRS dependency into `.venv`.
 2. `virtuoso --workspace PATH init` creates one isolated workspace with configuration, Markdown items directory, and migrated SQLite state.
 3. `virtuoso --workspace PATH add ...` creates a valid manually authored recall item without exposing private fixture data.
-4. `virtuoso --workspace PATH practice --item ID` shows the prompt before the answer, measures initial recall with a monotonic clock, supports retry then hint then worked answer, and records the result, confidence, notes state, response text, and support sequence.
+4. `virtuoso --workspace PATH practice --item ID` shows the prompt before the answer, measures initial recall with a monotonic clock, supports retry then hint then worked answer, times a failed/partial follow-up response, and records actual attempt start/completion times, result, confidence, notes state, response text, answer reveal, and support attribution.
 5. The completed attempt appends immutable evidence and an FSRS next-review proposal that names algorithm `fsrs`, installed version, configuration, learning context, source event, and due time.
 6. `virtuoso --workspace PATH attempts --json` returns the recorded attempt and proposal without claiming mastery.
-7. The extension boundary validates and invokes one synthetic external command module through `virtuoso/module@0.1`, while tests prove unknown schema, shell command, malformed output, timeout, and direct-write capability fail closed.
+7. The extension boundary validates and invokes one explicitly approved trusted local executable through `virtuoso/module@0.1`, while tests prove unknown fields/schema, missing consent, shell or command-wrapper indirection, malformed or incomplete typed output, timeout, oversized output, nested private-state projections, descendant spawning, and manifest identity drift fail closed. Descendant spawning is denied with a POSIX process limit and execution fails closed when that control is unavailable. The trusted executable still has the invoking user’s file permissions, so this boundary is not an OS sandbox.
 8. `virtuoso --workspace PATH doctor --json` reports a healthy workspace after the journey and reports actionable errors for missing or damaged state.
-9. The full unit/integration suite, compile check, Build OS verification, representative CLI journey, exact-commit independent review, and clean-worktree check pass.
+9. `virtuoso --workspace PATH source add ...` connects an existing Markdown folder or Obsidian vault as an explicit read-only source without making Obsidian or Hermes a runtime dependency.
+10. `source scan` indexes only bounded note metadata, hashes, and wikilinks; it never writes to source files or copies note bodies into SQLite, and symlink escapes fail closed.
+11. `source link` binds a manually authored learning item to the exact indexed source-note hash, while `doctor` reports a linked note that changed or disappeared.
+12. `transfer record` appends one project-application event bound to the exact learning-item hash with outcome, independence, artifact reference, reflection, and a seven-day delayed-check date; it cannot claim mastery.
+13. `transfer list` returns project evidence without merging it into recall attempts, scheduler state, XP, or capability claims.
+14. `transfer check create` links one immutable, manually authored changed/novel challenge, acceptance criteria, and scorer to an existing transfer event and inherits its validated due date. Check creation cannot precede the source event. A check may be created after its due date, but its UTC creation timestamp cannot be backdated.
+15. `transfer check due` lists pending and started incomplete checks chronologically without writing state or becoming a scheduler/project-priority recommendation.
+16. `transfer check begin` appends one prediction at or after both the inherited due time and check creation time, before the learner attempts the changed challenge or requests help.
+17. `transfer check complete` appends one independent attempt no earlier than both check creation and its required prediction, with assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, optional inert artifact reference, timestamps, and `claims_mastery: false`; it cannot update scheduler, project selection, or capability state.
+18. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
 
 ## Automated verification
 
@@ -23,6 +32,7 @@ The implementation must declare and execute:
 - Build/install smoke check in the project-local virtual environment.
 - Deterministic synthetic CLI journey.
 - Module-boundary security tests.
+- Project-transfer attribution and stale-item tests.
 - Build OS `verify` against the exact commit.
 
 The CLI has no visual surface, network service, browser console, or responsive layout in this slice. Accessibility is verified through keyboard-only prompts, no color dependency, stable plain text, and JSON output tests.

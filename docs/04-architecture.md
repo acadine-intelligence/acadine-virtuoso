@@ -20,7 +20,7 @@ optional read projections: Obsidian vault, Hermes context, project systems
 ## Package boundaries
 
 - `domain`: immutable values, evidence semantics, scheduler and module contracts. No filesystem or SQLite imports.
-- `application`: initialize, add item, select, practise, record attempt, inspect evidence.
+- `application`: initialize, add item, select, practise, record recall and project-transfer events, and append delayed transfer-check predictions/completions.
 - `infrastructure`: Markdown, SQLite, FSRS serialization, clock, external process runner.
 - `cli`: argument parsing, prompts, JSON output, exit codes.
 
@@ -28,11 +28,13 @@ optional read projections: Obsidian vault, Hermes context, project systems
 
 Markdown owns item prose. SQLite owns derived and append-only state. Every item version is content-hashed. A future sync adapter compares owned fields and hashes; it never applies generic last-write-wins. Conflicting learner-authored edits become explicit conflict records.
 
-SQLite migrations run in transactions. Before any destructive migration, Virtuoso creates a SQLite backup. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
+Recall attempts, project-transfer events, and delayed transfer checks stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. One manually authored delayed check may inherit that date and append a pre-attempt prediction followed by an immutable completion containing the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional inert artifact reference. The event, check, prediction, and completion rows reject direct update or deletion and fix `claims_mastery` to false. Their UTC chronology is causal: check creation cannot precede its source event; late check creation is allowed but cannot be backdated; prediction cannot precede either the inherited due time or check creation; and completion cannot precede check creation or prediction. The check queue is chronological capability evidence only: it never reads or writes recall attempts, scheduler state/proposals, or project selection/priority. Capability views may later interpret repeated evidence, but cannot rewrite these source records.
+
+SQLite migrations run in transactions and fail closed. The current migrations are additive or reconstruct constrained tables without inventing evidence; automatic backup and restore are not implemented. Operators must make a consistent local backup before a future destructive migration. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
 
 ## Scheduler portfolio
 
-Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Later schedulers may serve computational exercises, explanation, writing, and transfer checks without overwriting FSRS state.
+Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary, not a memory schedule. Later schedulers may serve computational exercises, explanation, and writing without overwriting FSRS state.
 
 The future meta-scheduler compares outcomes within comparable contexts and chooses only among learner-approved policies. It does not invent intervals or infer competence.
 
@@ -46,7 +48,7 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one JSON object on stdout. It uses `shell=False`, a bounded working directory, sanitized environment, output-size cap, and timeout. It validates the response before the application layer can persist an event. Modules never receive a database handle and never write core state directly.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables, not an OS sandbox: they run with the invoking user’s permissions and require explicit consent. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 

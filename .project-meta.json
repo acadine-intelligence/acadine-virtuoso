@@ -1,12 +1,13 @@
 {
   "slug": "acadine-virtuoso",
   "name": "Acadine Virtuoso",
-  "canonical_root": "/Users/acadine-incognito/projects/acadine-virtuoso",
+  "canonical_root": ".",
   "paths": {
-    "app": "/Users/acadine-incognito/projects/acadine-virtuoso",
-    "docs": "/Users/acadine-incognito/projects/acadine-virtuoso/docs"
+    "app": ".",
+    "docs": "docs"
   },
   "kanban_epic": null,
+  "hermes_project": "acadine-virtuoso",
   "vault_note": null,
   "session_protocol": "Read product.json, then run Build OS check before implementation."
 }

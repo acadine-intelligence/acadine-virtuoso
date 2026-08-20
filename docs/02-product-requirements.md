@@ -24,7 +24,7 @@ When a learner begins focused practice, Virtuoso presents one relevant prompt be
 - XP and completion cannot promote capability state.
 - Retrieval can establish retrieved evidence at most; project transfer requires a separate evidence event.
 - Project opportunities remain proposals until the learner accepts them.
-- No module receives the database path or arbitrary workspace access.
+- Virtuoso sends modules no database path or arbitrary workspace projection. Modules remain explicitly approved trusted local executables, not OS-sandboxed processes, and may independently access files allowed to the invoking user.
 - No personal learning data is committed to this repository.
 - Missing or stale inputs are reported as uncertainty.
 
