@@ -2,7 +2,7 @@
 
 Virtuoso is a local-first CLI mental gym. It presents a prompt before feedback, times active recall, records what help was used, and asks FSRS 6.3.2 for an attributable next-review proposal. Markdown remains human-owned; SQLite holds derived evidence and scheduler state.
 
-The current slices cover simple-mode active recall, a read-only Markdown/Obsidian source index, and attributed project-transfer evidence. Hermes and Obsidian remain optional, and the core CLI works without either. A connected source stores only its path-scoped note metadata, hashes, and wikilinks in SQLite; source prose stays in its owning vault. Direction-led pathways, generated exercises, two-way synchronization, XP, and meta-scheduling remain later modules.
+The current slices cover simple-mode active recall, a read-only Markdown/Obsidian source index, attributed project-transfer events, and manually authored delayed capability checks with pre-attempt predictions and append-only completion evidence. Hermes and Obsidian remain optional, and the core CLI works without either. A connected source stores only its path-scoped note metadata, hashes, and wikilinks in SQLite; source prose stays in its owning vault. Direction-led pathways, generated exercises, two-way synchronization, XP, automated scoring, and meta-scheduling remain later modules.
 
 ## Install
 
@@ -65,6 +65,43 @@ Scanning never writes to the source. It indexes relative paths, titles, content 
 ```
 
 Transfer events are append-only and bound to the exact learning-item hash. Outcome, independence, artifact reference, and reflection remain separate. Each event proposes a seven-day delayed check and explicitly records that it does not claim mastery.
+
+Create a check only after authoring the changed or novel context, challenge, acceptance criteria, and scorer. The due command is a chronological capability-evidence queue, not a scheduler or project-priority recommendation:
+
+```bash
+EVENT=transfer-00000000000000000000000000000000 # use an id from transfer list
+.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check create \
+  --event "$EVENT" \
+  --context-kind changed \
+  --context "The same distinction in a changed research policy." \
+  --prompt "Classify two artifacts and propose one falsifiable refresh rule." \
+  --acceptance-criteria "Classify both artifacts and state one testable cadence rule." \
+  --scorer-kind human \
+  --scorer-reference reviewer-jonathan \
+  --json
+.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check due --json
+```
+
+**Before attempting the challenge or requesting help**, record the prediction. Then complete the changed task and append the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional opaque artifact reference:
+
+```bash
+CHECK=transfer-check-00000000000000000000000000000000 # use an id from check create/due
+.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check begin \
+  --check "$CHECK" \
+  --prediction "I expect the distinction to transfer, but cadence selection may be weak." \
+  --json
+.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check complete \
+  --check "$CHECK" \
+  --attempt "My independent classification and cadence rule." \
+  --assistance none \
+  --acceptance-evidence "The configured criteria were met." \
+  --teach-back "Retrievability stayed separate from project urgency." \
+  --outcome successful \
+  --artifact git:abc123 \
+  --json
+```
+
+These three check records are raw capability evidence only. They never update recall attempts, FSRS/scheduler state, project selection or priority, or a capability/mastery label. References remain inert strings and are not opened, fetched, executed, or resolved.
 
 The research basis and limits behind active recall, spacing, latency, transfer, and future meta-scheduling are in `docs/10-learning-research.md`.
 

@@ -21,9 +21,14 @@ _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SOURCE_KINDS = {"markdown", "obsidian"}
 _TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
 _TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
+_TRANSFER_EVENT_ID = re.compile(r"^transfer-[0-9a-f]{32}$")
+_TRANSFER_CHECK_ID = re.compile(r"^transfer-check-[0-9a-f]{32}$")
+_TRANSFER_CONTEXT_KINDS = {"changed", "novel"}
+_TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
+_TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 4
+_CURRENT_MIGRATION_VERSION = 5
 
 
 class WorkspaceError(RuntimeError):
@@ -104,6 +109,69 @@ class TransferEvidence:
     reflection: str | None
     occurred_at: str
     delayed_check_due_at: str
+    claims_mastery: bool = False
+
+
+@dataclass(frozen=True)
+class DelayedTransferCheck:
+    check_id: str
+    transfer_event_id: str
+    context_kind: str
+    context_description: str
+    challenge_prompt: str
+    acceptance_criteria: str
+    scorer_kind: str
+    scorer_reference: str
+    due_at: str
+    created_at: str
+    claims_mastery: bool = False
+
+
+@dataclass(frozen=True)
+class DueTransferCheck:
+    check_id: str
+    status: str
+    transfer_event_id: str
+    item_id: str
+    item_content_hash: str
+    project_id: str
+    source_outcome: str
+    source_independence: str
+    context_kind: str
+    context_description: str
+    challenge_prompt: str
+    acceptance_criteria: str
+    scorer_kind: str
+    scorer_reference: str
+    due_at: str
+    created_at: str
+    prediction_recorded_at: str | None
+    claims_mastery: bool = False
+
+
+@dataclass(frozen=True)
+class TransferCheckPrediction:
+    check_id: str
+    pre_attempt_prediction: str
+    recorded_at: str
+    claims_mastery: bool = False
+
+
+@dataclass(frozen=True)
+class TransferCheckCompletion:
+    check_id: str
+    independent_attempt: str
+    assistance_level: str
+    assistance_detail: str | None
+    acceptance_evidence: str
+    acceptance_criteria: str
+    scorer_kind: str
+    scorer_reference: str
+    teach_back: str
+    outcome: str
+    artifact_reference: str | None
+    prediction_recorded_at: str
+    completed_at: str
     claims_mastery: bool = False
 
 
@@ -474,6 +542,74 @@ class WorkspaceService:
                     OR (status = 'failed' AND error IS NOT NULL)
                 )
             )""",
+            """CREATE TABLE IF NOT EXISTS transfer_checks (
+                check_id TEXT PRIMARY KEY,
+                transfer_event_id TEXT NOT NULL UNIQUE
+                    REFERENCES transfer_events(event_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                context_kind TEXT NOT NULL
+                    CHECK(context_kind IN ('changed', 'novel')),
+                context_description TEXT NOT NULL
+                    CHECK(length(context_description) BETWEEN 1 AND 10000),
+                challenge_prompt TEXT NOT NULL
+                    CHECK(length(challenge_prompt) BETWEEN 1 AND 20000),
+                acceptance_criteria TEXT NOT NULL
+                    CHECK(length(acceptance_criteria) BETWEEN 1 AND 20000),
+                scorer_kind TEXT NOT NULL
+                    CHECK(scorer_kind IN ('self', 'human', 'tool', 'agent')),
+                scorer_reference TEXT NOT NULL
+                    CHECK(length(scorer_reference) BETWEEN 1 AND 2048),
+                due_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                claims_mastery INTEGER NOT NULL DEFAULT 0
+                    CHECK(claims_mastery = 0)
+            )""",
+            """CREATE TABLE IF NOT EXISTS transfer_check_predictions (
+                check_id TEXT PRIMARY KEY
+                    REFERENCES transfer_checks(check_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                pre_attempt_prediction TEXT NOT NULL
+                    CHECK(length(pre_attempt_prediction) BETWEEN 1 AND 10000),
+                recorded_at TEXT NOT NULL,
+                claims_mastery INTEGER NOT NULL DEFAULT 0
+                    CHECK(claims_mastery = 0)
+            )""",
+            """CREATE TABLE IF NOT EXISTS transfer_check_completions (
+                check_id TEXT PRIMARY KEY
+                    REFERENCES transfer_check_predictions(check_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                independent_attempt TEXT NOT NULL
+                    CHECK(length(independent_attempt) BETWEEN 1 AND 50000),
+                assistance_level TEXT NOT NULL
+                    CHECK(assistance_level IN ('none', 'light', 'substantial', 'unknown')),
+                assistance_detail TEXT,
+                acceptance_evidence TEXT NOT NULL
+                    CHECK(length(acceptance_evidence) BETWEEN 1 AND 20000),
+                teach_back TEXT NOT NULL
+                    CHECK(length(teach_back) BETWEEN 1 AND 20000),
+                outcome TEXT NOT NULL
+                    CHECK(outcome IN ('successful', 'partial', 'unsuccessful')),
+                artifact_reference TEXT
+                    CHECK(
+                        artifact_reference IS NULL
+                        OR length(artifact_reference) BETWEEN 1 AND 2048
+                    ),
+                completed_at TEXT NOT NULL,
+                claims_mastery INTEGER NOT NULL DEFAULT 0
+                    CHECK(claims_mastery = 0),
+                CHECK(
+                    (assistance_level = 'none' AND assistance_detail IS NULL)
+                    OR
+                    (
+                        assistance_level <> 'none'
+                        AND assistance_detail IS NOT NULL
+                        AND length(assistance_detail) BETWEEN 1 AND 10000
+                    )
+                )
+            )""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -526,8 +662,17 @@ class WorkspaceService:
             else:
                 latest = 0
 
-            for statement in statements:
+            prior_statements = statements[:-3]
+            transfer_check_statements = statements[-3:]
+            for statement in prior_statements:
                 db.execute(statement)
+            if latest < 5:
+                for statement in transfer_check_statements:
+                    db.execute(
+                        statement.replace(
+                            "CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1
+                        )
+                    )
             if latest < 4:
                 db.execute(
                     """INSERT OR IGNORE INTO attempt_timings(
@@ -848,6 +993,99 @@ class WorkspaceService:
         return tuple(sorted(links, key=str.casefold))
 
     @staticmethod
+    def _normalize_transfer_text(
+        value: Any,
+        *,
+        field: str,
+        max_length: int,
+        single_line: bool = False,
+    ) -> str:
+        if not isinstance(value, str):
+            raise WorkspaceError(f"{field} must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise WorkspaceError(f"{field} must not be empty")
+        if any(
+            (ord(character) < 32 and character not in {"\n", "\t"})
+            or ord(character) == 127
+            for character in normalized
+        ):
+            raise WorkspaceError(f"{field} contains unsupported control characters")
+        if single_line and "\n" in normalized:
+            raise WorkspaceError(f"{field} must be single-line")
+        if len(normalized) > max_length:
+            raise WorkspaceError(f"{field} exceeds {max_length} characters")
+        return normalized
+
+    @staticmethod
+    def _serialize_utc_timestamp(value: datetime, *, field: str) -> str:
+        if not isinstance(value, datetime):
+            raise WorkspaceError(f"{field} must be a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise WorkspaceError(f"{field} must include a timezone")
+        return value.astimezone(timezone.utc).isoformat()
+
+    @classmethod
+    def _parse_stored_timestamp(cls, value: Any, *, field: str) -> datetime:
+        if not isinstance(value, str):
+            raise WorkspaceError(f"stored {field} must be a timezone-aware timestamp")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise WorkspaceError(
+                f"stored {field} must be a valid timezone-aware timestamp"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise WorkspaceError(f"stored {field} must include a timezone")
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _stored_transfer_text(
+        cls,
+        value: Any,
+        *,
+        field: str,
+        max_length: int,
+        single_line: bool = False,
+    ) -> str:
+        normalized = cls._normalize_transfer_text(
+            value,
+            field=f"stored {field}",
+            max_length=max_length,
+            single_line=single_line,
+        )
+        if normalized != value:
+            raise WorkspaceError(f"stored {field} is not normalized")
+        return normalized
+
+    @classmethod
+    def _validated_transfer_check_timestamps(
+        cls, row: sqlite3.Row
+    ) -> tuple[datetime, datetime]:
+        occurred_at = cls._parse_stored_timestamp(
+            row["source_occurred_at"], field="transfer event occurred_at"
+        )
+        source_due_at = cls._parse_stored_timestamp(
+            row["source_due_at"], field="transfer event delayed_check_due_at"
+        )
+        check_due_at = cls._parse_stored_timestamp(
+            row["check_due_at"], field="delayed transfer check due_at"
+        )
+        created_at = cls._parse_stored_timestamp(
+            row["check_created_at"], field="delayed transfer check created_at"
+        )
+        if source_due_at <= occurred_at:
+            raise WorkspaceError(
+                "stored transfer event delayed_check_due_at must be later than occurred_at"
+            )
+        if check_due_at != source_due_at:
+            raise WorkspaceError(
+                "workspace database corruption: delayed transfer check due_at "
+                "does not match source transfer event"
+            )
+        return check_due_at, created_at
+
+    @staticmethod
     def _normalized_schema_sql(value: str | None) -> str:
         return re.sub(r"\s+", "", value or "").rstrip(";").lower()
 
@@ -1014,6 +1252,573 @@ class WorkspaceService:
             raise WorkspaceError(
                 "workspace database integrity check failed: " + "; ".join(quick_check)
             )
+
+    def create_transfer_check(
+        self,
+        *,
+        transfer_event_id: str,
+        context_kind: str,
+        context_description: str,
+        challenge_prompt: str,
+        acceptance_criteria: str,
+        scorer_kind: str,
+        scorer_reference: str,
+        now: datetime | None = None,
+    ) -> DelayedTransferCheck:
+        if not isinstance(transfer_event_id, str) or not _TRANSFER_EVENT_ID.fullmatch(
+            transfer_event_id
+        ):
+            raise WorkspaceError(
+                "transfer event id must match transfer-<32 lowercase hex>"
+            )
+        if context_kind not in _TRANSFER_CONTEXT_KINDS:
+            raise WorkspaceError("context kind must be changed or novel")
+        if scorer_kind not in _TRANSFER_SCORER_KINDS:
+            raise WorkspaceError("scorer kind must be self, human, tool, or agent")
+        context = self._normalize_transfer_text(
+            context_description,
+            field="context description",
+            max_length=10_000,
+        )
+        prompt = self._normalize_transfer_text(
+            challenge_prompt,
+            field="challenge prompt",
+            max_length=20_000,
+        )
+        criteria = self._normalize_transfer_text(
+            acceptance_criteria,
+            field="acceptance criteria",
+            max_length=20_000,
+        )
+        scorer = self._normalize_transfer_text(
+            scorer_reference,
+            field="scorer reference",
+            max_length=2_048,
+            single_line=True,
+        )
+        created_at = self._serialize_utc_timestamp(
+            now if now is not None else datetime.now(timezone.utc),
+            field="transfer check creation timestamp",
+        )
+        check_id = f"transfer-check-{uuid.uuid4().hex}"
+        due_at = ""
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                source = db.execute(
+                    """SELECT occurred_at, delayed_check_due_at
+                       FROM transfer_events WHERE event_id = ?""",
+                    (transfer_event_id,),
+                ).fetchone()
+                if source is None:
+                    raise WorkspaceError(
+                        f"no transfer event with id: {transfer_event_id}"
+                    )
+                occurred = self._parse_stored_timestamp(
+                    source["occurred_at"], field="transfer event occurred_at"
+                )
+                due = self._parse_stored_timestamp(
+                    source["delayed_check_due_at"],
+                    field="transfer event delayed_check_due_at",
+                )
+                if due <= occurred:
+                    raise WorkspaceError(
+                        "stored transfer event delayed_check_due_at must be later than occurred_at"
+                    )
+                due_at = self._serialize_utc_timestamp(
+                    due, field="transfer check due timestamp"
+                )
+                existing = db.execute(
+                    "SELECT check_id FROM transfer_checks WHERE transfer_event_id = ?",
+                    (transfer_event_id,),
+                ).fetchone()
+                if existing is not None:
+                    raise WorkspaceError(
+                        "delayed transfer check already exists for transfer event: "
+                        f"{transfer_event_id}"
+                    )
+                db.execute(
+                    """INSERT INTO transfer_checks(
+                           check_id, transfer_event_id, context_kind,
+                           context_description, challenge_prompt, acceptance_criteria,
+                           scorer_kind, scorer_reference, due_at, created_at,
+                           claims_mastery
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (
+                        check_id,
+                        transfer_event_id,
+                        context_kind,
+                        context,
+                        prompt,
+                        criteria,
+                        scorer_kind,
+                        scorer,
+                        due_at,
+                        created_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "transfer_checks.transfer_event_id" in str(exc):
+                raise WorkspaceError(
+                    "delayed transfer check already exists for transfer event: "
+                    f"{transfer_event_id}"
+                ) from exc
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        return DelayedTransferCheck(
+            check_id=check_id,
+            transfer_event_id=transfer_event_id,
+            context_kind=context_kind,
+            context_description=context,
+            challenge_prompt=prompt,
+            acceptance_criteria=criteria,
+            scorer_kind=scorer_kind,
+            scorer_reference=scorer,
+            due_at=due_at,
+            created_at=created_at,
+        )
+
+    def list_due_transfer_checks(
+        self, *, as_of: datetime
+    ) -> list[DueTransferCheck]:
+        as_of_text = self._serialize_utc_timestamp(
+            as_of, field="delayed transfer check due-list timestamp"
+        )
+        as_of_utc = datetime.fromisoformat(as_of_text)
+        try:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT
+                           c.check_id,
+                           c.transfer_event_id,
+                           c.context_kind,
+                           c.context_description,
+                           c.challenge_prompt,
+                           c.acceptance_criteria,
+                           c.scorer_kind,
+                           c.scorer_reference,
+                           c.due_at AS check_due_at,
+                           c.created_at AS check_created_at,
+                           c.claims_mastery AS check_claims_mastery,
+                           e.item_id,
+                           e.item_content_hash,
+                           e.project_id,
+                           e.outcome AS source_outcome,
+                           e.independence AS source_independence,
+                           e.occurred_at AS source_occurred_at,
+                           e.delayed_check_due_at AS source_due_at,
+                           e.claims_mastery AS source_claims_mastery,
+                           p.recorded_at AS prediction_recorded_at,
+                           p.claims_mastery AS prediction_claims_mastery
+                       FROM transfer_checks AS c
+                       JOIN transfer_events AS e
+                         ON e.event_id = c.transfer_event_id
+                       LEFT JOIN transfer_check_predictions AS p
+                         ON p.check_id = c.check_id
+                       LEFT JOIN transfer_check_completions AS completed
+                         ON completed.check_id = c.check_id
+                       WHERE completed.check_id IS NULL"""
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"workspace database read failed: {exc}") from exc
+
+        due_checks: list[tuple[datetime, str, DueTransferCheck]] = []
+        for row in rows:
+            check_id = row["check_id"]
+            transfer_event_id = row["transfer_event_id"]
+            if not isinstance(check_id, str) or not _TRANSFER_CHECK_ID.fullmatch(check_id):
+                raise WorkspaceError(
+                    "stored transfer check id must match transfer-check-<32 lowercase hex>"
+                )
+            if not isinstance(
+                transfer_event_id, str
+            ) or not _TRANSFER_EVENT_ID.fullmatch(transfer_event_id):
+                raise WorkspaceError(
+                    "stored transfer event id must match transfer-<32 lowercase hex>"
+                )
+            if row["context_kind"] not in _TRANSFER_CONTEXT_KINDS:
+                raise WorkspaceError("stored context kind is invalid")
+            if row["scorer_kind"] not in _TRANSFER_SCORER_KINDS:
+                raise WorkspaceError("stored scorer kind is invalid")
+            if row["source_outcome"] not in _TRANSFER_OUTCOMES:
+                raise WorkspaceError("stored transfer outcome is invalid")
+            if row["source_independence"] not in _TRANSFER_INDEPENDENCE:
+                raise WorkspaceError("stored transfer independence is invalid")
+            if row["check_claims_mastery"] != 0 or row["source_claims_mastery"] != 0:
+                raise WorkspaceError("stored transfer evidence improperly claims mastery")
+            if row["prediction_claims_mastery"] not in (None, 0):
+                raise WorkspaceError("stored transfer prediction improperly claims mastery")
+
+            check_due_at, check_created_at = self._validated_transfer_check_timestamps(
+                row
+            )
+            prediction_recorded_at: str | None = None
+            if row["prediction_recorded_at"] is not None:
+                prediction_at = self._parse_stored_timestamp(
+                    row["prediction_recorded_at"],
+                    field="transfer check prediction recorded_at",
+                )
+                if prediction_at < check_due_at:
+                    raise WorkspaceError(
+                        "stored transfer check prediction predates the delayed due time"
+                    )
+                prediction_recorded_at = self._serialize_utc_timestamp(
+                    prediction_at,
+                    field="transfer check prediction recorded_at",
+                )
+
+            context_description = self._stored_transfer_text(
+                row["context_description"],
+                field="context description",
+                max_length=10_000,
+            )
+            challenge_prompt = self._stored_transfer_text(
+                row["challenge_prompt"],
+                field="challenge prompt",
+                max_length=20_000,
+            )
+            acceptance_criteria = self._stored_transfer_text(
+                row["acceptance_criteria"],
+                field="acceptance criteria",
+                max_length=20_000,
+            )
+            scorer_reference = self._stored_transfer_text(
+                row["scorer_reference"],
+                field="scorer reference",
+                max_length=2_048,
+                single_line=True,
+            )
+            if check_due_at > as_of_utc:
+                continue
+            due_checks.append(
+                (
+                    check_due_at,
+                    check_id,
+                    DueTransferCheck(
+                        check_id=check_id,
+                        status=(
+                            "started"
+                            if prediction_recorded_at is not None
+                            else "pending"
+                        ),
+                        transfer_event_id=transfer_event_id,
+                        item_id=row["item_id"],
+                        item_content_hash=row["item_content_hash"],
+                        project_id=row["project_id"],
+                        source_outcome=row["source_outcome"],
+                        source_independence=row["source_independence"],
+                        context_kind=row["context_kind"],
+                        context_description=context_description,
+                        challenge_prompt=challenge_prompt,
+                        acceptance_criteria=acceptance_criteria,
+                        scorer_kind=row["scorer_kind"],
+                        scorer_reference=scorer_reference,
+                        due_at=self._serialize_utc_timestamp(
+                            check_due_at, field="delayed transfer check due_at"
+                        ),
+                        created_at=self._serialize_utc_timestamp(
+                            check_created_at,
+                            field="delayed transfer check created_at",
+                        ),
+                        prediction_recorded_at=prediction_recorded_at,
+                    ),
+                )
+            )
+        due_checks.sort(key=lambda value: (value[0], value[1]))
+        return [entry for _due_at, _check_id, entry in due_checks]
+
+    def begin_transfer_check(
+        self,
+        *,
+        check_id: str,
+        pre_attempt_prediction: str,
+        now: datetime | None = None,
+    ) -> TransferCheckPrediction:
+        if not isinstance(check_id, str) or not _TRANSFER_CHECK_ID.fullmatch(check_id):
+            raise WorkspaceError(
+                "transfer check id must match transfer-check-<32 lowercase hex>"
+            )
+        prediction = self._normalize_transfer_text(
+            pre_attempt_prediction,
+            field="pre-attempt prediction",
+            max_length=10_000,
+        )
+        recorded_at = self._serialize_utc_timestamp(
+            now if now is not None else datetime.now(timezone.utc),
+            field="transfer check prediction timestamp",
+        )
+        recorded_moment = datetime.fromisoformat(recorded_at)
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    """SELECT
+                           c.due_at AS check_due_at,
+                           c.created_at AS check_created_at,
+                           e.occurred_at AS source_occurred_at,
+                           e.delayed_check_due_at AS source_due_at,
+                           p.check_id AS prediction_check_id
+                       FROM transfer_checks AS c
+                       JOIN transfer_events AS e
+                         ON e.event_id = c.transfer_event_id
+                       LEFT JOIN transfer_check_predictions AS p
+                         ON p.check_id = c.check_id
+                       WHERE c.check_id = ?""",
+                    (check_id,),
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(
+                        f"no delayed transfer check with id: {check_id}"
+                    )
+                due_at, _created_at = self._validated_transfer_check_timestamps(row)
+                if recorded_moment < due_at:
+                    raise WorkspaceError(
+                        "delayed transfer check is not due until "
+                        + self._serialize_utc_timestamp(
+                            due_at, field="delayed transfer check due_at"
+                        )
+                    )
+                if row["prediction_check_id"] is not None:
+                    raise WorkspaceError(
+                        "pre-attempt prediction already recorded for delayed transfer check: "
+                        f"{check_id}"
+                    )
+                db.execute(
+                    """INSERT INTO transfer_check_predictions(
+                           check_id, pre_attempt_prediction, recorded_at,
+                           claims_mastery
+                       ) VALUES (?, ?, ?, 0)""",
+                    (check_id, prediction, recorded_at),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "transfer_check_predictions.check_id" in str(exc):
+                raise WorkspaceError(
+                    "pre-attempt prediction already recorded for delayed transfer check: "
+                    f"{check_id}"
+                ) from exc
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        return TransferCheckPrediction(
+            check_id=check_id,
+            pre_attempt_prediction=prediction,
+            recorded_at=recorded_at,
+        )
+
+    def complete_transfer_check(
+        self,
+        *,
+        check_id: str,
+        independent_attempt: str,
+        assistance_level: str,
+        assistance_detail: str | None,
+        acceptance_evidence: str,
+        teach_back: str,
+        outcome: str,
+        artifact_reference: str | None = None,
+        now: datetime | None = None,
+    ) -> TransferCheckCompletion:
+        if not isinstance(check_id, str) or not _TRANSFER_CHECK_ID.fullmatch(check_id):
+            raise WorkspaceError(
+                "transfer check id must match transfer-check-<32 lowercase hex>"
+            )
+        if assistance_level not in _TRANSFER_ASSISTANCE_LEVELS:
+            raise WorkspaceError(
+                "assistance level must be none, light, substantial, or unknown"
+            )
+        if outcome not in _TRANSFER_OUTCOMES:
+            raise WorkspaceError(
+                "transfer check outcome must be successful, partial, or unsuccessful"
+            )
+        attempt = self._normalize_transfer_text(
+            independent_attempt,
+            field="independent attempt",
+            max_length=50_000,
+        )
+        evidence = self._normalize_transfer_text(
+            acceptance_evidence,
+            field="acceptance evidence",
+            max_length=20_000,
+        )
+        explanation = self._normalize_transfer_text(
+            teach_back,
+            field="teach-back",
+            max_length=20_000,
+        )
+        detail: str | None
+        if assistance_level == "none":
+            if assistance_detail is not None:
+                raise WorkspaceError(
+                    "assistance detail must be omitted when assistance is none"
+                )
+            detail = None
+        else:
+            if not isinstance(assistance_detail, str) or not assistance_detail.strip():
+                raise WorkspaceError(
+                    "assistance detail is required when assistance is light, "
+                    "substantial, or unknown"
+                )
+            detail = self._normalize_transfer_text(
+                assistance_detail,
+                field="assistance detail",
+                max_length=10_000,
+            )
+
+        artifact: str | None
+        if artifact_reference is None:
+            artifact = None
+        elif not isinstance(artifact_reference, str):
+            raise WorkspaceError("artifact reference must be a string")
+        elif not artifact_reference.strip():
+            artifact = None
+        else:
+            artifact = self._normalize_transfer_text(
+                artifact_reference,
+                field="artifact reference",
+                max_length=2_048,
+                single_line=True,
+            )
+        completed_at = self._serialize_utc_timestamp(
+            now if now is not None else datetime.now(timezone.utc),
+            field="transfer check completion timestamp",
+        )
+        completed_moment = datetime.fromisoformat(completed_at)
+        acceptance_criteria_value = ""
+        scorer_kind_value = ""
+        scorer_reference_value = ""
+        prediction_recorded_at = ""
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    """SELECT
+                           c.acceptance_criteria,
+                           c.scorer_kind,
+                           c.scorer_reference,
+                           c.due_at AS check_due_at,
+                           c.created_at AS check_created_at,
+                           c.claims_mastery AS check_claims_mastery,
+                           e.occurred_at AS source_occurred_at,
+                           e.delayed_check_due_at AS source_due_at,
+                           e.claims_mastery AS source_claims_mastery,
+                           p.pre_attempt_prediction,
+                           p.recorded_at AS prediction_recorded_at,
+                           p.claims_mastery AS prediction_claims_mastery,
+                           completed.check_id AS completion_check_id
+                       FROM transfer_checks AS c
+                       JOIN transfer_events AS e
+                         ON e.event_id = c.transfer_event_id
+                       LEFT JOIN transfer_check_predictions AS p
+                         ON p.check_id = c.check_id
+                       LEFT JOIN transfer_check_completions AS completed
+                         ON completed.check_id = c.check_id
+                       WHERE c.check_id = ?""",
+                    (check_id,),
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(
+                        f"no delayed transfer check with id: {check_id}"
+                    )
+                due_at, _created_at = self._validated_transfer_check_timestamps(row)
+                if completed_moment < due_at:
+                    raise WorkspaceError(
+                        "delayed transfer check is not due until "
+                        + self._serialize_utc_timestamp(
+                            due_at, field="delayed transfer check due_at"
+                        )
+                    )
+                if row["prediction_recorded_at"] is None:
+                    raise WorkspaceError(
+                        "record a pre-attempt prediction before completing delayed "
+                        f"transfer check: {check_id}"
+                    )
+                prediction_moment = self._parse_stored_timestamp(
+                    row["prediction_recorded_at"],
+                    field="transfer check prediction recorded_at",
+                )
+                if prediction_moment < due_at:
+                    raise WorkspaceError(
+                        "stored transfer check prediction predates the delayed due time"
+                    )
+                self._stored_transfer_text(
+                    row["pre_attempt_prediction"],
+                    field="pre-attempt prediction",
+                    max_length=10_000,
+                )
+                if row["completion_check_id"] is not None:
+                    raise WorkspaceError(
+                        f"delayed transfer check already completed: {check_id}"
+                    )
+                if completed_moment < prediction_moment:
+                    raise WorkspaceError(
+                        "transfer check completion timestamp cannot precede its prediction"
+                    )
+                if (
+                    row["check_claims_mastery"] != 0
+                    or row["source_claims_mastery"] != 0
+                    or row["prediction_claims_mastery"] != 0
+                ):
+                    raise WorkspaceError("stored transfer evidence improperly claims mastery")
+                if row["scorer_kind"] not in _TRANSFER_SCORER_KINDS:
+                    raise WorkspaceError("stored scorer kind is invalid")
+                acceptance_criteria_value = self._stored_transfer_text(
+                    row["acceptance_criteria"],
+                    field="acceptance criteria",
+                    max_length=20_000,
+                )
+                scorer_kind_value = row["scorer_kind"]
+                scorer_reference_value = self._stored_transfer_text(
+                    row["scorer_reference"],
+                    field="scorer reference",
+                    max_length=2_048,
+                    single_line=True,
+                )
+                prediction_recorded_at = self._serialize_utc_timestamp(
+                    prediction_moment,
+                    field="transfer check prediction recorded_at",
+                )
+                db.execute(
+                    """INSERT INTO transfer_check_completions(
+                           check_id, independent_attempt, assistance_level,
+                           assistance_detail, acceptance_evidence, teach_back,
+                           outcome, artifact_reference, completed_at, claims_mastery
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (
+                        check_id,
+                        attempt,
+                        assistance_level,
+                        detail,
+                        evidence,
+                        explanation,
+                        outcome,
+                        artifact,
+                        completed_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "transfer_check_completions.check_id" in str(exc):
+                raise WorkspaceError(
+                    f"delayed transfer check already completed: {check_id}"
+                ) from exc
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        return TransferCheckCompletion(
+            check_id=check_id,
+            independent_attempt=attempt,
+            assistance_level=assistance_level,
+            assistance_detail=detail,
+            acceptance_evidence=evidence,
+            acceptance_criteria=acceptance_criteria_value,
+            scorer_kind=scorer_kind_value,
+            scorer_reference=scorer_reference_value,
+            teach_back=explanation,
+            outcome=outcome,
+            artifact_reference=artifact,
+            prediction_recorded_at=prediction_recorded_at,
+            completed_at=completed_at,
+        )
 
     def record_transfer(
         self,

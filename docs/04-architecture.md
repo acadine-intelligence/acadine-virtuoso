@@ -20,7 +20,7 @@ optional read projections: Obsidian vault, Hermes context, project systems
 ## Package boundaries
 
 - `domain`: immutable values, evidence semantics, scheduler and module contracts. No filesystem or SQLite imports.
-- `application`: initialize, add item, select, practise, record recall and project-transfer events, inspect evidence.
+- `application`: initialize, add item, select, practise, record recall and project-transfer events, and append delayed transfer-check predictions/completions.
 - `infrastructure`: Markdown, SQLite, FSRS serialization, clock, external process runner.
 - `cli`: argument parsing, prompts, JSON output, exit codes.
 
@@ -28,13 +28,13 @@ optional read projections: Obsidian vault, Hermes context, project systems
 
 Markdown owns item prose. SQLite owns derived and append-only state. Every item version is content-hashed. A future sync adapter compares owned fields and hashes; it never applies generic last-write-wins. Conflicting learner-authored edits become explicit conflict records.
 
-Recall attempts and project-transfer events stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. Its schema fixes `claims_mastery` to false. Capability views may later interpret repeated evidence, but cannot rewrite the source events.
+Recall attempts, project-transfer events, and delayed transfer checks stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. One manually authored delayed check may inherit that date and append a pre-attempt prediction followed by an immutable completion containing the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional inert artifact reference. All three schemas fix `claims_mastery` to false. The check queue is chronological capability evidence only: it never reads or writes recall attempts, scheduler state/proposals, or project selection/priority. Capability views may later interpret repeated evidence, but cannot rewrite these source records.
 
 SQLite migrations run in transactions. Before any destructive migration, Virtuoso creates a SQLite backup. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
 
 ## Scheduler portfolio
 
-Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Later schedulers may serve computational exercises, explanation, writing, and transfer checks without overwriting FSRS state.
+Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary, not a memory schedule. Later schedulers may serve computational exercises, explanation, and writing without overwriting FSRS state.
 
 The future meta-scheduler compares outcomes within comparable contexts and chooses only among learner-approved policies. It does not invent intervals or infer competence.
 

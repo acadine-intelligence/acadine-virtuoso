@@ -29,6 +29,16 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         print(f"{key}: {value}")
 
 
+def _parse_cli_timestamp(value: str, *, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise WorkspaceError(f"{field} must be a valid timezone-aware timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise WorkspaceError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="virtuoso", description="Local-first active-recall practice"
@@ -116,6 +126,65 @@ def _parser() -> argparse.ArgumentParser:
         "list", help="list project transfer evidence"
     )
     transfer_list.add_argument("--json", action="store_true")
+
+    transfer_check = transfer_commands.add_parser(
+        "check", help="manage delayed capability-evidence checks"
+    )
+    transfer_check_commands = transfer_check.add_subparsers(
+        dest="transfer_check_command", required=True
+    )
+    transfer_check_create = transfer_check_commands.add_parser(
+        "create", help="create a delayed check for an existing transfer event"
+    )
+    transfer_check_create.add_argument("--event", required=True)
+    transfer_check_create.add_argument(
+        "--context-kind", choices=("changed", "novel"), required=True
+    )
+    transfer_check_create.add_argument("--context", required=True)
+    transfer_check_create.add_argument("--prompt", required=True)
+    transfer_check_create.add_argument("--acceptance-criteria", required=True)
+    transfer_check_create.add_argument(
+        "--scorer-kind", choices=("self", "human", "tool", "agent"), required=True
+    )
+    transfer_check_create.add_argument("--scorer-reference", required=True)
+    transfer_check_create.add_argument("--json", action="store_true")
+
+    transfer_check_due = transfer_check_commands.add_parser(
+        "due", help="list incomplete delayed checks whose evidence date is due"
+    )
+    transfer_check_due.add_argument("--as-of")
+    transfer_check_due.add_argument("--json", action="store_true")
+
+    transfer_check_begin = transfer_check_commands.add_parser(
+        "begin",
+        help="record a prediction before attempting the challenge or requesting help",
+        description=(
+            "Record a pre-attempt prediction before attempting the changed challenge "
+            "or requesting help."
+        ),
+    )
+    transfer_check_begin.add_argument("--check", required=True)
+    transfer_check_begin.add_argument("--prediction", required=True)
+    transfer_check_begin.add_argument("--json", action="store_true")
+
+    transfer_check_complete = transfer_check_commands.add_parser(
+        "complete", help="append attributed delayed transfer evidence"
+    )
+    transfer_check_complete.add_argument("--check", required=True)
+    transfer_check_complete.add_argument("--attempt", required=True)
+    transfer_check_complete.add_argument(
+        "--assistance",
+        choices=("none", "light", "substantial", "unknown"),
+        required=True,
+    )
+    transfer_check_complete.add_argument("--assistance-detail")
+    transfer_check_complete.add_argument("--acceptance-evidence", required=True)
+    transfer_check_complete.add_argument("--teach-back", required=True)
+    transfer_check_complete.add_argument(
+        "--outcome", choices=("successful", "partial", "unsuccessful"), required=True
+    )
+    transfer_check_complete.add_argument("--artifact")
+    transfer_check_complete.add_argument("--json", action="store_true")
     return parser
 
 
@@ -204,6 +273,81 @@ def main(argv: Sequence[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 0
+            if args.transfer_command == "check":
+                if args.transfer_check_command == "create":
+                    check = workspace.create_transfer_check(
+                        transfer_event_id=args.event,
+                        context_kind=args.context_kind,
+                        context_description=args.context,
+                        challenge_prompt=args.prompt,
+                        acceptance_criteria=args.acceptance_criteria,
+                        scorer_kind=args.scorer_kind,
+                        scorer_reference=args.scorer_reference,
+                    )
+                    _emit(asdict(check), as_json=args.json)
+                    return 0
+                if args.transfer_check_command == "due":
+                    as_of = (
+                        _parse_cli_timestamp(args.as_of, field="as-of timestamp")
+                        if args.as_of is not None
+                        else datetime.now(timezone.utc)
+                    )
+                    checks = workspace.list_due_transfer_checks(as_of=as_of)
+                    if args.json:
+                        _emit(
+                            {
+                                "as_of": as_of.astimezone(timezone.utc).isoformat(),
+                                "checks": [asdict(check) for check in checks],
+                            },
+                            as_json=True,
+                        )
+                    elif not checks:
+                        print("No delayed transfer checks are due.")
+                    else:
+                        for index, check in enumerate(checks):
+                            if index:
+                                print()
+                            print(f"{check.check_id} [{check.status}]")
+                            print(f"due_at: {check.due_at}")
+                            print(f"project_id: {check.project_id}")
+                            print(f"context_kind: {check.context_kind}")
+                            print(f"challenge_prompt: {check.challenge_prompt}")
+                            print(f"acceptance_criteria: {check.acceptance_criteria}")
+                            print(
+                                "scorer: "
+                                f"{check.scorer_kind} ({check.scorer_reference})"
+                            )
+                    return 0
+                if args.transfer_check_command == "begin":
+                    prediction = workspace.begin_transfer_check(
+                        check_id=args.check,
+                        pre_attempt_prediction=args.prediction,
+                    )
+                    _emit(asdict(prediction), as_json=args.json)
+                    if not args.json:
+                        print(
+                            "Prediction recorded before the attempt. Complete the "
+                            "challenge before requesting help."
+                        )
+                    return 0
+                if args.transfer_check_command == "complete":
+                    completion = workspace.complete_transfer_check(
+                        check_id=args.check,
+                        independent_attempt=args.attempt,
+                        assistance_level=args.assistance,
+                        assistance_detail=args.assistance_detail,
+                        acceptance_evidence=args.acceptance_evidence,
+                        teach_back=args.teach_back,
+                        outcome=args.outcome,
+                        artifact_reference=args.artifact,
+                    )
+                    _emit(asdict(completion), as_json=args.json)
+                    if not args.json:
+                        print(
+                            "Delayed transfer evidence recorded. "
+                            "No capability or mastery state changed."
+                        )
+                    return 0
         if args.command == "source":
             if args.source_command == "add":
                 source = workspace.add_source(

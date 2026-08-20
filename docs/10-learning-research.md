@@ -39,7 +39,7 @@ Source:
 
 A correct recall attempt does not prove that a learner can use the concept in a new situation. Project application should be recorded separately, with the exact item version, outcome, independence, assistance, artifact reference, and a delayed re-check.
 
-Design consequence: `transfer record` creates append-only project-application evidence and a seven-day delayed-check date. It always records `claims_mastery: false`. Project completion and XP cannot silently upgrade capability.
+Design consequence: `transfer record` creates append-only project-application evidence and a seven-day delayed-check date. A learner may then author one changed/novel check, record a prediction before attempting it, and append an independently attributable result with fixed criteria/scorer, assistance, teach-back, and outcome. These records always store `claims_mastery: false`; their chronological due queue is separate from memory scheduling and project priority. Project completion, assisted success, and XP cannot silently upgrade capability.
 
 ### Calibration and mastery need repeated evidence
 
