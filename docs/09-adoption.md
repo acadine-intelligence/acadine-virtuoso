@@ -2,7 +2,7 @@
 
 ## Current state
 
-No active user has completed the new canonical CLI journey yet. The existing local scheduler and pilot items establish demand and source material, not adoption of this repository.
+No active user has completed the new canonical CLI journey yet. The existing local scheduler and pilot items establish demand and source material; they do not establish adoption of this repository.
 
 ## Planned evidence window
 

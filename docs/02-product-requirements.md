@@ -2,7 +2,7 @@
 
 ## V0 job
 
-When a learner begins focused practice, Virtuoso presents one relevant prompt before any answer, measures the retrieval attempt, provides bounded support only when requested, records attributable evidence, and proposes the next review without claiming mastery.
+When a learner begins focused practice, Virtuoso presents one relevant prompt before any answer and measures the retrieval attempt. Bounded support is provided only when requested. Virtuoso records attributable evidence and proposes the next review without claiming mastery.
 
 ## Functional requirements
 
@@ -24,7 +24,7 @@ When a learner begins focused practice, Virtuoso presents one relevant prompt be
 - XP and completion cannot promote capability state.
 - Retrieval can establish retrieved evidence at most; project transfer requires a separate evidence event.
 - Project opportunities remain proposals until the learner accepts them.
-- Virtuoso sends modules no database path or arbitrary workspace projection. Modules remain explicitly approved trusted local executables, not OS-sandboxed processes, and may independently access files allowed to the invoking user.
+- Virtuoso sends modules no database path or arbitrary workspace projection. Modules are explicitly approved trusted local executables. They are not OS-sandboxed processes and may independently access files allowed to the invoking user.
 - No personal learning data is committed to this repository.
 - Missing or stale inputs are reported as uncertainty.
 

@@ -34,7 +34,7 @@ SQLite migrations run in transactions and fail closed. The current migrations ar
 
 ## Scheduler portfolio
 
-Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary, not a memory schedule. Later schedulers may serve computational exercises, explanation, and writing without overwriting FSRS state.
+Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory. Later schedulers may serve computational exercises, explanation, and writing without overwriting FSRS state.
 
 The future meta-scheduler compares outcomes within comparable contexts and chooses only among learner-approved policies. It does not invent intervals or infer competence.
 
@@ -48,7 +48,7 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables, not an OS sandbox: they run with the invoking user’s permissions and require explicit consent. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables; this boundary is not an OS sandbox. They run with the invoking user's permissions and require explicit consent. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 
