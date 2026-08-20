@@ -7,6 +7,7 @@
     "docs": "/Users/acadine-incognito/projects/acadine-virtuoso/docs"
   },
   "kanban_epic": null,
-  "vault_note": null,
+  "hermes_project": "acadine-virtuoso",
+  "vault_note": "/Users/acadine-incognito/vaults/acadine-core/08-projects/acadine-virtuoso/acadine-virtuoso.md",
   "session_protocol": "Read product.json, then run Build OS check before implementation."
 }

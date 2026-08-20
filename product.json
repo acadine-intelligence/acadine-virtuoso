@@ -113,7 +113,23 @@
     "privacy": "Local-first and offline for the core workflow. Runtime databases, personal Markdown, logs, model inputs, and evidence are ignored by Git. The repository contains synthetic fixtures only. Adapters are opt-in and path-scoped; no credentials enter workspace state. Export, remote sync, publication, messaging, project mutation, and cloud processing require explicit user action."
   },
   "verification": {
-    "commands": [],
+    "commands": [
+      {
+        "name": "compile",
+        "argv": [".venv/bin/python", "-m", "compileall", "-q", "src", "tests"],
+        "required": true
+      },
+      {
+        "name": "unit-and-journey-tests",
+        "argv": [".venv/bin/python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "required": true
+      },
+      {
+        "name": "installed-cli-smoke",
+        "argv": [".venv/bin/virtuoso", "--help"],
+        "required": true
+      }
+    ],
     "independent_review": {
       "required": true,
       "policy": "A reviewer who did not implement the change must inspect the exact Git commit and report security, privacy, logic, learning-evidence attribution, extension-boundary, and contract findings"
@@ -130,9 +146,9 @@
     }
   },
   "operations": {
-    "install": "Planned v0: python3.11 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'.",
-    "run": "Planned v0: .venv/bin/virtuoso --workspace PATH <command>.",
-    "health": "Planned v0: .venv/bin/virtuoso --workspace PATH doctor checks schema, database, Markdown ownership, module manifests, permissions, and dependency versions without changing learning state.",
+    "install": "python3.11 -m venv .venv && .venv/bin/python -m pip install -e .",
+    "run": ".venv/bin/virtuoso --workspace PATH <command>",
+    "health": ".venv/bin/virtuoso --workspace PATH doctor --json checks the workspace schema, SQLite integrity, item hashes, and evidence counts without changing learning state.",
     "rollback": "Use versioned Git commits and package releases; back up the local SQLite file before migrations and retain append-only event export so derived state can be rebuilt.",
     "support_owner": "Jonathan / Acadine",
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
@@ -144,7 +160,7 @@
       "evidence": ""
     },
     "known_limitations": [
-      "Architecture baseline only until implementation and exact-commit review are recorded.",
+      "The first simple-mode active-recall slice is implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
       "Simple mode and manually authored recall items are the first slice; direction-led planning, project transfer workflows, two-way Obsidian synchronization, scheduled proposals, XP, and meta-scheduler optimization follow through dogfood evidence.",
       "No Git remote or public repository has been created or pushed."
     ]

@@ -15,6 +15,9 @@ dependencies = [
   "typing-extensions==4.16.0",
 ]
 
+[project.scripts]
+virtuoso = "virtuoso.cli:main"
+
 [project.urls]
 Repository = "https://github.com/acadine-hermes/acadine-virtuoso"
 
