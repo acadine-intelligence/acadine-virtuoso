@@ -30,7 +30,7 @@ WORKSPACE=/tmp/virtuoso-learner
 .venv/bin/virtuoso --workspace "$WORKSPACE" doctor --json
 ```
 
-Virtuoso does not infer competence from XP, completion, a test, or an agent-produced answer. Attempts retain result, latency, confidence, open-notes state, response, help attribution, and support sequence.
+Virtuoso does not infer competence from XP, completion, a test, or an agent-produced answer. Attempts retain actual start and completion times, result, initial latency, confidence, open-notes state, response, help attribution, worked-answer reveal, and timed follow-up support.
 
 ## Read-only Markdown and Obsidian sources
 
@@ -107,7 +107,7 @@ The research basis and limits behind active recall, spacing, latency, transfer, 
 
 ## Extension boundary
 
-External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, invokes argv without a shell, sends only declared projections, stores output in temporary files rather than memory, kills the process group on timeout, validates exact request/result shapes, and records the manifest hash captured when it was loaded. Core code alone decides whether to accept a returned proposal.
+External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, rejects shell and command-wrapper indirection, invokes argv with `shell=False`, sends only declared projections whose supplied fields pass the protocol’s nested type checks, and requires each result kind’s declared fields. Output is captured in bounded temporary files, and the manifest hash is captured when loaded. V0 grants no descendant-process capability: on supported POSIX systems the child starts with a zero process limit and the runner always terminates its process group; module execution fails closed when that OS limit is unavailable. Core code alone decides whether to accept a returned proposal.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are deliberately out of scope.
 

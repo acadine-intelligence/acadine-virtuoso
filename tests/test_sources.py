@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from virtuoso.workspace import WorkspaceError, WorkspaceService
 
@@ -49,6 +52,22 @@ class SourceIndexTests(unittest.TestCase):
 
         with self.assertRaisesRegex(WorkspaceError, "source root must not be a symlink"):
             self.service.add_source(source_id="alias", kind="obsidian", root=alias)
+
+    def test_connect_source_rejects_equal_ancestor_and_descendant_workspace_roots(self) -> None:
+        overlapping_roots = {
+            "equal": self.root,
+            "ancestor": self.root.parent,
+            "descendant": self.root / "items",
+        }
+        for source_id, root in overlapping_roots.items():
+            with self.subTest(source_id=source_id), self.assertRaisesRegex(
+                WorkspaceError, "overlaps the Virtuoso workspace"
+            ):
+                self.service.add_source(
+                    source_id=source_id,
+                    kind="markdown",
+                    root=root,
+                )
 
     def test_open_rejects_incompatible_source_schema(self) -> None:
         import sqlite3
@@ -123,6 +142,79 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
         with self.assertRaisesRegex(WorkspaceError, "file limit"):
             self.service.scan_source("notes", max_files=1)
         self.assertEqual(self.service.list_source_documents("notes"), [])
+
+    def test_markdown_candidate_limit_counts_oversized_files(self) -> None:
+        for index in range(3):
+            (self.vault / f"oversized-{index}.md").write_text(
+                "# Oversized\n" + "x" * 100,
+                encoding="utf-8",
+            )
+        self.service.add_source(source_id="notes", kind="markdown", root=self.vault)
+
+        with self.assertRaisesRegex(WorkspaceError, "file limit"):
+            self.service.scan_source("notes", max_files=1, max_file_bytes=16)
+        self.assertEqual(self.service.list_source_documents("notes"), [])
+
+    def test_traversal_error_preserves_previously_indexed_metadata(self) -> None:
+        restricted = self.vault / "restricted"
+        restricted.mkdir()
+        note = restricted / "kept.md"
+        note.write_text("# Kept\n\nPreviously indexed.\n", encoding="utf-8")
+        self.service.add_source(source_id="notes", kind="markdown", root=self.vault)
+        self.service.scan_source("notes")
+        self.assertEqual(
+            [document.relative_path for document in self.service.list_source_documents("notes")],
+            ["restricted/kept.md"],
+        )
+
+        restricted.chmod(0)
+        try:
+            with self.assertRaisesRegex(WorkspaceError, "source traversal failed"):
+                self.service.scan_source("notes")
+        finally:
+            restricted.chmod(0o700)
+
+        self.assertEqual(
+            [document.relative_path for document in self.service.list_source_documents("notes")],
+            ["restricted/kept.md"],
+        )
+
+    def test_file_replaced_by_symlink_during_scan_is_never_indexed(self) -> None:
+        note = self.vault / "raced.md"
+        safe_body = "# Safe\n\nInside the declared source.\n"
+        note.write_text(safe_body, encoding="utf-8")
+        outside = Path(self.tmp.name).resolve() / "outside-private.md"
+        outside_body = "# Outside\n\nMust never cross the source boundary.\n"
+        outside.write_text(outside_body, encoding="utf-8")
+        safe_hash = hashlib.sha256(safe_body.encode("utf-8")).hexdigest()
+        outside_hash = hashlib.sha256(outside_body.encode("utf-8")).hexdigest()
+        self.service.add_source(source_id="notes", kind="markdown", root=self.vault)
+
+        original_is_symlink = Path.is_symlink
+        swapped = False
+
+        def replace_after_symlink_check(path: Path) -> bool:
+            nonlocal swapped
+            result = original_is_symlink(path)
+            if path == note and not swapped:
+                note.unlink()
+                note.symlink_to(outside)
+                swapped = True
+            return result
+
+        accepted_hash: str | None = None
+        with patch.object(Path, "is_symlink", replace_after_symlink_check):
+            try:
+                self.service.scan_source("notes")
+            except WorkspaceError:
+                pass
+            else:
+                documents = self.service.list_source_documents("notes")
+                accepted_hash = documents[0].content_hash if documents else None
+
+        self.assertNotEqual(accepted_hash, outside_hash)
+        if accepted_hash is not None:
+            self.assertEqual(accepted_hash, safe_hash)
 
     def test_scan_prunes_symlinked_directories(self) -> None:
         outside = Path(self.tmp.name).resolve() / "outside"

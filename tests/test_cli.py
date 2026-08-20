@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -94,9 +95,18 @@ class CliJourneyTests(unittest.TestCase):
 
         attempts = json.loads(self._run("attempts", "--json").stdout)
         self.assertEqual(len(attempts["attempts"]), 1)
-        self.assertEqual(attempts["attempts"][0]["result"], "demonstrated")
-        self.assertEqual(attempts["attempts"][0]["agent_help"], "none")
-        self.assertGreaterEqual(attempts["attempts"][0]["initial_latency_ms"], 0)
+        attempt = attempts["attempts"][0]
+        self.assertEqual(attempt["result"], "demonstrated")
+        self.assertEqual(attempt["agent_help"], "none")
+        self.assertGreaterEqual(attempt["initial_latency_ms"], 0)
+        self.assertLessEqual(
+            datetime.fromisoformat(attempt["started_at"]),
+            datetime.fromisoformat(attempt["completed_at"]),
+        )
+        self.assertEqual(
+            [entry["kind"] for entry in json.loads(attempt["support_json"])],
+            ["worked-feedback"],
+        )
         self.assertEqual(attempts["proposals"][0]["algorithm"], "fsrs")
         self.assertEqual(attempts["proposals"][0]["algorithm_version"], "6.3.2")
 

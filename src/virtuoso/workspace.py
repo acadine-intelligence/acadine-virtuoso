@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import math
 import os
 import re
 import sqlite3
+import stat as stat_module
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -94,6 +96,14 @@ class SourceScanReceipt:
     skipped: int
     total_bytes: int
     occurred_at: str
+
+
+@dataclass(frozen=True)
+class SchedulerSnapshot:
+    state_json: str
+    source_event_id: str
+    algorithm_version: str
+    configuration: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -224,12 +234,14 @@ class WorkspaceService:
             raise WorkspaceError(
                 f"not a Virtuoso workspace: {service.root}; run 'virtuoso init' first"
             )
+        service._repair_private_permissions()
         config = service.configuration()
         if config.get("schema") != WORKSPACE_SCHEMA:
             raise WorkspaceError(
                 f"unsupported workspace schema: {config.get('schema')!r}"
             )
         service._migrate()
+        service._repair_private_permissions()
         return service
 
     def _validate_owned_paths(self, *, require_database: bool = False) -> None:
@@ -266,6 +278,72 @@ class WorkspaceService:
             path.chmod(_PRIVATE_DIRECTORY_MODE)
         except OSError as exc:
             raise WorkspaceError(f"cannot create private workspace directory {path}: {exc}") from exc
+
+    @staticmethod
+    def _chmod_owned_path(path: Path, mode: int, *, directory: bool) -> None:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise WorkspaceError("private permission repair requires no-follow file access")
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if directory:
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise WorkspaceError(f"cannot secure Virtuoso-owned path {path}: {exc}") from exc
+        try:
+            status = os.fstat(descriptor)
+            expected_type = stat_module.S_ISDIR if directory else stat_module.S_ISREG
+            if not expected_type(status.st_mode):
+                raise WorkspaceError(f"Virtuoso-owned path has the wrong type: {path}")
+            os.fchmod(descriptor, mode)
+        except OSError as exc:
+            raise WorkspaceError(f"cannot secure Virtuoso-owned path {path}: {exc}") from exc
+        finally:
+            os.close(descriptor)
+
+    def _repair_private_permissions(self) -> None:
+        for directory in (self.root, self.items_dir, self.state_dir):
+            self._chmod_owned_path(
+                directory, _PRIVATE_DIRECTORY_MODE, directory=True
+            )
+        self._chmod_owned_path(
+            self.config_path, _PRIVATE_FILE_MODE, directory=False
+        )
+        for directory in (self.items_dir, self.state_dir):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+            try:
+                directory_descriptor = os.open(directory, flags)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"cannot inspect Virtuoso-owned directory {directory}: {exc}"
+                ) from exc
+            try:
+                for name in os.listdir(directory_descriptor):
+                    try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY | os.O_NOFOLLOW,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as exc:
+                        raise WorkspaceError(
+                            f"cannot secure Virtuoso-owned entry {directory / name}: {exc}"
+                        ) from exc
+                    try:
+                        status = os.fstat(descriptor)
+                        if not stat_module.S_ISREG(status.st_mode):
+                            raise WorkspaceError(
+                                f"Virtuoso-owned entry must be a regular file: {directory / name}"
+                            )
+                        os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+                    except OSError as exc:
+                        raise WorkspaceError(
+                            f"cannot secure Virtuoso-owned entry {directory / name}: {exc}"
+                        ) from exc
+                    finally:
+                        os.close(descriptor)
+            finally:
+                os.close(directory_descriptor)
 
     @staticmethod
     def _write_private_text_exclusive(
@@ -364,6 +442,18 @@ class WorkspaceService:
             raise ValueError(f"{label} must use finite JSON numbers, not {value}")
 
         return json.loads(text, parse_constant=reject_nonfinite)
+
+    @staticmethod
+    def _parse_aware_datetime(value: object, *, label: str) -> datetime:
+        if not isinstance(value, str):
+            raise WorkspaceError(f"{label} must be an ISO-8601 string with a timezone")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise WorkspaceError(f"invalid {label}: {value!r}") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise WorkspaceError(f"{label} must include a timezone")
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _require_exact_fields(
@@ -718,6 +808,9 @@ class WorkspaceService:
                     for statement in migration_statements[migration_version]
                 )
 
+            # Validate the schema claimed by migration history before creating
+            # anything. Missing current or historical tables must fail closed,
+            # never be silently recreated with lost evidence.
             if latest:
                 self._validate_database_schema(
                     db, statements=statements_through(latest)
@@ -776,6 +869,7 @@ class WorkspaceService:
             raise WorkspaceError(f"source root does not exist: {source_root}")
         if not source_root.is_dir():
             raise WorkspaceError(f"source root is not a directory: {source_root}")
+        self._require_source_outside_workspace(source_root)
         created_at = datetime.now(timezone.utc).isoformat()
         try:
             with self._connect() as db:
@@ -817,48 +911,137 @@ class WorkspaceService:
         documents: list[SourceDocument] = []
         skipped = 0
         total_bytes = 0
-
-        for directory, dirnames, filenames in os.walk(source.root, followlinks=False):
-            directory_path = Path(directory)
-            dirnames[:] = sorted(
-                name
-                for name in dirnames
-                if not (directory_path / name).is_symlink()
+        candidate_count = 0
+        if (
+            not hasattr(os, "fwalk")
+            or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "supports_dir_fd")
+            or os.open not in os.supports_dir_fd
+        ):
+            raise WorkspaceError(
+                "source scanning requires descriptor-relative no-follow filesystem access"
             )
-            for filename in sorted(filenames):
-                path = directory_path / filename
-                if path.suffix.lower() != ".md":
-                    continue
-                if path.is_symlink():
-                    raise WorkspaceError(f"source contains a Markdown symlink: {path}")
-                if len(documents) >= max_files:
-                    raise WorkspaceError(f"source exceeds Markdown file limit: {max_files}")
-                stat = path.stat()
-                if stat.st_size > max_file_bytes:
-                    skipped += 1
-                    continue
-                total_bytes += stat.st_size
-                if total_bytes > max_total_bytes:
-                    raise WorkspaceError(
-                        f"source exceeds total Markdown byte limit: {max_total_bytes}"
+
+        def traversal_error(exc: OSError) -> None:
+            raise WorkspaceError(f"source traversal failed: {exc}") from exc
+
+        root_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+        try:
+            root_descriptor = os.open(source.root, root_flags)
+        except OSError as exc:
+            raise WorkspaceError(f"source traversal failed: {exc}") from exc
+        try:
+            walker = os.fwalk(
+                ".",
+                topdown=True,
+                onerror=traversal_error,
+                follow_symlinks=False,
+                dir_fd=root_descriptor,
+            )
+            for directory, dirnames, filenames, directory_descriptor in walker:
+                safe_directories: list[str] = []
+                for dirname in sorted(dirnames):
+                    try:
+                        directory_status = os.stat(
+                            dirname,
+                            dir_fd=directory_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise WorkspaceError(f"source traversal failed: {exc}") from exc
+                    if stat_module.S_ISLNK(directory_status.st_mode):
+                        continue
+                    if not stat_module.S_ISDIR(directory_status.st_mode):
+                        raise WorkspaceError(
+                            f"source traversal failed: directory entry is not a directory: {dirname}"
+                        )
+                    safe_directories.append(dirname)
+                dirnames[:] = safe_directories
+
+                for filename in sorted(filenames):
+                    if Path(filename).suffix.lower() != ".md":
+                        continue
+                    candidate_count += 1
+                    if candidate_count > max_files:
+                        raise WorkspaceError(
+                            f"source exceeds Markdown file limit: {max_files}"
+                        )
+                    relative_path = (Path(directory) / filename).as_posix()
+                    display_path = source.root / relative_path
+                    try:
+                        entry_status = os.stat(
+                            filename,
+                            dir_fd=directory_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise WorkspaceError(f"source traversal failed: {exc}") from exc
+                    if stat_module.S_ISLNK(entry_status.st_mode):
+                        raise WorkspaceError(
+                            f"source contains a Markdown symlink: {display_path}"
+                        )
+                    if not stat_module.S_ISREG(entry_status.st_mode):
+                        raise WorkspaceError(
+                            f"source Markdown candidate is not a regular file: {display_path}"
+                        )
+
+                    flags = os.O_RDONLY | os.O_NOFOLLOW
+                    try:
+                        descriptor = os.open(
+                            filename,
+                            flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as exc:
+                        if exc.errno == errno.ELOOP:
+                            raise WorkspaceError(
+                                f"source contains a Markdown symlink: {display_path}"
+                            ) from exc
+                        raise WorkspaceError(f"source traversal failed: {exc}") from exc
+                    with os.fdopen(descriptor, "rb") as handle:
+                        opened_status = os.fstat(handle.fileno())
+                        if not stat_module.S_ISREG(opened_status.st_mode):
+                            raise WorkspaceError(
+                                f"source Markdown candidate is not a regular file: {display_path}"
+                            )
+                        if opened_status.st_size > max_file_bytes:
+                            skipped += 1
+                            continue
+                        raw = handle.read(max_file_bytes + 1)
+                        completed_status = os.fstat(handle.fileno())
+                    if len(raw) > max_file_bytes:
+                        skipped += 1
+                        continue
+                    if (
+                        completed_status.st_size != len(raw)
+                        or completed_status.st_mtime_ns != opened_status.st_mtime_ns
+                    ):
+                        raise WorkspaceError(
+                            f"source Markdown file changed during scan: {display_path}"
+                        )
+                    total_bytes += len(raw)
+                    if total_bytes > max_total_bytes:
+                        raise WorkspaceError(
+                            f"source exceeds total Markdown byte limit: {max_total_bytes}"
+                        )
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        skipped += 1
+                        continue
+                    documents.append(
+                        SourceDocument(
+                            source_id=source_id,
+                            relative_path=relative_path,
+                            title=self._source_title(text, Path(filename).stem),
+                            content_hash=hashlib.sha256(raw).hexdigest(),
+                            wikilinks=self._wikilinks(text),
+                            modified_ns=completed_status.st_mtime_ns,
+                            byte_size=len(raw),
+                        )
                     )
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    skipped += 1
-                    continue
-                relative_path = path.relative_to(source.root).as_posix()
-                documents.append(
-                    SourceDocument(
-                        source_id=source_id,
-                        relative_path=relative_path,
-                        title=self._source_title(text, path.stem),
-                        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                        wikilinks=self._wikilinks(text),
-                        modified_ns=stat.st_mtime_ns,
-                        byte_size=stat.st_size,
-                    )
-                )
+        finally:
+            os.close(root_descriptor)
 
         occurred_at = datetime.now(timezone.utc).isoformat()
         receipt_id = f"scan-{uuid.uuid4().hex}"
@@ -1022,12 +1205,23 @@ class WorkspaceService:
             raise WorkspaceError(f"source root changed or became a symlink: {root}")
         if not root.is_dir():
             raise WorkspaceError(f"source root is unavailable: {root}")
+        self._require_source_outside_workspace(root)
         return SourceSummary(
             source_id=row["source_id"],
             kind=row["kind"],
             root=root,
             read_only=bool(row["read_only"]),
         )
+
+    def _require_source_outside_workspace(self, source_root: Path) -> None:
+        if (
+            source_root == self.root
+            or source_root in self.root.parents
+            or self.root in source_root.parents
+        ):
+            raise WorkspaceError(
+                f"source root overlaps the Virtuoso workspace: {source_root}"
+            )
 
     @staticmethod
     def _source_title(text: str, fallback: str) -> str:
@@ -1201,7 +1395,32 @@ class WorkspaceService:
 
     @staticmethod
     def _normalized_schema_sql(value: str | None) -> str:
-        return re.sub(r"\s+", "", value or "").rstrip(";").lower()
+        normalized: list[str] = []
+        quote_end: str | None = None
+        index = 0
+        text = value or ""
+        while index < len(text):
+            character = text[index]
+            if quote_end is not None:
+                normalized.append(character)
+                if character == quote_end:
+                    if index + 1 < len(text) and text[index + 1] == quote_end:
+                        normalized.append(text[index + 1])
+                        index += 2
+                        continue
+                    quote_end = None
+                index += 1
+                continue
+            if character in {"'", '"', "`"}:
+                quote_end = character
+                normalized.append(character)
+            elif character == "[":
+                quote_end = "]"
+                normalized.append(character)
+            elif not character.isspace():
+                normalized.append(character.casefold())
+            index += 1
+        return "".join(normalized).rstrip(";")
 
     @classmethod
     def _validate_table_definition(
@@ -2213,26 +2432,40 @@ class WorkspaceService:
 
     def scheduler_snapshot(
         self, *, item_id: str, algorithm: str, learning_context: str
-    ) -> tuple[str | None, str | None]:
+    ) -> SchedulerSnapshot | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT state_json, source_event_id FROM scheduler_state "
+                "SELECT state_json, source_event_id, algorithm_version, configuration_json "
+                "FROM scheduler_state "
                 "WHERE item_id = ? AND algorithm = ? AND learning_context = ?",
                 (item_id, algorithm, learning_context),
             ).fetchone()
         if row is None:
-            return None, None
-        return row["state_json"], row["source_event_id"]
+            return None
+        try:
+            configuration = self._load_json(
+                row["configuration_json"], label="scheduler state configuration"
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise WorkspaceError(f"invalid scheduler state configuration: {exc}") from exc
+        if not isinstance(configuration, dict):
+            raise WorkspaceError("invalid scheduler state configuration: expected an object")
+        return SchedulerSnapshot(
+            state_json=row["state_json"],
+            source_event_id=row["source_event_id"],
+            algorithm_version=row["algorithm_version"],
+            configuration=configuration,
+        )
 
     def scheduler_state(
         self, *, item_id: str, algorithm: str, learning_context: str
     ) -> str | None:
-        state, _source_event_id = self.scheduler_snapshot(
+        snapshot = self.scheduler_snapshot(
             item_id=item_id,
             algorithm=algorithm,
             learning_context=learning_context,
         )
-        return state
+        return snapshot.state_json if snapshot is not None else None
 
     def record_attempt(
         self,
@@ -2241,12 +2474,134 @@ class WorkspaceService:
         proposal: dict[str, Any],
         state_json: str,
     ) -> None:
-        support_json = json.dumps(attempt["support_actions"], sort_keys=True)
-        config_json = json.dumps(proposal["configuration"], sort_keys=True)
+        self._require_exact_fields(
+            attempt,
+            {
+                "event_id",
+                "item_id",
+                "item_content_hash",
+                "occurred_at",
+                "started_at",
+                "completed_at",
+                "initial_response",
+                "initial_latency_ms",
+                "result",
+                "confidence",
+                "open_notes",
+                "agent_help",
+                "support_actions",
+            },
+            "attempt",
+        )
+        self._require_exact_fields(
+            proposal,
+            {
+                "proposal_id",
+                "source_event_id",
+                "item_id",
+                "algorithm",
+                "algorithm_version",
+                "learning_context",
+                "configuration",
+                "previous_state_json",
+                "previous_source_event_id",
+                "due_at",
+                "rationale",
+                "created_at",
+            },
+            "scheduler proposal",
+        )
+        if attempt["item_id"] != proposal["item_id"]:
+            raise WorkspaceError(
+                "attempt and scheduler item identity must describe the same transition"
+            )
+        if attempt["event_id"] != proposal["source_event_id"]:
+            raise WorkspaceError(
+                "attempt event and scheduler source-event identity must match"
+            )
+        occurred_at = self._parse_aware_datetime(
+            attempt["occurred_at"], label="attempt occurred timestamp"
+        )
+        started_at = self._parse_aware_datetime(
+            attempt["started_at"], label="attempt started timestamp"
+        )
+        completed_at = self._parse_aware_datetime(
+            attempt["completed_at"], label="attempt completed timestamp"
+        )
+        if completed_at < started_at:
+            raise WorkspaceError("attempt completed timestamp precedes its start")
+        if occurred_at != completed_at:
+            raise WorkspaceError(
+                "attempt occurred timestamp must identify the completed attempt"
+            )
+        latency = attempt["initial_latency_ms"]
+        if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
+            raise WorkspaceError("attempt initial latency must be a non-negative integer")
+        elapsed_ms = round((completed_at - started_at).total_seconds() * 1000)
+        if latency > elapsed_ms:
+            raise WorkspaceError(
+                "attempt initial latency exceeds the complete attempt duration"
+            )
+        due_at = self._parse_aware_datetime(
+            proposal["due_at"], label="scheduler due timestamp"
+        )
+        created_at = self._parse_aware_datetime(
+            proposal["created_at"], label="scheduler proposal created timestamp"
+        )
+        if created_at != occurred_at:
+            raise WorkspaceError(
+                "attempt and scheduler proposal timestamps must identify one transition"
+            )
+        if due_at <= occurred_at:
+            raise WorkspaceError("scheduler due timestamp must be after the attempt")
+        if not isinstance(proposal["configuration"], dict):
+            raise WorkspaceError("scheduler proposal configuration must be an object")
+        if not isinstance(attempt["support_actions"], list):
+            raise WorkspaceError("attempt support_actions must be an array")
+        try:
+            support_json = json.dumps(
+                attempt["support_actions"], sort_keys=True, allow_nan=False
+            )
+            config_json = json.dumps(
+                proposal["configuration"], sort_keys=True, allow_nan=False
+            )
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceError(f"attempt transition contains invalid JSON: {exc}") from exc
+        if not isinstance(state_json, str):
+            raise WorkspaceError("proposed scheduler state must be JSON text")
+        try:
+            proposed_state = self._load_json(
+                state_json, label="proposed scheduler state"
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise WorkspaceError(f"invalid proposed scheduler state: {exc}") from exc
+        if not isinstance(proposed_state, dict):
+            raise WorkspaceError("invalid proposed scheduler state: expected an object")
+        if proposal["algorithm"] == "fsrs":
+            state_due = self._parse_aware_datetime(
+                proposed_state.get("due"), label="proposed FSRS state due timestamp"
+            )
+            if state_due != due_at:
+                raise WorkspaceError(
+                    "scheduler due timestamp does not match the proposed FSRS state"
+                )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            item_row = db.execute(
+                "SELECT content_hash FROM items WHERE item_id = ?",
+                (attempt["item_id"],),
+            ).fetchone()
+            if item_row is None:
+                raise WorkspaceError(
+                    f"no learning item with id: {attempt['item_id']}"
+                )
+            if item_row["content_hash"] != attempt["item_content_hash"]:
+                raise WorkspaceError(
+                    "attempt item content identity does not match the indexed learning item"
+                )
             row = db.execute(
-                "SELECT source_event_id FROM scheduler_state "
+                "SELECT source_event_id, state_json, algorithm_version, configuration_json "
+                "FROM scheduler_state "
                 "WHERE item_id = ? AND algorithm = ? AND learning_context = ?",
                 (
                     proposal["item_id"],
@@ -2255,11 +2610,30 @@ class WorkspaceService:
                 ),
             ).fetchone()
             current_source = row["source_event_id"] if row else None
-            expected_source = proposal.get("previous_source_event_id")
-            if current_source != expected_source:
+            current_state = row["state_json"] if row else None
+            expected_source = proposal["previous_source_event_id"]
+            expected_state = proposal["previous_state_json"]
+            if current_source != expected_source or current_state != expected_state:
                 raise WorkspaceError(
                     "scheduler state changed during practice; retry so the attempt can be rescheduled safely"
                 )
+            if row is not None:
+                try:
+                    current_configuration = self._load_json(
+                        row["configuration_json"],
+                        label="stored scheduler configuration",
+                    )
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    raise WorkspaceError(
+                        f"invalid stored scheduler configuration: {exc}"
+                    ) from exc
+                if (
+                    row["algorithm_version"] != proposal["algorithm_version"]
+                    or current_configuration != proposal["configuration"]
+                ):
+                    raise WorkspaceError(
+                        "scheduler state version or configuration is incompatible with the proposal"
+                    )
             db.execute(
                 """
                 INSERT INTO attempts(
@@ -2280,6 +2654,17 @@ class WorkspaceService:
                     int(attempt["open_notes"]),
                     attempt["agent_help"],
                     support_json,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO attempt_timings(event_id, started_at, completed_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    attempt["event_id"],
+                    attempt["started_at"],
+                    attempt["completed_at"],
                 ),
             )
             db.execute(
@@ -2334,7 +2719,10 @@ class WorkspaceService:
     def list_attempts(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM attempts ORDER BY occurred_at, event_id"
+                """SELECT a.*, t.started_at, t.completed_at
+                   FROM attempts AS a
+                   LEFT JOIN attempt_timings AS t ON t.event_id = a.event_id
+                   ORDER BY a.occurred_at, a.event_id"""
             ).fetchall()
         attempts: list[dict[str, Any]] = []
         for row in rows:
@@ -2465,19 +2853,28 @@ class WorkspaceService:
             legacy_rows = db.execute(
                 "SELECT * FROM module_receipts ORDER BY occurred_at, receipt_id"
             ).fetchall()
-        receipts = [dict(row) for row in current_rows]
+        legacy_ids = {row["receipt_id"] for row in legacy_rows}
+        receipts = [
+            dict(row) for row in current_rows if row["receipt_id"] not in legacy_ids
+        ]
         for row in legacy_rows:
             receipt = dict(row)
             receipt.update(
                 {
                     "status": "succeeded",
                     "error": None,
-                    "started_at": receipt["occurred_at"],
-                    "completed_at": receipt["occurred_at"],
+                    "started_at": None,
+                    "completed_at": None,
                 }
             )
             receipts.append(receipt)
-        return sorted(receipts, key=lambda value: (value["started_at"], value["receipt_id"]))
+        return sorted(
+            receipts,
+            key=lambda value: (
+                value.get("started_at") or value.get("occurred_at") or "",
+                value["receipt_id"],
+            ),
+        )
 
     def select_next(self, now: datetime) -> SelectionResult:
         if now.tzinfo is None or now.utcoffset() is None:
@@ -2514,7 +2911,15 @@ class WorkspaceService:
             if row["due_at"] is None:
                 new.append(row["item_id"])
                 continue
-            due_at = datetime.fromisoformat(row["due_at"]).astimezone(timezone.utc)
+            try:
+                due_at = self._parse_aware_datetime(
+                    row["due_at"], label="scheduler due timestamp"
+                )
+            except WorkspaceError as exc:
+                raise WorkspaceError(
+                    "invalid scheduler due timestamp for "
+                    f"item {row['item_id']}: {row['due_at']!r}"
+                ) from exc
             if due_at <= now_utc:
                 due.append((due_at, row["item_id"]))
 

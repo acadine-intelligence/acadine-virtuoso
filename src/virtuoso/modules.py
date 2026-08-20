@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - non-POSIX platforms fail closed at runtime
+    resource = None  # type: ignore[assignment]
+
 
 MANIFEST_SCHEMA = "virtuoso/module@0.1"
 REQUEST_SCHEMA = "virtuoso/module-request@0.1"
@@ -32,9 +37,13 @@ _ALLOWED_READS = {
     "project.summary",
 }
 _PRIVATE_STATE_KEYS = {
+    "access_token",
+    "accesstoken",
     "api_key",
     "apikey",
     "auth",
+    "bearer_token",
+    "client_secret",
     "database_path",
     "db_path",
     "directory",
@@ -42,6 +51,8 @@ _PRIVATE_STATE_KEYS = {
     "home",
     "password",
     "path",
+    "private_key",
+    "refresh_token",
     "state_path",
     "sqlite_path",
     "token",
@@ -62,6 +73,7 @@ _SHELL_EXECUTABLES = {
     "tcsh",
     "zsh",
 }
+_COMMAND_WRAPPERS = {"env"}
 _MODULE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
@@ -124,6 +136,26 @@ _RESULT_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
         "wikilinks": list,
     },
     "output-receipt": {"status": str, "reference": str},
+}
+_RESULT_REQUIRED_FIELDS: dict[str, set[str]] = {
+    "score-proposal": {"score"},
+    "scheduler-proposal": set(_RESULT_FIELDS["scheduler-proposal"]),
+    "practice-proposal": set(_RESULT_FIELDS["practice-proposal"]),
+    "source-projection": set(_RESULT_FIELDS["source-projection"]),
+    "output-receipt": set(_RESULT_FIELDS["output-receipt"]),
+}
+_SUPPORT_ACTION_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "kind": str,
+    "response": (str, type(None)),
+    "latency_ms": (int, type(None)),
+}
+_SUPPORT_ACTION_KINDS = {
+    "retry",
+    "retry-unaided",
+    "hint",
+    "worked-feedback",
+    "follow-up",
+    "follow-up-offered",
 }
 
 
@@ -197,8 +229,14 @@ class ModuleManifest:
             or any(not isinstance(arg, str) or not arg for arg in argv)
         ):
             raise ModuleError("module command must use a non-empty argv string array")
-        if Path(argv[0]).name.casefold() in _SHELL_EXECUTABLES:
-            raise ModuleError("module command argv must not invoke shell executables")
+        executable_names = {Path(arg).name.casefold() for arg in argv}
+        if (
+            executable_names & _SHELL_EXECUTABLES
+            or Path(argv[0]).name.casefold() in _COMMAND_WRAPPERS
+        ):
+            raise ModuleError(
+                "module command argv must not invoke shell executables or command wrappers"
+            )
         timeout = command["timeout_seconds"]
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
             raise ModuleError("module timeout_seconds must be numeric")
@@ -298,6 +336,10 @@ class ModuleRunner:
             "LC_ALL": "C.UTF-8",
             "PYTHONIOENCODING": "utf-8",
         }
+        if resource is None or not hasattr(resource, "RLIMIT_NPROC"):
+            raise ModuleError(
+                "module execution requires an OS process limit that prevents descendants"
+            )
         started = time.monotonic()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             try:
@@ -310,6 +352,7 @@ class ModuleRunner:
                     shell=False,
                     env=environment,
                     start_new_session=(os.name == "posix"),
+                    preexec_fn=self._deny_descendant_processes,
                 )
                 assert process.stdin is not None
                 process.stdin.write(encoded)
@@ -340,7 +383,7 @@ class ModuleRunner:
                 self._terminate_process_tree(process, descendants)
             except ModuleError:
                 raise
-            except OSError as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 raise ModuleError(f"module process could not start: {exc}") from exc
             duration_ms = max(0, round((time.monotonic() - started) * 1000))
             stdout_file.seek(0, os.SEEK_END)
@@ -385,6 +428,12 @@ class ModuleRunner:
             duration_ms=duration_ms,
             stdout_sha256=hashlib.sha256(output).hexdigest(),
         )
+
+    @staticmethod
+    def _deny_descendant_processes() -> None:
+        """Run in the module child before exec; v0 modules have no spawn capability."""
+        assert resource is not None
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
 
     @staticmethod
     def _terminate_process_tree(
@@ -464,6 +513,8 @@ class ModuleRunner:
                         else expected.__name__
                     )
                     raise ModuleError(f"{projection}.{field} must be a {type_name}")
+            if projection == "attempt.summary" and "support_actions" in body:
+                cls._validate_support_actions(body["support_actions"])
 
     @classmethod
     def _validate_result_payload(cls, kind: str, payload: dict[str, Any]) -> None:
@@ -471,7 +522,7 @@ class ModuleRunner:
         unknown = sorted(set(payload) - set(schema))
         if unknown:
             raise ModuleError(f"unknown {kind} fields: " + ", ".join(unknown))
-        required = {"score"} if kind == "score-proposal" else set()
+        required = _RESULT_REQUIRED_FIELDS[kind]
         missing = sorted(required - set(payload))
         if missing:
             raise ModuleError(f"missing {kind} fields: " + ", ".join(missing))
@@ -492,6 +543,37 @@ class ModuleRunner:
                     else expected.__name__
                 )
                 raise ModuleError(f"{kind}.{field} must be a {type_name}")
+        if kind == "source-projection":
+            cls._validate_string_list(
+                payload["wikilinks"], "source-projection.wikilinks"
+            )
+
+    @classmethod
+    def _validate_support_actions(cls, value: object) -> None:
+        assert isinstance(value, list)
+        for index, action in enumerate(value):
+            label = f"attempt.summary.support_actions[{index}]"
+            if not isinstance(action, dict):
+                raise ModuleError(f"{label} must be a JSON object")
+            _require_exact_keys(action, set(_SUPPORT_ACTION_FIELDS), label)
+            for field, child in action.items():
+                expected = _SUPPORT_ACTION_FIELDS[field]
+                if isinstance(child, bool) and expected != bool:
+                    valid = False
+                else:
+                    valid = isinstance(child, expected)
+                if not valid:
+                    raise ModuleError(f"{label}.{field} has an invalid type")
+            if action["kind"] not in _SUPPORT_ACTION_KINDS:
+                raise ModuleError(f"{label}.kind is not a supported action")
+            latency = action["latency_ms"]
+            if isinstance(latency, int) and latency < 0:
+                raise ModuleError(f"{label}.latency_ms must be non-negative")
+
+    @staticmethod
+    def _validate_string_list(value: object, label: str) -> None:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ModuleError(f"{label} must be a string array")
 
     @classmethod
     def _require_finite_json(cls, value: object) -> None:
@@ -508,7 +590,8 @@ class ModuleRunner:
     def _contains_private_state_path(cls, value: object) -> bool:
         if isinstance(value, dict):
             for key, child in value.items():
-                if str(key).lower() in _PRIVATE_STATE_KEYS:
+                normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key).casefold()).strip("_")
+                if normalized_key in _PRIVATE_STATE_KEYS:
                     return True
                 if cls._contains_private_state_path(child):
                     return True
