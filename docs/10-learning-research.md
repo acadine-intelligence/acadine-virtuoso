@@ -1,5 +1,7 @@
 # Learning-science basis and limits
 
+For the evidence-ranked memo with verified citations, effect sizes, product boundaries, and the separation between memory scheduling, capability checks, and project prioritization, see [Evidence-ranked learning design](11-evidence-ranked-design.md).
+
 This note records the evidence used to shape Virtuoso. It is a design input, not a claim that the current CLI has proven better learning outcomes. Product effectiveness still requires dogfood data and, later, controlled comparisons.
 
 ## Supported design choices
