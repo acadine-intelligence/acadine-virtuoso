@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .candidates import CandidateService
 from .modules import ModuleError
 from .practice import PracticeError, PracticeIO, PracticeService
 from .workspace import WorkspaceError, WorkspaceService
@@ -100,6 +101,35 @@ def _parser() -> argparse.ArgumentParser:
     source_notes = source_commands.add_parser("notes", help="list indexed note metadata")
     source_notes.add_argument("--id", required=True)
     source_notes.add_argument("--json", action="store_true")
+
+    candidate = commands.add_parser(
+        "candidate", help="surface metadata-only structural review candidates"
+    )
+    candidate_commands = candidate.add_subparsers(
+        dest="candidate_command", required=True
+    )
+    candidate_generate = candidate_commands.add_parser(
+        "generate", help="generate candidates for one indexed note"
+    )
+    candidate_generate.add_argument("--source", required=True)
+    candidate_generate.add_argument("--path", required=True)
+    candidate_generate.add_argument("--limit", type=int, default=20)
+    candidate_generate.add_argument("--json", action="store_true")
+    candidate_list = candidate_commands.add_parser(
+        "list", help="list proposed structural candidates"
+    )
+    candidate_list.add_argument("--source")
+    candidate_list.add_argument(
+        "--kind", choices=("atomic-note", "link", "practice")
+    )
+    candidate_list.add_argument("--run")
+    candidate_list.add_argument("--current-only", action="store_true")
+    candidate_list.add_argument("--json", action="store_true")
+    candidate_show = candidate_commands.add_parser(
+        "show", help="show one proposed structural candidate"
+    )
+    candidate_show.add_argument("--id", required=True)
+    candidate_show.add_argument("--json", action="store_true")
 
     transfer = commands.add_parser(
         "transfer", help="record and inspect real project application evidence"
@@ -254,6 +284,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "candidate":
+            service = CandidateService(workspace)
+            if args.candidate_command == "generate":
+                run = service.generate(
+                    source_id=args.source,
+                    relative_path=args.path,
+                    limit=args.limit,
+                )
+                _emit(run.to_dict(), as_json=args.json)
+                return 0
+            if args.candidate_command == "list":
+                candidates = service.list(
+                    source_id=args.source,
+                    kind=args.kind,
+                    run_id=args.run,
+                    current_only=args.current_only,
+                )
+                _emit(
+                    {
+                        "schema": "virtuoso/review-candidate-list@0.1",
+                        "candidates": [candidate.to_dict() for candidate in candidates],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.candidate_command == "show":
+                _emit(service.get(args.id).to_dict(), as_json=args.json)
+                return 0
         if args.command == "transfer":
             if args.transfer_command == "record":
                 event = workspace.record_transfer(

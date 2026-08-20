@@ -55,6 +55,9 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
     def _downgrade_fixture_to_v4(service: WorkspaceService) -> None:
         with sqlite3.connect(service.db_path) as db:
             for table in (
+                "candidate_source_refs",
+                "review_candidates",
+                "candidate_runs",
                 "transfer_check_completions",
                 "transfer_check_predictions",
                 "transfer_checks",
@@ -74,7 +77,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
 
         reopened = WorkspaceService.open(self.root)
 
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5])
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6])
         with sqlite3.connect(reopened.db_path) as db:
             tables = {
                 row[0]
@@ -127,7 +130,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6])
         self._downgrade_fixture_to_v4(service)
         with sqlite3.connect(service.db_path) as db:
             db.execute(
@@ -161,7 +164,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6])
         with sqlite3.connect(service.db_path) as db:
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE transfer_check_completions")
@@ -213,9 +216,15 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
     ) -> None:
         service, _event = self._workspace_with_transfer()
         with sqlite3.connect(service.db_path) as db:
-            db.execute("DROP TABLE transfer_check_completions")
-            db.execute("DROP TABLE transfer_check_predictions")
-            db.execute("DELETE FROM schema_migrations WHERE version = 5")
+            for table in (
+                "candidate_source_refs",
+                "review_candidates",
+                "candidate_runs",
+                "transfer_check_completions",
+                "transfer_check_predictions",
+            ):
+                db.execute(f'DROP TABLE "{table}"')
+            db.execute("DELETE FROM schema_migrations WHERE version >= 5")
 
         with self.assertRaisesRegex(
             WorkspaceError, "already exists|workspace database migration failed"
@@ -239,6 +248,13 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
     ) -> None:
         service, _event = self._workspace_with_transfer()
         with sqlite3.connect(service.db_path) as db:
+            for table in (
+                "candidate_source_refs",
+                "review_candidates",
+                "candidate_runs",
+            ):
+                db.execute(f'DROP TABLE "{table}"')
+            db.execute("DELETE FROM schema_migrations WHERE version = 6")
             db.execute("DROP TABLE transfer_check_completions")
 
         with self.assertRaisesRegex(
