@@ -12,7 +12,7 @@ from virtuoso.workspace import WorkspaceError, WorkspaceService
 class ProjectTransferEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "learner"
+        self.root = Path(self.tmp.name).resolve() / "learner"
         self.service = WorkspaceService.init(self.root)
         self.item = self.service.add_item(
             item_id="testing-effect",
@@ -101,8 +101,8 @@ class ProjectTransferEvidenceTests(unittest.TestCase):
             migration = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             db.execute("DROP TABLE transfer_events")
             db.execute("CREATE TABLE transfer_events(event_id TEXT)")
-        self.assertEqual(migration, 3)
-        with self.assertRaisesRegex(WorkspaceError, "transfer_events is missing"):
+        self.assertEqual(migration, 4)
+        with self.assertRaisesRegex(WorkspaceError, "transfer_events"):
             WorkspaceService.open(self.root)
 
 

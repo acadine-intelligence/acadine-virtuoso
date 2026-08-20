@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -31,15 +32,99 @@ _ALLOWED_READS = {
     "project.summary",
 }
 _PRIVATE_STATE_KEYS = {
+    "api_key",
+    "apikey",
+    "auth",
     "database_path",
     "db_path",
+    "directory",
+    "file",
+    "home",
+    "password",
+    "path",
     "state_path",
     "sqlite_path",
+    "token",
+    "workspace_path",
+    "workspace_root",
     "credentials",
     "secrets",
 }
+_SHELL_EXECUTABLES = {
+    "bash",
+    "cmd",
+    "cmd.exe",
+    "csh",
+    "fish",
+    "powershell",
+    "pwsh",
+    "sh",
+    "tcsh",
+    "zsh",
+}
 _MODULE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_PROJECTION_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "challenge.summary": {
+        "item_id": str,
+        "title": str,
+        "focus": str,
+        "prompt": str,
+        "learning_context": str,
+        "priority": (int, float),
+    },
+    "attempt.summary": {
+        "result": str,
+        "initial_latency_ms": int,
+        "confidence": int,
+        "open_notes": bool,
+        "agent_help": str,
+        "support_actions": list,
+    },
+    "focus.summary": {
+        "focus": str,
+        "session_intent": str,
+        "available_minutes": int,
+    },
+    "scheduler.summary": {
+        "algorithm": str,
+        "algorithm_version": str,
+        "learning_context": str,
+        "due_at": str,
+        "retrievability": (int, float),
+    },
+    "project.summary": {
+        "project_id": str,
+        "title": str,
+        "summary": str,
+    },
+}
+_RESULT_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "score-proposal": {"score": (int, float), "rationale": str},
+    "scheduler-proposal": {
+        "due_at": str,
+        "algorithm": str,
+        "algorithm_version": str,
+        "learning_context": str,
+        "configuration": dict,
+        "rationale": str,
+    },
+    "practice-proposal": {
+        "title": str,
+        "prompt": str,
+        "hint": str,
+        "follow_up": str,
+    },
+    "source-projection": {
+        "source_id": str,
+        "relative_path": str,
+        "title": str,
+        "content_hash": str,
+        "wikilinks": list,
+    },
+    "output-receipt": {"status": str, "reference": str},
+}
 
 
 class ModuleError(RuntimeError):
@@ -112,6 +197,8 @@ class ModuleManifest:
             or any(not isinstance(arg, str) or not arg for arg in argv)
         ):
             raise ModuleError("module command must use a non-empty argv string array")
+        if Path(argv[0]).name.casefold() in _SHELL_EXECUTABLES:
+            raise ModuleError("module command argv must not invoke shell executables")
         timeout = command["timeout_seconds"]
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
             raise ModuleError("module timeout_seconds must be numeric")
@@ -199,7 +286,9 @@ class ModuleRunner:
             )
         if self._contains_private_state_path(request):
             raise ModuleError("module request contains a private state path or secret")
-        encoded = (json.dumps(request, sort_keys=True) + "\n").encode("utf-8")
+        self._validate_projections(projections)
+        self._require_finite_json(request)
+        encoded = (json.dumps(request, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         if len(encoded) > self.max_input_bytes:
             raise ModuleError("module request exceeds input limit")
 
@@ -222,14 +311,33 @@ class ModuleRunner:
                     env=environment,
                     start_new_session=(os.name == "posix"),
                 )
-                try:
-                    process.communicate(input=encoded, timeout=manifest.timeout_seconds)
-                except subprocess.TimeoutExpired as exc:
-                    self._terminate_process_tree(process)
-                    process.communicate()
-                    raise ModuleError(
-                        f"module timed out after {manifest.timeout_seconds:g} seconds"
-                    ) from exc
+                assert process.stdin is not None
+                process.stdin.write(encoded)
+                process.stdin.close()
+                deadline = started + manifest.timeout_seconds
+                descendants: set[int] = set()
+                while process.poll() is None:
+                    descendants.update(self._descendant_pids(process.pid))
+                    if os.fstat(stdout_file.fileno()).st_size > self.max_output_bytes:
+                        self._terminate_process_tree(process, descendants)
+                        process.wait()
+                        raise ModuleError("module exceeded output limit")
+                    if os.fstat(stderr_file.fileno()).st_size > self.max_output_bytes:
+                        self._terminate_process_tree(process, descendants)
+                        process.wait()
+                        raise ModuleError("module exceeded error output limit")
+                    if time.monotonic() >= deadline:
+                        descendants.update(self._descendant_pids(process.pid))
+                        self._terminate_process_tree(process, descendants)
+                        process.wait()
+                        raise ModuleError(
+                            f"module timed out after {manifest.timeout_seconds:g} seconds"
+                        )
+                    time.sleep(0.01)
+                # A successful executable must not leave work running after its
+                # proposal has been accepted. The process group still exists
+                # after the group leader exits, so always terminate it.
+                self._terminate_process_tree(process, descendants)
             except ModuleError:
                 raise
             except OSError as exc:
@@ -266,10 +374,8 @@ class ModuleRunner:
         payload = response["payload"]
         if not isinstance(payload, dict) or not payload:
             raise ModuleError("module result payload must be a non-empty JSON object")
-        if manifest.category == "scoring-signal":
-            score = payload.get("score")
-            if not isinstance(score, (int, float)) or isinstance(score, bool):
-                raise ModuleError("score-proposal payload requires a numeric score")
+        self._require_finite_json(payload)
+        self._validate_result_payload(manifest.returns, payload)
 
         return ModuleRunResult(
             module_id=manifest.module_id,
@@ -281,16 +387,122 @@ class ModuleRunner:
         )
 
     @staticmethod
-    def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
+    def _terminate_process_tree(
+        process: subprocess.Popen[bytes], descendants: set[int] | None = None
+    ) -> None:
         if os.name == "posix":
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-                return
-            except ProcessLookupError:
-                return
-        process.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+            for pid in descendants or ():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return
+        if process.poll() is None:
+            process.kill()
+
+    @staticmethod
+    def _descendant_pids(root_pid: int) -> set[int]:
+        if os.name != "posix":
+            return set()
+        try:
+            value = subprocess.run(
+                ["ps", "-axo", "pid=,ppid="],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        children: dict[int, set[int]] = {}
+        for line in value.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid, ppid = map(int, parts)
+            except ValueError:
+                continue
+            children.setdefault(ppid, set()).add(pid)
+        result: set[int] = set()
+        pending = list(children.get(root_pid, ()))
+        while pending:
+            pid = pending.pop()
+            if pid in result:
+                continue
+            result.add(pid)
+            pending.extend(children.get(pid, ()))
+        return result
+
+    @classmethod
+    def _validate_projections(cls, projections: dict[str, Any]) -> None:
+        for projection, body in projections.items():
+            if not isinstance(body, dict):
+                raise ModuleError(f"{projection} must be a JSON object")
+            schema = _PROJECTION_FIELDS[projection]
+            unknown = sorted(set(body) - set(schema))
+            if unknown:
+                raise ModuleError(
+                    f"unknown {projection} fields: " + ", ".join(unknown)
+                )
+            for field, value in body.items():
+                expected = schema[field]
+                if isinstance(value, bool) and expected != bool:
+                    valid = False
+                else:
+                    valid = isinstance(value, expected)
+                if not valid:
+                    type_name = (
+                        "number"
+                        if isinstance(expected, tuple)
+                        else "string"
+                        if expected is str
+                        else expected.__name__
+                    )
+                    raise ModuleError(f"{projection}.{field} must be a {type_name}")
+
+    @classmethod
+    def _validate_result_payload(cls, kind: str, payload: dict[str, Any]) -> None:
+        schema = _RESULT_FIELDS[kind]
+        unknown = sorted(set(payload) - set(schema))
+        if unknown:
+            raise ModuleError(f"unknown {kind} fields: " + ", ".join(unknown))
+        required = {"score"} if kind == "score-proposal" else set()
+        missing = sorted(required - set(payload))
+        if missing:
+            raise ModuleError(f"missing {kind} fields: " + ", ".join(missing))
+        if not payload:
+            raise ModuleError("module result payload must be a non-empty JSON object")
+        for field, value in payload.items():
+            expected = schema[field]
+            if isinstance(value, bool) and expected != bool:
+                valid = False
+            else:
+                valid = isinstance(value, expected)
+            if not valid:
+                type_name = (
+                    "number"
+                    if isinstance(expected, tuple)
+                    else "string"
+                    if expected is str
+                    else expected.__name__
+                )
+                raise ModuleError(f"{kind}.{field} must be a {type_name}")
+
+    @classmethod
+    def _require_finite_json(cls, value: object) -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ModuleError("module data must contain only finite JSON numbers")
+        if isinstance(value, dict):
+            for child in value.values():
+                cls._require_finite_json(child)
+        elif isinstance(value, list):
+            for child in value:
+                cls._require_finite_json(child)
 
     @classmethod
     def _contains_private_state_path(cls, value: object) -> bool:
@@ -302,4 +514,12 @@ class ModuleRunner:
                     return True
         elif isinstance(value, list):
             return any(cls._contains_private_state_path(child) for child in value)
+        elif isinstance(value, str):
+            normalized = value.strip()
+            if (
+                normalized.startswith(("/", "~/", "file://"))
+                or _WINDOWS_ABSOLUTE_PATH.match(normalized)
+                or "/.virtuoso/" in normalized.replace("\\", "/")
+            ):
+                return True
         return False

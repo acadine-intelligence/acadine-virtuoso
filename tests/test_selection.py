@@ -33,7 +33,7 @@ class _Clock:
 class SelectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "learner"
+        self.root = Path(self.tmp.name).resolve() / "learner"
         self.workspace = WorkspaceService.init(self.root)
         for item_id in ("beta", "alpha"):
             self.workspace.add_item(

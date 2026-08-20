@@ -11,8 +11,8 @@ from virtuoso.workspace import WorkspaceError, WorkspaceService
 class SourceIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "learner"
-        self.vault = Path(self.tmp.name) / "vault"
+        self.root = Path(self.tmp.name).resolve() / "learner"
+        self.vault = Path(self.tmp.name).resolve() / "vault"
         self.vault.mkdir()
         self.service = WorkspaceService.init(self.root)
 
@@ -44,7 +44,7 @@ class SourceIndexTests(unittest.TestCase):
             )
 
     def test_connect_source_rejects_symlinked_root(self) -> None:
-        alias = Path(self.tmp.name) / "vault-alias"
+        alias = Path(self.tmp.name).resolve() / "vault-alias"
         alias.symlink_to(self.vault, target_is_directory=True)
 
         with self.assertRaisesRegex(WorkspaceError, "source root must not be a symlink"):
@@ -57,7 +57,7 @@ class SourceIndexTests(unittest.TestCase):
             db.execute("DROP TABLE source_documents")
             db.execute("CREATE TABLE source_documents(source_id TEXT)")
 
-        with self.assertRaisesRegex(WorkspaceError, "source_documents is missing"):
+        with self.assertRaisesRegex(WorkspaceError, "source_documents"):
             WorkspaceService.open(self.root)
 
     def test_scan_indexes_metadata_and_wikilinks_without_copying_bodies(self) -> None:
@@ -108,7 +108,7 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
         self.assertEqual(original, b"# Atomic\n\nHuman-authored source.\n")
 
     def test_scan_rejects_markdown_symlink_and_file_limit_without_partial_update(self) -> None:
-        outside = Path(self.tmp.name) / "outside.md"
+        outside = Path(self.tmp.name).resolve() / "outside.md"
         outside.write_text("# Outside\n", encoding="utf-8")
         (self.vault / "escape.md").symlink_to(outside)
         self.service.add_source(source_id="notes", kind="markdown", root=self.vault)
@@ -125,7 +125,7 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
         self.assertEqual(self.service.list_source_documents("notes"), [])
 
     def test_scan_prunes_symlinked_directories(self) -> None:
-        outside = Path(self.tmp.name) / "outside"
+        outside = Path(self.tmp.name).resolve() / "outside"
         outside.mkdir()
         (outside / "private.md").write_text("# Private\n\nDo not index.\n", encoding="utf-8")
         (self.vault / "linked-dir").symlink_to(outside, target_is_directory=True)
@@ -206,9 +206,9 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
             item_id="testing-effect", source_id="vault", relative_path="Testing Effect.md"
         )
 
-        original = Path(self.tmp.name) / "original-vault"
+        original = Path(self.tmp.name).resolve() / "original-vault"
         self.vault.rename(original)
-        outside = Path(self.tmp.name) / "outside-vault"
+        outside = Path(self.tmp.name).resolve() / "outside-vault"
         outside.mkdir()
         (outside / "Testing Effect.md").write_text("# Private replacement\n", encoding="utf-8")
         self.vault.symlink_to(outside, target_is_directory=True)

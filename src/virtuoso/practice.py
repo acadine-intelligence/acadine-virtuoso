@@ -200,7 +200,10 @@ class PracticeService:
     def _schedule(
         self, *, item: LearningItem, attempt: AttemptRecord
     ) -> SchedulerProposal:
-        scheduler_config = self.workspace.configuration().get("scheduler")
+        try:
+            scheduler_config = self.workspace.configuration().get("scheduler")
+        except WorkspaceError as exc:
+            raise PracticeError(str(exc)) from exc
         if not isinstance(scheduler_config, dict):
             raise PracticeError("workspace scheduler configuration is missing")
         if scheduler_config.get("algorithm") != "fsrs":

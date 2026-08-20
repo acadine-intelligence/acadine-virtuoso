@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -20,6 +21,9 @@ _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SOURCE_KINDS = {"markdown", "obsidian"}
 _TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
 _TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+_CURRENT_MIGRATION_VERSION = 4
 
 
 class WorkspaceError(RuntimeError):
@@ -123,8 +127,9 @@ class WorkspaceService:
                 f"directory is not empty and is not a Virtuoso workspace: {service.root}"
             )
 
-        service.items_dir.mkdir(parents=True, exist_ok=True)
-        service.state_dir.mkdir(parents=True, exist_ok=True)
+        service._make_private_directory(service.root, parents=True)
+        service._make_private_directory(service.items_dir)
+        service._make_private_directory(service.state_dir)
         config = {
             "schema": WORKSPACE_SCHEMA,
             "mode": "simple",
@@ -135,8 +140,10 @@ class WorkspaceService:
                 "enable_fuzzing": False,
             },
         }
-        service.config_path.write_text(
-            json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        service._write_private_text_exclusive(
+            service.config_path,
+            json.dumps(config, indent=2, sort_keys=True) + "\n",
+            label="workspace configuration",
         )
         service._migrate()
         return service
@@ -162,6 +169,11 @@ class WorkspaceService:
             raise WorkspaceError(
                 f"workspace root must not be a symlink: {self.requested_root}"
             )
+        for ancestor in self.requested_root.parents:
+            if ancestor.is_symlink():
+                raise WorkspaceError(
+                    f"workspace root has a symlink ancestor: {ancestor}"
+                )
         owned = (self.root, self.config_path, self.items_dir, self.state_dir)
         if require_database:
             owned = (*owned, self.db_path)
@@ -175,21 +187,147 @@ class WorkspaceService:
         if self.state_dir.exists() and not self.state_dir.is_dir():
             raise WorkspaceError(f"state path is not a directory: {self.state_dir}")
 
+    @staticmethod
+    def _make_private_directory(path: Path, *, parents: bool = False) -> None:
+        try:
+            path.mkdir(
+                mode=_PRIVATE_DIRECTORY_MODE,
+                parents=parents,
+                exist_ok=True,
+            )
+            path.chmod(_PRIVATE_DIRECTORY_MODE)
+        except OSError as exc:
+            raise WorkspaceError(f"cannot create private workspace directory {path}: {exc}") from exc
+
+    @staticmethod
+    def _write_private_text_exclusive(
+        path: Path, text: str, *, label: str
+    ) -> tuple[int, int]:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        identity: tuple[int, int] | None = None
+        try:
+            descriptor = os.open(path, flags, _PRIVATE_FILE_MODE)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                status = os.fstat(handle.fileno())
+                identity = (status.st_dev, status.st_ino)
+            path.chmod(_PRIVATE_FILE_MODE)
+            return identity
+        except OSError as exc:
+            if identity is not None:
+                WorkspaceService._unlink_if_identity(path, identity)
+            raise WorkspaceError(f"cannot write {label} {path}: {exc}") from exc
+
+    @staticmethod
+    def _unlink_if_identity(path: Path, identity: tuple[int, int]) -> None:
+        try:
+            status = path.stat(follow_symlinks=False)
+            if (status.st_dev, status.st_ino) == identity:
+                path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+
+    def _read_item_bytes(self, path: Path, *, item_id: str) -> bytes:
+        if path.is_symlink():
+            raise WorkspaceError(f"item path must not be a symlink: {item_id}")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+            with os.fdopen(descriptor, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise WorkspaceError(f"item file is unavailable: {path}: {exc}") from exc
+
     def configuration(self) -> dict[str, Any]:
         try:
-            value = json.loads(self.config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            value = self._load_json(
+                self.config_path.read_text(encoding="utf-8"),
+                label="workspace configuration",
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise WorkspaceError(f"invalid workspace configuration: {exc}") from exc
         if not isinstance(value, dict):
             raise WorkspaceError("workspace configuration must be a JSON object")
+        self._require_exact_fields(
+            value,
+            {"schema", "mode", "scheduler"},
+            "workspace configuration",
+        )
+        if value["schema"] != WORKSPACE_SCHEMA:
+            raise WorkspaceError(f"unsupported workspace schema: {value['schema']!r}")
+        if value["mode"] != "simple":
+            raise WorkspaceError("workspace mode must be 'simple'")
+        scheduler = value["scheduler"]
+        if not isinstance(scheduler, dict):
+            raise WorkspaceError("workspace scheduler configuration must be a JSON object")
+        self._require_exact_fields(
+            scheduler,
+            {"algorithm", "context", "desired_retention", "enable_fuzzing"},
+            "scheduler configuration",
+        )
+        if scheduler["algorithm"] != "fsrs":
+            raise WorkspaceError("scheduler algorithm must be 'fsrs'")
+        context = scheduler["context"]
+        if not isinstance(context, str) or not context.strip():
+            raise WorkspaceError("scheduler context must be a non-empty string")
+        desired_retention = scheduler["desired_retention"]
+        if (
+            not isinstance(desired_retention, (int, float))
+            or isinstance(desired_retention, bool)
+            or not math.isfinite(float(desired_retention))
+            or not 0 < float(desired_retention) < 1
+        ):
+            raise WorkspaceError(
+                "scheduler desired_retention must be a finite number between 0 and 1"
+            )
+        if not isinstance(scheduler["enable_fuzzing"], bool):
+            raise WorkspaceError("scheduler enable_fuzzing must be true or false")
         return value
+
+    @staticmethod
+    def _load_json(text: str, *, label: str) -> Any:
+        def reject_nonfinite(value: str) -> None:
+            raise ValueError(f"{label} must use finite JSON numbers, not {value}")
+
+        return json.loads(text, parse_constant=reject_nonfinite)
+
+    @staticmethod
+    def _require_exact_fields(
+        value: dict[str, Any], expected: set[str], label: str
+    ) -> None:
+        unknown = sorted(set(value) - expected)
+        missing = sorted(expected - set(value))
+        if unknown:
+            raise WorkspaceError(f"unknown {label} fields: " + ", ".join(unknown))
+        if missing:
+            raise WorkspaceError(f"missing {label} fields: " + ", ".join(missing))
 
     def _connect(self) -> sqlite3.Connection:
         try:
-            db = sqlite3.connect(self.db_path)
+            if self.db_path.is_symlink():
+                raise WorkspaceError(
+                    f"Virtuoso-owned path must not be a symlink: {self.db_path}"
+                )
+            if not self.db_path.exists():
+                flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(self.db_path, flags, _PRIVATE_FILE_MODE)
+                os.close(descriptor)
+            db = sqlite3.connect(self.db_path, timeout=0.25)
             db.execute("PRAGMA foreign_keys = ON")
             db.row_factory = sqlite3.Row
             return db
+        except WorkspaceError:
+            raise
+        except OSError as exc:
+            raise WorkspaceError(f"cannot create private workspace database: {exc}") from exc
         except sqlite3.Error as exc:
             raise WorkspaceError(f"cannot open workspace database: {exc}") from exc
 
@@ -313,21 +451,106 @@ class WorkspaceService:
                 claims_mastery INTEGER NOT NULL DEFAULT 0 CHECK(claims_mastery = 0),
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS attempt_timings (
+                event_id TEXT PRIMARY KEY REFERENCES attempts(event_id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS module_run_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                module_version TEXT NOT NULL,
+                category TEXT NOT NULL,
+                kind TEXT,
+                manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256) = 64),
+                stdout_sha256 TEXT CHECK(stdout_sha256 IS NULL OR length(stdout_sha256) = 64),
+                status TEXT NOT NULL CHECK(status IN ('succeeded','failed')),
+                error TEXT,
+                duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                CHECK(
+                    (status = 'succeeded' AND kind IS NOT NULL AND stdout_sha256 IS NOT NULL AND error IS NULL)
+                    OR (status = 'failed' AND error IS NOT NULL)
+                )
+            )""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            objects = {
+                row[0]: row[1]
+                for row in db.execute(
+                    """SELECT name, type FROM sqlite_master
+                       WHERE name NOT LIKE 'sqlite_%'
+                         AND type IN ('table','view','trigger','index')"""
+                ).fetchall()
+            }
+            if "schema_migrations" in objects:
+                if objects["schema_migrations"] != "table":
+                    raise WorkspaceError(
+                        "incompatible database schema: schema_migrations must be a table"
+                    )
+                self._validate_table_definition(
+                    db,
+                    table_name="schema_migrations",
+                    expected_statement=statements[0],
+                )
+                versions = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    ).fetchall()
+                ]
+            else:
+                if objects:
+                    raise WorkspaceError(
+                        "incompatible database schema: existing objects have no migration history"
+                    )
+                versions = []
+
+            if versions:
+                latest = versions[-1]
+                if latest > _CURRENT_MIGRATION_VERSION:
+                    raise WorkspaceError(
+                        "database uses future migration version "
+                        f"{latest}; this Virtuoso supports through {_CURRENT_MIGRATION_VERSION}"
+                    )
+                if versions != list(range(1, latest + 1)):
+                    raise WorkspaceError(
+                        "database migration history is not contiguous from version 1"
+                    )
+            elif objects:
+                raise WorkspaceError(
+                    "database migration history is empty for an existing schema"
+                )
+            else:
+                latest = 0
+
             for statement in statements:
                 db.execute(statement)
-            self._validate_database_schema(db)
-            db.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)"
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)"
-            )
+            if latest < 4:
+                db.execute(
+                    """INSERT OR IGNORE INTO attempt_timings(
+                           event_id, started_at, completed_at
+                       )
+                       SELECT event_id, occurred_at, occurred_at FROM attempts"""
+                )
+                db.execute(
+                    """INSERT OR IGNORE INTO module_run_receipts(
+                           receipt_id, module_id, module_version, category, kind,
+                           manifest_sha256, stdout_sha256, status, error,
+                           duration_ms, started_at, completed_at
+                       )
+                       SELECT receipt_id, module_id, module_version, category, kind,
+                              manifest_sha256, stdout_sha256, 'succeeded', NULL,
+                              duration_ms, occurred_at, occurred_at
+                       FROM module_receipts"""
+                )
+            self._validate_database_schema(db, statements=statements)
+            for version in range(latest + 1, _CURRENT_MIGRATION_VERSION + 1):
+                db.execute(
+                    "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
+                )
 
     def add_source(
         self, *, source_id: str, kind: str, root: Path | str
@@ -625,68 +848,172 @@ class WorkspaceService:
         return tuple(sorted(links, key=str.casefold))
 
     @staticmethod
-    def _validate_database_schema(db: sqlite3.Connection) -> None:
-        required: dict[str, set[str]] = {
-            "schema_migrations": {"version", "applied_at"},
-            "items": {"item_id", "title", "focus", "relative_path", "content_hash"},
-            "attempts": {
-                "event_id", "item_id", "item_content_hash", "occurred_at",
-                "initial_response", "initial_latency_ms", "result", "confidence",
-                "open_notes", "agent_help", "support_json",
-            },
-            "scheduler_state": {
-                "item_id", "algorithm", "algorithm_version", "learning_context",
-                "configuration_json", "state_json", "source_event_id", "updated_at",
-            },
-            "scheduler_proposals": {
-                "proposal_id", "source_event_id", "item_id", "algorithm",
-                "algorithm_version", "learning_context", "configuration_json",
-                "previous_state_json", "proposed_state_json", "due_at",
-                "rationale", "created_at",
-            },
-            "module_receipts": {
-                "receipt_id", "module_id", "module_version", "category", "kind",
-                "manifest_sha256", "stdout_sha256", "duration_ms", "occurred_at",
-            },
-            "sources": {
-                "source_id", "kind", "root_path", "read_only", "created_at",
-            },
-            "source_documents": {
-                "source_id", "relative_path", "title", "content_hash",
-                "wikilinks_json", "modified_ns", "byte_size", "indexed_at",
-            },
-            "source_scan_receipts": {
-                "receipt_id", "source_id", "indexed", "removed", "skipped",
-                "total_bytes", "occurred_at",
-            },
-            "item_source_links": {
-                "item_id", "source_id", "source_relative_path",
-                "source_content_hash", "linked_at",
-            },
-            "transfer_events": {
-                "event_id", "item_id", "item_content_hash", "project_id",
-                "use_case", "outcome", "independence", "artifact_reference",
-                "reflection", "occurred_at", "delayed_check_due_at",
-                "claims_mastery", "created_at",
-            },
-        }
-        for name, expected_columns in required.items():
-            row = db.execute(
-                "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+    def _normalized_schema_sql(value: str | None) -> str:
+        return re.sub(r"\s+", "", value or "").rstrip(";").lower()
+
+    @classmethod
+    def _validate_table_definition(
+        cls,
+        db: sqlite3.Connection,
+        *,
+        table_name: str,
+        expected_statement: str,
+    ) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            expected_db.execute(expected_statement)
+            expected_row = expected_db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
             ).fetchone()
-            if row is None or row[0] != "table":
-                raise WorkspaceError(
-                    f"incompatible database schema: {name} must be a table"
-                )
-            actual = {
-                column[1] for column in db.execute(f'PRAGMA table_info("{name}")')
+        finally:
+            expected_db.close()
+        actual_row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if expected_row is None or actual_row is None:
+            raise WorkspaceError(
+                f"incompatible database schema: {table_name} must be a table"
+            )
+        if cls._normalized_schema_sql(actual_row[0]) != cls._normalized_schema_sql(
+            expected_row[0]
+        ):
+            raise WorkspaceError(
+                f"incompatible database schema: {table_name} definition does not match"
+            )
+
+    @classmethod
+    def _validate_database_schema(
+        cls,
+        db: sqlite3.Connection,
+        *,
+        statements: tuple[str, ...],
+    ) -> None:
+        expected_db = sqlite3.connect(":memory:")
+        try:
+            expected_db.execute("PRAGMA foreign_keys = ON")
+            for statement in statements:
+                expected_db.execute(statement)
+            expected_objects = {
+                (row[0], row[1])
+                for row in expected_db.execute(
+                    """SELECT name, type FROM sqlite_master
+                       WHERE name NOT LIKE 'sqlite_%'
+                         AND type IN ('table','view','trigger','index')"""
+                ).fetchall()
             }
-            missing = sorted(expected_columns - actual)
-            if missing:
+            actual_objects = {
+                (row[0], row[1])
+                for row in db.execute(
+                    """SELECT name, type FROM sqlite_master
+                       WHERE name NOT LIKE 'sqlite_%'
+                         AND type IN ('table','view','trigger','index')"""
+                ).fetchall()
+            }
+            if actual_objects != expected_objects:
+                missing = sorted(expected_objects - actual_objects)
+                unexpected = sorted(actual_objects - expected_objects)
+                details: list[str] = []
+                if missing:
+                    details.append(f"missing objects {missing!r}")
+                if unexpected:
+                    details.append(f"unexpected objects {unexpected!r}")
                 raise WorkspaceError(
-                    f"incompatible database schema: {name} is missing "
-                    + ", ".join(missing)
+                    "incompatible database schema: " + "; ".join(details)
                 )
+
+            for table_name, object_type in sorted(expected_objects):
+                if object_type != "table":
+                    continue
+                expected_sql = expected_db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table_name,),
+                ).fetchone()[0]
+                actual_sql = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table_name,),
+                ).fetchone()[0]
+                if cls._normalized_schema_sql(actual_sql) != cls._normalized_schema_sql(
+                    expected_sql
+                ):
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"{table_name} constraints or definition do not match"
+                    )
+
+                expected_columns = [
+                    tuple(row)
+                    for row in expected_db.execute(
+                        f'PRAGMA table_info("{table_name}")'
+                    ).fetchall()
+                ]
+                actual_columns = [
+                    tuple(row)
+                    for row in db.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                ]
+                if actual_columns != expected_columns:
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"{table_name} columns, types, nullability, or primary key do not match"
+                    )
+
+                expected_foreign_keys = sorted(
+                    tuple(row)
+                    for row in expected_db.execute(
+                        f'PRAGMA foreign_key_list("{table_name}")'
+                    ).fetchall()
+                )
+                actual_foreign_keys = sorted(
+                    tuple(row)
+                    for row in db.execute(
+                        f'PRAGMA foreign_key_list("{table_name}")'
+                    ).fetchall()
+                )
+                if actual_foreign_keys != expected_foreign_keys:
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"{table_name} foreign keys do not match"
+                    )
+
+                def unique_indexes(connection: sqlite3.Connection) -> list[tuple[Any, ...]]:
+                    definitions: list[tuple[Any, ...]] = []
+                    for index in connection.execute(
+                        f'PRAGMA index_list("{table_name}")'
+                    ).fetchall():
+                        if not index[2]:
+                            continue
+                        columns = tuple(
+                            row[2]
+                            for row in connection.execute(
+                                f'PRAGMA index_info("{index[1]}")'
+                            ).fetchall()
+                        )
+                        definitions.append((columns, index[3], index[4]))
+                    return sorted(definitions)
+
+                if unique_indexes(db) != unique_indexes(expected_db):
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"{table_name} unique constraints do not match"
+                    )
+        finally:
+            expected_db.close()
+
+        foreign_keys_enabled = db.execute("PRAGMA foreign_keys").fetchone()[0]
+        if foreign_keys_enabled != 1:
+            raise WorkspaceError("workspace database foreign key enforcement is disabled")
+        foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise WorkspaceError(
+                "workspace database foreign key integrity check failed; "
+                f"{len(foreign_key_errors)} violation(s) found"
+            )
+        quick_check = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
+        if quick_check != ["ok"]:
+            raise WorkspaceError(
+                "workspace database integrity check failed: " + "; ".join(quick_check)
+            )
 
     def record_transfer(
         self,
@@ -827,6 +1154,8 @@ class WorkspaceService:
             )
 
         path = self.items_dir / f"{item_id}.md"
+        if path.is_symlink():
+            raise WorkspaceError(f"item path must not be a symlink: {item_id}")
         if path.exists():
             raise WorkspaceError(f"item already exists: {item_id}")
 
@@ -840,9 +1169,17 @@ class WorkspaceService:
             follow_up=follow_up.strip() if follow_up and follow_up.strip() else None,
         )
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        path.write_text(text, encoding="utf-8")
+        file_identity: tuple[int, int] | None = None
         try:
             with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if path.is_symlink():
+                    raise WorkspaceError(f"item path must not be a symlink: {item_id}")
+                if path.exists():
+                    raise WorkspaceError(f"item already exists: {item_id}")
+                file_identity = self._write_private_text_exclusive(
+                    path, text, label="learning item"
+                )
                 db.execute(
                     """
                     INSERT INTO items(item_id, title, focus, relative_path, content_hash)
@@ -851,8 +1188,17 @@ class WorkspaceService:
                     (item_id, title.strip(), focus.strip(), f"items/{path.name}", content_hash),
                 )
         except sqlite3.IntegrityError as exc:
-            path.unlink(missing_ok=True)
+            if file_identity is not None:
+                self._unlink_if_identity(path, file_identity)
             raise WorkspaceError(f"item already exists: {item_id}") from exc
+        except sqlite3.Error as exc:
+            if file_identity is not None:
+                self._unlink_if_identity(path, file_identity)
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        except WorkspaceError:
+            if file_identity is not None:
+                self._unlink_if_identity(path, file_identity)
+            raise
 
         return ItemSummary(
             item_id=item_id,
@@ -872,14 +1218,19 @@ class WorkspaceService:
             ).fetchone()
         if row is None:
             raise WorkspaceError(f"no learning item with id: {item_id}")
-        path = (self.root / row["relative_path"]).resolve()
+        path = self.root / row["relative_path"]
+        if path.is_symlink():
+            raise WorkspaceError(f"item path must not be a symlink: {item_id}")
         try:
-            path.relative_to(self.items_dir.resolve())
+            path.relative_to(self.items_dir)
         except ValueError as exc:
             raise WorkspaceError(f"item path escapes workspace: {item_id}") from exc
         if not path.is_file():
             raise WorkspaceError(f"item file is missing: {path}")
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = self._read_item_bytes(path, item_id=item_id).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorkspaceError(f"item file is not valid UTF-8: {path}") from exc
         current_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if current_hash != row["content_hash"]:
             raise WorkspaceError(
@@ -1027,7 +1378,15 @@ class WorkspaceService:
         for row in rows:
             attempt = dict(row)
             attempt["open_notes"] = bool(attempt["open_notes"])
-            attempt["support_actions"] = json.loads(attempt["support_json"])
+            try:
+                support_actions = self._load_json(
+                    attempt["support_json"], label="attempt support JSON"
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise WorkspaceError(f"invalid attempt support JSON: {exc}") from exc
+            if not isinstance(support_actions, list):
+                raise WorkspaceError("invalid attempt support JSON: expected a JSON array")
+            attempt["support_actions"] = support_actions
             attempts.append(attempt)
         return attempts
 
@@ -1080,12 +1439,83 @@ class WorkspaceService:
             )
         return receipt
 
+    def run_module(
+        self,
+        *,
+        runner: Any,
+        manifest: Any,
+        request: dict[str, Any],
+        allow_trusted: bool = False,
+    ) -> Any:
+        """Run a local executable and retain an attributable success/failure receipt."""
+        import time
+
+        from .modules import ModuleError
+
+        manifest_sha256 = getattr(manifest, "manifest_sha256", None)
+        if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
+            raise WorkspaceError("module manifest has no load-time SHA-256 identity")
+        receipt_id = f"module-run-{uuid.uuid4().hex}"
+        started = datetime.now(timezone.utc)
+        monotonic_started = time.monotonic()
+        result: Any | None = None
+        failure: ModuleError | None = None
+        try:
+            result = runner.run(manifest, request, allow_trusted=allow_trusted)
+        except ModuleError as exc:
+            failure = exc
+        completed = datetime.now(timezone.utc)
+        duration_ms = max(0, round((time.monotonic() - monotonic_started) * 1000))
+        status = "failed" if failure is not None else "succeeded"
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO module_run_receipts(
+                    receipt_id, module_id, module_version, category, kind,
+                    manifest_sha256, stdout_sha256, status, error,
+                    duration_ms, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    manifest.module_id,
+                    manifest.version,
+                    manifest.category,
+                    getattr(result, "kind", None),
+                    manifest_sha256,
+                    getattr(result, "stdout_sha256", None),
+                    status,
+                    str(failure) if failure is not None else None,
+                    duration_ms,
+                    started.isoformat(),
+                    completed.isoformat(),
+                ),
+            )
+        if failure is not None:
+            raise failure
+        return result
+
     def list_module_receipts(self) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute(
+            current_rows = db.execute(
+                "SELECT * FROM module_run_receipts ORDER BY started_at, receipt_id"
+            ).fetchall()
+            legacy_rows = db.execute(
                 "SELECT * FROM module_receipts ORDER BY occurred_at, receipt_id"
             ).fetchall()
-        return [dict(row) for row in rows]
+        receipts = [dict(row) for row in current_rows]
+        for row in legacy_rows:
+            receipt = dict(row)
+            receipt.update(
+                {
+                    "status": "succeeded",
+                    "error": None,
+                    "started_at": receipt["occurred_at"],
+                    "completed_at": receipt["occurred_at"],
+                }
+            )
+            receipts.append(receipt)
+        return sorted(receipts, key=lambda value: (value["started_at"], value["receipt_id"]))
 
     def select_next(self, now: datetime) -> SelectionResult:
         if now.tzinfo is None or now.utcoffset() is None:
@@ -1171,9 +1601,14 @@ class WorkspaceService:
             ).fetchall()
         for row in rows:
             path = self.root / row["relative_path"]
+            if path.is_symlink():
+                stale_items.append(row["item_id"])
+                continue
             try:
-                current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
+                current_hash = hashlib.sha256(
+                    self._read_item_bytes(path, item_id=row["item_id"])
+                ).hexdigest()
+            except WorkspaceError:
                 stale_items.append(row["item_id"])
                 continue
             if current_hash != row["content_hash"]:

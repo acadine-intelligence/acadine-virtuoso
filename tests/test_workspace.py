@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,7 +15,7 @@ from virtuoso.workspace import WorkspaceError, WorkspaceService
 class WorkspaceServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "learner"
+        self.root = Path(self.tmp.name).resolve() / "learner"
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -32,7 +35,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (3,))
+            self.assertEqual(migration, (4,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -40,13 +43,96 @@ class WorkspaceServiceTests(unittest.TestCase):
             WorkspaceService.init(self.root)
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
-        target = Path(self.tmp.name) / "target"
+        target = Path(self.tmp.name).resolve() / "target"
         target.mkdir()
         self.root.symlink_to(target, target_is_directory=True)
 
         with self.assertRaisesRegex(WorkspaceError, "root must not be a symlink"):
             WorkspaceService.init(self.root)
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_init_and_open_reject_workspace_with_symlinked_ancestor(self) -> None:
+        real_parent = Path(self.tmp.name).resolve() / "real-parent"
+        real_parent.mkdir()
+        alias = Path(self.tmp.name).resolve() / "alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+
+        with self.assertRaisesRegex(WorkspaceError, "symlink ancestor"):
+            WorkspaceService.init(alias / "new-workspace")
+        self.assertFalse((real_parent / "new-workspace").exists())
+
+        WorkspaceService.init(real_parent / "existing-workspace")
+        with self.assertRaisesRegex(WorkspaceError, "symlink ancestor"):
+            WorkspaceService.open(alias / "existing-workspace")
+
+    def test_init_and_add_create_private_owned_artifacts(self) -> None:
+        previous_umask = os.umask(0)
+        try:
+            service = WorkspaceService.init(self.root)
+            item = service.add_item(
+                item_id="private-item",
+                title="Private",
+                focus="security",
+                prompt="What is private?",
+                answer="The learner workspace.",
+            )
+        finally:
+            os.umask(previous_umask)
+
+        expected_modes = {
+            service.root: 0o700,
+            service.items_dir: 0o700,
+            service.state_dir: 0o700,
+            service.config_path: 0o600,
+            service.db_path: 0o600,
+            item.path: 0o600,
+        }
+        for path, expected in expected_modes.items():
+            with self.subTest(path=path):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+
+    def test_add_item_rejects_dangling_symlink_without_external_write_or_row(self) -> None:
+        service = WorkspaceService.init(self.root)
+        outside = Path(self.tmp.name).resolve() / "outside" / "created.md"
+        outside.parent.mkdir()
+        item_path = service.items_dir / "escape.md"
+        item_path.symlink_to(outside)
+
+        with self.assertRaisesRegex(WorkspaceError, "item path must not be a symlink"):
+            service.add_item(
+                item_id="escape",
+                title="Escape",
+                focus="security",
+                prompt="Where must this remain?",
+                answer="Inside the workspace.",
+            )
+
+        self.assertFalse(outside.exists())
+        with sqlite3.connect(service.db_path) as db:
+            self.assertIsNone(
+                db.execute("SELECT item_id FROM items WHERE item_id = 'escape'").fetchone()
+            )
+
+    def test_doctor_does_not_follow_later_created_item_symlink(self) -> None:
+        service = WorkspaceService.init(self.root)
+        item = service.add_item(
+            item_id="linked-item",
+            title="Linked",
+            focus="security",
+            prompt="Must doctor follow this link?",
+            answer="No.",
+        )
+        original = item.path.read_bytes()
+        outside = Path(self.tmp.name).resolve() / "outside.md"
+        outside.write_bytes(original)
+        item.path.unlink()
+        item.path.symlink_to(outside)
+
+        with self.assertRaisesRegex(WorkspaceError, "item path must not be a symlink"):
+            service.load_item("linked-item")
+        health = service.doctor()
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(health["stale_items"], ["linked-item"])
 
     def test_add_item_writes_human_owned_markdown_and_index(self) -> None:
         service = WorkspaceService.init(self.root)
@@ -103,7 +189,7 @@ class WorkspaceServiceTests(unittest.TestCase):
 
     def test_add_item_rejects_symlinked_items_directory(self) -> None:
         service = WorkspaceService.init(self.root)
-        outside = Path(self.tmp.name) / "outside"
+        outside = Path(self.tmp.name).resolve() / "outside"
         outside.mkdir()
         service.items_dir.rmdir()
         service.items_dir.symlink_to(outside, target_is_directory=True)
@@ -135,6 +221,149 @@ class WorkspaceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "database"):
             WorkspaceService.open(self.root)
 
+    def test_configuration_rejects_invalid_utf8_unknown_fields_and_invalid_types(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.config_path.write_bytes(b"\xff")
+        with self.assertRaisesRegex(WorkspaceError, "invalid workspace configuration"):
+            service.configuration()
+
+        valid = {
+            "schema": "virtuoso/workspace@0.1",
+            "mode": "simple",
+            "scheduler": {
+                "algorithm": "fsrs",
+                "context": "atomic-recall",
+                "desired_retention": 0.9,
+                "enable_fuzzing": False,
+            },
+        }
+        invalid_values = (
+            ({**valid, "unknown": True}, "unknown workspace configuration fields"),
+            ({key: value for key, value in valid.items() if key != "mode"}, "missing workspace configuration fields"),
+            ({**valid, "mode": "advanced"}, "mode"),
+            (
+                {
+                    **valid,
+                    "scheduler": {**valid["scheduler"], "desired_retention": float("nan")},
+                },
+                "finite JSON",
+            ),
+        )
+        for value, message in invalid_values:
+            with self.subTest(message=message):
+                service.config_path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(WorkspaceError, message):
+                    service.configuration()
+
+    def test_open_rejects_future_or_discontinuous_migration_versions(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("INSERT INTO schema_migrations(version) VALUES (99)")
+        with self.assertRaisesRegex(WorkspaceError, "future migration version"):
+            WorkspaceService.open(self.root)
+
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("DELETE FROM schema_migrations WHERE version = 99")
+            db.execute("DELETE FROM schema_migrations WHERE version = 2")
+        with self.assertRaisesRegex(WorkspaceError, "migration history is not contiguous"):
+            WorkspaceService.open(self.root)
+
+    def test_open_rejects_constraint_free_schema_with_expected_column_names(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("DROP TABLE module_receipts")
+            db.execute(
+                """CREATE TABLE module_receipts (
+                    receipt_id TEXT,
+                    module_id TEXT,
+                    module_version TEXT,
+                    category TEXT,
+                    kind TEXT,
+                    manifest_sha256 TEXT,
+                    stdout_sha256 TEXT,
+                    duration_ms INTEGER,
+                    occurred_at TEXT
+                )"""
+            )
+
+        with self.assertRaisesRegex(WorkspaceError, "incompatible database schema"):
+            WorkspaceService.open(self.root)
+
+    def test_open_rejects_foreign_key_violations(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute(
+                """INSERT INTO attempts(
+                    event_id, item_id, item_content_hash, occurred_at,
+                    initial_response, initial_latency_ms, result, confidence,
+                    open_notes, agent_help, support_json
+                ) VALUES ('orphan', 'missing', 'hash', '2026-08-20T00:00:00+00:00',
+                          'answer', 1, 'partial', 3, 0, 'none', '[]')"""
+            )
+
+        with self.assertRaisesRegex(WorkspaceError, "foreign key integrity"):
+            WorkspaceService.open(self.root)
+
+    def test_malformed_database_json_is_wrapped_as_workspace_error(self) -> None:
+        service = WorkspaceService.init(self.root)
+        item = service.add_item(
+            item_id="json-item",
+            title="JSON",
+            focus="integrity",
+            prompt="What should fail closed?",
+            answer="Malformed database JSON.",
+        )
+        with sqlite3.connect(service.db_path) as db:
+            db.execute(
+                """INSERT INTO attempts(
+                    event_id, item_id, item_content_hash, occurred_at,
+                    initial_response, initial_latency_ms, result, confidence,
+                    open_notes, agent_help, support_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "attempt-malformed-json",
+                    item.item_id,
+                    item.content_hash,
+                    "2026-08-20T00:00:00+00:00",
+                    "answer",
+                    1,
+                    "partial",
+                    3,
+                    0,
+                    "none",
+                    "{",
+                ),
+            )
+
+        with self.assertRaisesRegex(WorkspaceError, "attempt support JSON"):
+            service.list_attempts()
+
+    def test_add_item_acquires_database_lock_before_creating_markdown(self) -> None:
+        service = WorkspaceService.init(self.root)
+        holder = sqlite3.connect(service.db_path, timeout=0)
+        holder.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(WorkspaceError, "database is locked"):
+                service.add_item(
+                    item_id="locked-item",
+                    title="Locked",
+                    focus="integrity",
+                    prompt="Should a file be left behind?",
+                    answer="No.",
+                )
+        finally:
+            holder.rollback()
+            holder.close()
+
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertFalse((service.items_dir / "locked-item.md").exists())
+        with sqlite3.connect(service.db_path) as db:
+            self.assertIsNone(
+                db.execute("SELECT item_id FROM items WHERE item_id = 'locked-item'").fetchone()
+            )
+
     def test_open_rejects_incompatible_existing_schema(self) -> None:
         service = WorkspaceService.init(self.root)
         with sqlite3.connect(service.db_path) as db:
@@ -148,7 +377,19 @@ class WorkspaceServiceTests(unittest.TestCase):
         state_dir = self.root / ".virtuoso"
         state_dir.mkdir()
         (self.root / "virtuoso.json").write_text(
-            json.dumps({"schema": "virtuoso/workspace@0.1"}), encoding="utf-8"
+            json.dumps(
+                {
+                    "schema": "virtuoso/workspace@0.1",
+                    "mode": "simple",
+                    "scheduler": {
+                        "algorithm": "fsrs",
+                        "context": "atomic-recall",
+                        "desired_retention": 0.9,
+                        "enable_fuzzing": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
         db_path = state_dir / "state.sqlite3"
         with sqlite3.connect(db_path) as db:

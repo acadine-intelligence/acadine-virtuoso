@@ -15,7 +15,7 @@ from virtuoso.workspace import WorkspaceService
 class ModuleBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -143,6 +143,106 @@ print(json.dumps({
                 },
             )
 
+    def test_request_projection_bodies_use_exact_typed_schemas(self) -> None:
+        script = self._script("unused.py", "")
+        manifest = ModuleManifest.load(self._manifest(script))
+        invalid_projections = (
+            ({"challenge.summary": "not-an-object"}, "must be a JSON object"),
+            (
+                {"challenge.summary": {"title": "Safe", "unknown": True}},
+                "unknown challenge.summary fields",
+            ),
+            (
+                {"challenge.summary": {"title": 42}},
+                "challenge.summary.title must be a string",
+            ),
+        )
+        for projections, message in invalid_projections:
+            with self.subTest(message=message), self.assertRaisesRegex(ModuleError, message):
+                self._run(
+                    manifest,
+                    {
+                        "schema": "virtuoso/module-request@0.1",
+                        "projections": projections,
+                    },
+                )
+
+    def test_request_rejects_private_aliases_paths_and_nonfinite_values(self) -> None:
+        script = self._script("unused.py", "")
+        manifest = ModuleManifest.load(self._manifest(script))
+        invalid_projections = (
+            (
+                {
+                    "challenge.summary": {
+                        "title": "Safe",
+                        "path": "/tmp/learner/.virtuoso/state.sqlite3",
+                        "token": "private-token",
+                    }
+                },
+                "private state path or secret",
+            ),
+            (
+                {"challenge.summary": {"title": "/tmp/private/answer.md"}},
+                "private state path or secret",
+            ),
+            (
+                {"challenge.summary": {"title": "Safe", "priority": float("nan")}},
+                "finite JSON",
+            ),
+        )
+        for projections, message in invalid_projections:
+            with self.subTest(message=message), self.assertRaisesRegex(ModuleError, message):
+                self._run(
+                    manifest,
+                    {
+                        "schema": "virtuoso/module-request@0.1",
+                        "projections": projections,
+                    },
+                )
+
+    def test_result_payloads_reject_unknown_untyped_and_nonfinite_fields(self) -> None:
+        invalid_scripts = (
+            (
+                "unknown-payload.py",
+                "import json; print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1,'extra':True}}))\n",
+                {},
+                "unknown score-proposal fields",
+            ),
+            (
+                "nonfinite.py",
+                "print('{\"schema\":\"virtuoso/module-result@0.1\",\"module_id\":\"example-score\",\"kind\":\"score-proposal\",\"payload\":{\"score\":NaN}}')\n",
+                {},
+                "finite JSON",
+            ),
+            (
+                "scheduler.py",
+                "import json; print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'scheduler-proposal','payload':{'nonsense':True}}))\n",
+                {
+                    "category": "scheduler",
+                    "capabilities": {"reads": [], "returns": "scheduler-proposal"},
+                },
+                "scheduler-proposal fields",
+            ),
+        )
+        for name, source, overrides, message in invalid_scripts:
+            with self.subTest(name=name):
+                script = self._script(name, source)
+                manifest = ModuleManifest.load(self._manifest(script, **overrides))
+                with self.assertRaisesRegex(ModuleError, message):
+                    self._run(
+                        manifest,
+                        {"schema": "virtuoso/module-request@0.1", "projections": {}},
+                    )
+
+    def test_manifest_rejects_shell_executable_in_argv(self) -> None:
+        script = self._script("unused.py", "")
+        path = self._manifest(
+            script,
+            command={"argv": ["/bin/sh", "-c", "exit 0"], "timeout_seconds": 2},
+        )
+        with self.assertRaisesRegex(ModuleError, "shell executables"):
+            ModuleManifest.load(path)
+
     def test_malformed_or_oversized_output_fails_closed(self) -> None:
         bad = self._script("bad.py", "print('not json')\n")
         with self.assertRaisesRegex(ModuleError, "valid JSON"):
@@ -216,6 +316,84 @@ print(json.dumps({
             )
         time.sleep(0.65)
         self.assertFalse(marker.exists())
+
+    def test_timeout_kills_detached_descendant_processes(self) -> None:
+        marker = self.root / "detached-descendant-survived"
+        child = (
+            "import pathlib,time; time.sleep(0.5); "
+            f"pathlib.Path({str(marker)!r}).write_text('escaped')"
+        )
+        parent = self._script(
+            "detached-parent.py",
+            "import subprocess,sys,time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+            "time.sleep(5)\n",
+        )
+        path = self._manifest(parent)
+        value = json.loads(path.read_text())
+        value["command"]["timeout_seconds"] = 0.15
+        path.write_text(json.dumps(value))
+
+        with self.assertRaisesRegex(ModuleError, "timed out"):
+            self._run(
+                ModuleManifest.load(path),
+                {"schema": "virtuoso/module-request@0.1", "projections": {}},
+            )
+        time.sleep(0.65)
+        self.assertFalse(marker.exists())
+
+    def test_successful_parent_exit_kills_remaining_descendants(self) -> None:
+        marker = self.root / "successful-descendant-survived"
+        child = (
+            "import pathlib,time; time.sleep(0.5); "
+            f"pathlib.Path({str(marker)!r}).write_text('escaped')"
+        )
+        parent = self._script(
+            "successful-parent.py",
+            "import json,subprocess,sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1}}))\n",
+        )
+
+        result = self._run(
+            ModuleManifest.load(self._manifest(parent)),
+            {"schema": "virtuoso/module-request@0.1", "projections": {}},
+        )
+        self.assertEqual(result.payload, {"score": 1})
+        time.sleep(0.65)
+        self.assertFalse(marker.exists())
+
+    def test_workspace_records_success_and_failed_run_receipts_with_completion_times(self) -> None:
+        workspace = WorkspaceService.init(self.root / "receipt-learner")
+        valid = self._script(
+            "receipt-valid.py",
+            "import json; print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1}}))\n",
+        )
+        valid_manifest = ModuleManifest.load(self._manifest(valid))
+        workspace.run_module(
+            runner=ModuleRunner(),
+            manifest=valid_manifest,
+            request={"schema": "virtuoso/module-request@0.1", "projections": {}},
+            allow_trusted=True,
+        )
+
+        bad = self._script("receipt-bad.py", "print('not json')\n")
+        bad_manifest = ModuleManifest.load(self._manifest(bad))
+        with self.assertRaisesRegex(ModuleError, "valid JSON"):
+            workspace.run_module(
+                runner=ModuleRunner(),
+                manifest=bad_manifest,
+                request={"schema": "virtuoso/module-request@0.1", "projections": {}},
+                allow_trusted=True,
+            )
+
+        receipts = workspace.list_module_receipts()
+        self.assertEqual([receipt["status"] for receipt in receipts], ["succeeded", "failed"])
+        self.assertIsNone(receipts[0]["error"])
+        self.assertIn("valid JSON", receipts[1]["error"])
+        for receipt in receipts:
+            self.assertLessEqual(receipt["started_at"], receipt["completed_at"])
+            self.assertGreaterEqual(receipt["duration_ms"], 0)
 
     def test_receipt_uses_manifest_hash_captured_at_load(self) -> None:
         script = self._script(

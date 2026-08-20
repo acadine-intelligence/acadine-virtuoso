@@ -11,7 +11,7 @@ from pathlib import Path
 class CliJourneyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self.tmp.name) / "learner"
+        self.workspace = Path(self.tmp.name).resolve() / "learner"
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -111,7 +111,7 @@ class CliJourneyTests(unittest.TestCase):
         self.assertNotIn("Traceback", failed.stderr)
 
     def test_source_cli_connects_scans_and_lists_note_metadata(self) -> None:
-        vault = Path(self.tmp.name) / "vault"
+        vault = Path(self.tmp.name).resolve() / "vault"
         vault.mkdir()
         (vault / "Testing Effect.md").write_text(
             "# Testing Effect\n\n[[Active Recall]] makes retrieval visible.\n",
