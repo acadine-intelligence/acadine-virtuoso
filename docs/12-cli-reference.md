@@ -67,10 +67,10 @@ JSON output: `{"item_id", "title", "focus", "path"}`.
 Recommend the next item to practice. Deterministic and explained.
 
 ```
-virtuoso --workspace PATH next [--json]
+virtuoso --workspace PATH next [--focus FOCUS] [--json]
 ```
 
-JSON output: `{"item_id", "title", "focus", "prompt", "rationale", "alternatives", "uncertainty"}`. The `prompt` is included so a session can start immediately; the answer is never included. `rationale` states why this item was selected; `alternatives` lists the remaining candidates in order.
+JSON output: `{"item_id", "title", "focus", "prompt", "rationale", "alternatives", "uncertainty"}`. The `prompt` is included so a session can start immediately; the answer is never included. `rationale` states why this item was selected; `alternatives` lists the remaining candidates in order. `--focus` restricts the candidate set to one focus track (e.g. `next --focus languages-go`); the rationale names the scope, and a focus with no due or new items fails closed with `Error: no learning item is due in focus '<name>'`.
 
 ### `practice`
 

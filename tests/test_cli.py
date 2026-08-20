@@ -114,6 +114,30 @@ class CliJourneyTests(unittest.TestCase):
         self.assertEqual(doctor["status"], "healthy")
         self.assertEqual(doctor["attempts"], 1)
 
+    def test_next_focus_flag_scopes_selection_and_errors(self) -> None:
+        self._run("init", "--json")
+        self._run(
+            "add", "--id", "testing-effect", "--title", "Explain the testing effect",
+            "--focus", "learning-science",
+            "--prompt", "Why does retrieval strengthen memory?",
+            "--answer", "Retrieval changes memory.", "--json",
+        )
+        self._run(
+            "add", "--id", "goroutines", "--title", "Goroutines",
+            "--focus", "languages-go",
+            "--prompt", "What is a goroutine?",
+            "--answer", "A lightweight managed execution.", "--json",
+        )
+
+        scoped = json.loads(self._run("next", "--focus", "languages-go", "--json").stdout)
+        self.assertEqual(scoped["item_id"], "goroutines")
+        self.assertEqual(scoped["focus"], "languages-go")
+        self.assertIn("languages-go", scoped["rationale"])
+
+        failed = self._run("next", "--focus", "no-such-track", "--json", expected=2)
+        self.assertIn("focus 'no-such-track'", failed.stderr)
+        self.assertNotIn("Traceback", failed.stderr)
+
     def test_missing_workspace_returns_plain_actionable_error(self) -> None:
         failed = self._run("doctor", "--json", expected=2)
         self.assertEqual(failed.stdout, "")

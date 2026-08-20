@@ -61,6 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--json", action="store_true")
 
     next_command = commands.add_parser("next", help="recommend the next item")
+    next_command.add_argument("--focus", help="restrict selection to one focus track")
     next_command.add_argument("--json", action="store_true")
 
     practice = commands.add_parser("practice", help="run an active-recall session")
@@ -251,7 +252,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "next":
-            selection = workspace.select_next(datetime.now(timezone.utc))
+            selection = workspace.select_next(
+                datetime.now(timezone.utc), focus=args.focus
+            )
             _emit(
                 {
                     "item_id": selection.item.item_id,

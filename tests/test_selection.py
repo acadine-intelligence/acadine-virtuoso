@@ -106,6 +106,48 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "invalid scheduler due timestamp"):
             self.workspace.select_next(self.now)
 
+    def test_focus_filter_selects_only_matching_items(self) -> None:
+        self.workspace.add_item(
+            item_id="gamma",
+            title="Gamma",
+            focus="other",
+            prompt="Prompt gamma",
+            answer="Answer gamma",
+        )
+
+        selected = self.workspace.select_next(self.now, focus="other")
+
+        self.assertEqual(selected.item.item_id, "gamma")
+        self.assertEqual(selected.item.focus, "other")
+        self.assertEqual(selected.alternatives, ())
+        self.assertIn("other", selected.rationale)
+
+    def test_focus_filter_keeps_due_before_new_within_focus(self) -> None:
+        self.workspace.add_item(
+            item_id="gamma",
+            title="Gamma",
+            focus="other",
+            prompt="Prompt gamma",
+            answer="Answer gamma",
+        )
+        PracticeService(self.workspace, clock=_Clock()).run(
+            item_id="alpha",
+            io=_IO(["n", "answer", "reveal", "demonstrated", "4"]),
+            now=self.now,
+        )
+
+        selected = self.workspace.select_next(self.now, focus="test")
+
+        self.assertEqual(selected.item.item_id, "beta")
+
+    def test_focus_filter_with_no_matching_items_fails_clearly(self) -> None:
+        with self.assertRaisesRegex(WorkspaceError, "focus 'missing'"):
+            self.workspace.select_next(self.now, focus="missing")
+
+    def test_focus_filter_rejects_blank_focus(self) -> None:
+        with self.assertRaisesRegex(WorkspaceError, "focus"):
+            self.workspace.select_next(self.now, focus="  ")
+
 
 if __name__ == "__main__":
     unittest.main()

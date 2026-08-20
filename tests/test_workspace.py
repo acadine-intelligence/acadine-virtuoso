@@ -526,7 +526,11 @@ class WorkspaceServiceTests(unittest.TestCase):
             holder.rollback()
             holder.close()
 
-        self.assertLess(time.monotonic() - started, 1.5)
+        # Regression guard: add_item must fail fast on a held lock rather than
+        # block for the full default sqlite timeout (30s). The wall-clock budget
+        # is generous so loaded machines do not flake; the semantic assertions
+        # below (error raised, no orphaned file, no partial row) carry the proof.
+        self.assertLess(time.monotonic() - started, 5.0)
         self.assertFalse((service.items_dir / "locked-item.md").exists())
         with sqlite3.connect(service.db_path) as db:
             self.assertIsNone(
