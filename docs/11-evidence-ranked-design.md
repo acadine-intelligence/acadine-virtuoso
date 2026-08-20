@@ -7,6 +7,7 @@
 - **A — strong:** high-quality meta-analysis or convergent classroom and laboratory evidence.
 - **B — credible but bounded:** strong experiment, field study, or authoritative synthesis with important scope limits.
 - **C — promising:** narrow experiments, observational platform data, or maintainer-run engineering benchmarks.
+- A minus sign marks evidence near the lower edge of a grade; paired grades such as **A/B** or **B/C** mean the evidence is mixed across those adjacent levels.
 
 ## Executive conclusion
 
@@ -37,16 +38,16 @@ FSRS may propose the next **memory review**. It should not certify capability or
 
 ### Strongest evidence
 
-- **Yang et al. (2021)** synthesized **222 classroom studies and 48,478 learners**. Quizzing improved academic achievement by **Hedges’ g = 0.499**, with effects moderated by feedback, repeated testing, test format, material alignment, and comparison condition.  
+- **Yang et al. (2021)** synthesized **222 classroom studies and 48,478 learners**. Quizzing improved academic achievement by **Hedges’ g = 0.499**, with effects moderated by feedback, repeated testing, test format, material alignment, and comparison condition.
   DOI: https://doi.org/10.1037/bul0000309
 
-- **Rowland (2014)** found a robust retention advantage for testing over restudy across laboratory studies, generally stronger when retrieval required recall rather than mere recognition.  
+- **Rowland (2014)** found a robust retention advantage for testing over restudy across laboratory studies, generally stronger when retrieval required recall rather than mere recognition.
   DOI: https://doi.org/10.1037/a0037559
 
-- **Pan & Rickard (2018)** examined **192 transfer effects from 122 experiments**. Retrieval practice produced transfer relative to restudy, **d = 0.40, 95% CI [0.31, 0.50]**, but transfer depended strongly on task congruence, elaboration, and initial performance. Publication-bias analyses often predicted no transfer when favorable moderators were absent.  
+- **Pan & Rickard (2018)** examined **192 transfer effects from 122 experiments**. Retrieval practice produced transfer relative to restudy, **d = 0.40, 95% CI [0.31, 0.50]**, but transfer depended strongly on task congruence, elaboration, and initial performance. Publication-bias analyses often predicted no transfer when favorable moderators were absent.
   DOI: https://doi.org/10.1037/bul0000151
 
-- **Chan et al. (2024)** manipulated retrieval-practice performance in six experiments and found that the magnitude of the testing effect was experimentally independent of practice performance. A positive person-level correlation was shown to be potentially artifactual.  
+- **Chan et al. (2024)** manipulated retrieval-practice performance in six experiments and found that the magnitude of the testing effect was experimentally independent of practice performance. A positive person-level correlation was shown to be potentially artifactual.
   DOI: https://doi.org/10.1037/xge0001593
 
 ### Supports
@@ -74,14 +75,14 @@ FSRS may propose the next **memory review**. It should not certify capability or
 
 ### Evidence
 
-- **Pyc & Rawson (2009)** experimentally varied spacing and learning criteria while retaining successfully retrieved items. More difficult **successful** retrieval tended to improve final retention, with diminishing returns.  
+- **Pyc & Rawson (2009)** experimentally varied spacing and learning criteria while retaining successfully retrieved items. More difficult **successful** retrieval tended to improve final retention, with diminishing returns.
   DOI: https://doi.org/10.1016/j.jml.2009.01.004
 
-- **Maddox & Balota (2015)** used acquisition response latency as a retrieval-difficulty proxy and found results broadly consistent with desirable-difficulty accounts in younger and older adults. Latency required within-person standardization because baseline speed differed substantially.  
-  DOI: https://doi.org/10.3758/s13421-014-0499-6  
+- **Maddox & Balota (2015)** used acquisition response latency as a retrieval-difficulty proxy and found results broadly consistent with desirable-difficulty accounts in younger and older adults. Latency required within-person standardization because baseline speed differed substantially.
+  DOI: https://doi.org/10.3758/s13421-014-0499-6
   Full text: https://pmc.ncbi.nlm.nih.gov/articles/PMC4480221/
 
-- **Mettler, Massey & Kellman (2016)** reported two experiments in which adaptive scheduling based on response time and accuracy outperformed fixed—including yoked—practice schedules on immediate and delayed retention.  
+- **Mettler, Massey & Kellman (2016)** reported two experiments in which adaptive scheduling based on response time and accuracy outperformed fixed—including yoked—practice schedules on immediate and delayed retention.
   DOI: https://doi.org/10.1037/xge0000170
 
 ### Supports
@@ -113,28 +114,28 @@ Capture latency, but initially use it as an **observational feature**, not a det
 
 ### Spacing evidence
 
-- **Cepeda et al. (2006)** synthesized **839 assessments from 317 experiments**. Spacing reliably aided retention, and the best interstudy interval increased with the desired retention interval.  
+- **Cepeda et al. (2006)** synthesized **839 assessments from 317 experiments**. Spacing reliably aided retention, and the best interstudy interval increased with the desired retention interval.
   DOI: https://doi.org/10.1037/0033-2909.132.3.354
 
-- **Cepeda et al. (2008)** studied more than **1,350 participants**, gaps up to 3.5 months, and final tests up to one year. Performance followed an inverted-U relation: the best gap depended on the final retention horizon—roughly 20–40% of a one-week delay but 5–10% of a one-year delay in that fact-learning paradigm.  
+- **Cepeda et al. (2008)** studied more than **1,350 participants**, gaps up to 3.5 months, and final tests up to one year. Performance followed an inverted-U relation: the best gap depended on the final retention horizon—roughly 20–40% of a one-week delay but 5–10% of a one-year delay in that fact-learning paradigm.
   DOI: https://doi.org/10.1111/j.1467-9280.2008.02209.x
 
-- **Lindsey et al. (2014)** embedded personalized review in a semester-long middle-school language course. On a cumulative post-semester exam, personalized review improved retention by **16.5% over massed practice** and **10.0% over one-size-fits-all spacing**, under time-matched comparisons.  
+- **Lindsey et al. (2014)** embedded personalized review in a semester-long middle-school language course. On a cumulative post-semester exam, personalized review improved retention by **16.5% over massed practice** and **10.0% over one-size-fits-all spacing**, under time-matched comparisons.
   DOI: https://doi.org/10.1177/0956797613504302
 
 ### Algorithmic evidence
 
-- **Settles & Meeder (2016)** reported that Duolingo’s half-life regression reduced recall-prediction error by more than 45% versus tested baselines and improved daily engagement by 12% in an operational study. Prediction and engagement are not retained capability.  
+- **Settles & Meeder (2016)** reported that Duolingo’s half-life regression reduced recall-prediction error by more than 45% versus tested baselines and improved daily engagement by 12% in an operational study. Prediction and engagement are not retained capability.
   DOI: https://doi.org/10.18653/v1/P16-1174
 
-- **Tabibian et al. (2019)** developed the MEMORIZE optimal-control formulation and reported favorable associations in large Duolingo observational data. The authors explicitly noted that the natural experiment could not make direct interventions; the observed window was also short.  
+- **Tabibian et al. (2019)** developed the MEMORIZE optimal-control formulation and reported favorable associations in large Duolingo observational data. The authors explicitly noted that the natural experiment could not make direct interventions; the observed window was also short.
   DOI: https://doi.org/10.1073/pnas.1815156116
 
-- A related large-scale scheduling algorithm was reported by **Ye, Su & Cao (2022)**, but it is not a validation of present FSRS versions.  
+- A related large-scale scheduling algorithm was reported by **Ye, Su & Cao (2022)**, but it is not a validation of present FSRS versions.
   DOI: https://doi.org/10.1145/3534678.3539081
 
-- The current open FSRS benchmark reports results over roughly **10,000 Anki users and hundreds of millions of review records**. Its current tables show newer FSRS versions improving over older FSRS variants, while some higher-capacity sequence models predict held-out reviews better. This is useful engineering evidence, but it is maintainer-run, non-randomized, and evaluates prediction rather than causal learning efficiency.  
-  Benchmark: https://github.com/open-spaced-repetition/srs-benchmark
+- The current open FSRS benchmark reports results over roughly **10,000 Anki users and hundreds of millions of review records**. Its current tables show newer FSRS versions improving over older FSRS variants, while some higher-capacity sequence models predict held-out reviews better. This is useful engineering evidence, but it is maintainer-run, non-randomized, and evaluates prediction rather than causal learning efficiency.
+  Benchmark snapshot: https://github.com/open-spaced-repetition/srs-benchmark/tree/1053082bd2d6dbedbbd9674c4c9683c203f6818a
 
 ### Supports
 
@@ -161,10 +162,10 @@ Capture latency, but initially use it as an **observational feature**, not a det
 
 ## 4. Interleaving — **A-, strongly conditional**
 
-- **Brunmair & Richter (2019)** synthesized **59 studies, 238 effects, and 158 samples**. The overall interleaving effect was **g = 0.42**, but it varied markedly: positive for paintings and mathematics, nonsignificant in some expository/taste tasks, and negative for word learning. Benefits were larger when categories were similar to each other, examples within a category were distinguishable, and material was complex.  
+- **Brunmair & Richter (2019)** synthesized **59 studies, 238 effects, and 158 samples**. The overall interleaving effect was **g = 0.42**, but it varied markedly: positive for paintings and mathematics, nonsignificant in some expository/taste tasks, and negative for word learning. Benefits were larger when categories were similar to each other, examples within a category were distinguishable, and material was complex.
   DOI: https://doi.org/10.1037/bul0000209
 
-- **Rohrer, Dedrick & Stershic (2015)** followed 126 seventh-grade learners for three months. Interleaved mathematics practice improved unannounced tests after one and 30 days, **d = 0.42 and 0.79**, respectively.  
+- **Rohrer, Dedrick & Stershic (2015)** followed 126 seventh-grade learners for three months. Interleaved mathematics practice improved unannounced tests after one and 30 days, **d = 0.42 and 0.79**, respectively.
   DOI: https://doi.org/10.1037/edu0000001
 
 ### Product implication
@@ -175,13 +176,13 @@ Interleave when the learner must answer **“Which method applies?”**, especia
 
 ## 5. Feedback — **A**
 
-- **Wisniewski, Zierer & Hattie (2020)** analyzed **435 studies, 994 effects, and more than 61,000 learners**. Overall feedback effect was **d = 0.48**, with substantial heterogeneity; information-rich cognitive and motor feedback was stronger than generic motivational or behavioral feedback.  
+- **Wisniewski, Zierer & Hattie (2020)** analyzed **435 studies, 994 effects, and more than 61,000 learners**. Overall feedback effect was **d = 0.48**, with substantial heterogeneity; information-rich cognitive and motor feedback was stronger than generic motivational or behavioral feedback.
   DOI: https://doi.org/10.3389/fpsyg.2019.03087
 
-- **Van der Kleij, Feskens & Eggen (2015)** synthesized 40 computer-based studies. Elaborated feedback produced an effect of **0.49**, correct-answer feedback **0.32**, and correctness-only feedback **0.05**. Elaborated feedback was especially useful for higher-order outcomes.  
+- **Van der Kleij, Feskens & Eggen (2015)** synthesized 40 computer-based studies. Elaborated feedback produced an effect of **0.49**, correct-answer feedback **0.32**, and correctness-only feedback **0.05**. Elaborated feedback was especially useful for higher-order outcomes.
   DOI: https://doi.org/10.3102/0034654314564881
 
-- Multiple-choice testing can expose learners to plausible wrong answers; feedback reduces this risk.  
+- Multiple-choice testing can expose learners to plausible wrong answers; feedback reduces this risk.
   **Butler & Roediger (2008):** https://doi.org/10.3758/mc.36.3.604
 
 ### Product implications
@@ -200,10 +201,10 @@ Avoid praise-only feedback. Provide the first correction promptly; spacing shoul
 
 ## 6. Mastery learning — **B**
 
-- **Kulik, Kulik & Bangert-Drowns (1990)** synthesized 108 controlled evaluations. Mastery-learning programs generally improved examination performance, particularly for weaker learners, but increased time on task and sometimes reduced completion in self-paced college formats. Effects varied with procedure, design, and subject.  
+- **Kulik, Kulik & Bangert-Drowns (1990)** synthesized 108 controlled evaluations. Mastery-learning programs generally improved examination performance, particularly for weaker learners, but increased time on task and sometimes reduced completion in self-paced college formats. Effects varied with procedure, design, and subject.
   DOI: https://doi.org/10.3102/00346543060002265
 
-- **Sinha & Kapur (2021)** synthesized 53 studies and 166 comparisons. Problem solving before instruction outperformed instruction-first designs overall, **g = 0.36, 95% CI [0.20, 0.51]**, especially when Productive Failure principles were implemented faithfully. Results reversed for some younger learners and domain-general skills.  
+- **Sinha & Kapur (2021)** synthesized 53 studies and 166 comparisons. Problem solving before instruction outperformed instruction-first designs overall, **g = 0.36, 95% CI [0.20, 0.51]**, especially when Productive Failure principles were implemented faithfully. Results reversed for some younger learners and domain-general skills.
   DOI: https://doi.org/10.3102/00346543211019105
 
 ### What this supports
@@ -231,13 +232,13 @@ The threshold should vary by consequence and be validated by whether it predicts
 
 ## 7. Transfer and real projects — **A-/B**
 
-- Pan & Rickard’s transfer meta-analysis found a mean **d = 0.40**, but transfer was conditional and weak or absent for several task changes.  
+- Pan & Rickard’s transfer meta-analysis found a mean **d = 0.40**, but transfer was conditional and weak or absent for several task changes.
   DOI: https://doi.org/10.1037/bul0000151
 
-- **Barnett & Ceci (2002)** showed that “far transfer” spans multiple dimensions—knowledge domain, physical and social context, temporal distance, functional purpose, and response mode. A single near/far label conceals these distinctions.  
+- **Barnett & Ceci (2002)** showed that “far transfer” spans multiple dimensions—knowledge domain, physical and social context, temporal distance, functional purpose, and response mode. A single near/far label conceals these distinctions.
   DOI: https://doi.org/10.1037/0033-2909.128.4.612
 
-- **Blume et al. (2010)** synthesized 89 training-transfer studies. Transfer related to ability, motivation, conscientiousness, and supportive work environments; same-source, same-context outcome measurement systematically inflated relationships.  
+- **Blume et al. (2010)** synthesized 89 training-transfer studies. Transfer related to ability, motivation, conscientiousness, and supportive work environments; same-source, same-context outcome measurement systematically inflated relationships.
   DOI: https://doi.org/10.1177/0149206309352880
 
 ### Product implications
@@ -258,7 +259,7 @@ Keep **learning evidence** separate from **release evidence**. Agent-generated c
 
 ## 8. Adaptive testing — **B for measurement; insufficient by itself for learning**
 
-- **Chang (2015)** reviews the psychometric foundations and implementation problems of computerized adaptive testing (CAT), including item selection, large-sample foundations, and individualized assessment.  
+- **Chang (2015)** reviews the psychometric foundations and implementation problems of computerized adaptive testing (CAT), including item selection, large-sample foundations, and individualized assessment.
   DOI: https://doi.org/10.1007/s11336-014-9401-5
 
 CAT chooses items to estimate ability efficiently. Spaced practice chooses activities intended to change memory. These are different optimization problems.
@@ -279,13 +280,13 @@ An item may be highly informative for assessment while being pedagogically undes
 
 ## 9. Metacognitive calibration — **A-/B**
 
-- **Gutierrez de Blume (2022)** synthesized 56 effect sizes and 7,667 participants. Learning-strategy instruction meaningfully reduced monitoring error, **g = −0.565** where negative denotes lower calibration error. Effects varied by judgment and context.  
+- **Gutierrez de Blume (2022)** synthesized 56 effect sizes and 7,667 participants. Learning-strategy instruction meaningfully reduced monitoring error, **g = −0.565** where negative denotes lower calibration error. Effects varied by judgment and context.
   DOI: https://doi.org/10.1037/edu0000674
 
-- **Janssen & Lazonder (2024)** synthesized 35 problem-solving studies. Monitoring interventions had a small positive overall effect, **g = 0.25**. Whole-task interventions, metacognitive knowledge, and external standards helped; interventions focused merely on judgment timing were counterproductive in that literature.  
+- **Janssen & Lazonder (2024)** synthesized 35 problem-solving studies. Monitoring interventions had a small positive overall effect, **g = 0.25**. Whole-task interventions, metacognitive knowledge, and external standards helped; interventions focused merely on judgment timing were counterproductive in that literature.
   DOI: https://doi.org/10.1007/s10648-024-09936-4
 
-- **Dunlosky & Rawson (2012)** experimentally showed that inaccurate self-evaluation can cause premature stopping and poorer retention.  
+- **Dunlosky & Rawson (2012)** experimentally showed that inaccurate self-evaluation can cause premature stopping and poorer retention.
   DOI: https://doi.org/10.1016/j.learninstruc.2011.08.003
 
 ### Product implications
@@ -332,6 +333,6 @@ Only the first retrieval-oriented transitions belong naturally to FSRS.
 
 ### Research audit
 
-- **Files created or modified:** none.
-- **External changes:** none; research was read-only.
+- **Repository documentation changed by this research commit:** `docs/10-learning-research.md` and this memo.
+- **External changes:** none; source research was read-only and did not modify vaults, learner data, or remote systems.
 - **Main limitation:** robust evidence exists for testing and spacing, but I found no independent randomized validation of the current FSRS versions themselves. Current FSRS evidence should therefore be presented as strong open engineering work, not settled causal educational science.
