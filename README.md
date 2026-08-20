@@ -34,7 +34,7 @@ Virtuoso does not infer competence from XP, completion, a test, or an agent-prod
 
 ## Extension boundary
 
-External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. Modules declare one category, explicit read projections, and a typed return. Virtuoso invokes argv directly without a shell, rejects writes to core state, enforces a timeout and output limits, validates the result, and records a hash-bound receipt before core-owned code acts on it.
+External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, invokes argv without a shell, sends only declared projections, stores output in temporary files rather than memory, kills the process group on timeout, validates exact request/result shapes, and records the manifest hash captured when it was loaded. Core code alone decides whether to accept a returned proposal.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are deliberately out of scope.
 

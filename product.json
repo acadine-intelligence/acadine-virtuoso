@@ -61,7 +61,7 @@
       "Python 3.11 project-local virtual environment; never use the Hermes runtime environment.",
       "Use an established FSRS implementation rather than recreating its algorithm.",
       "No Obsidian plugin dependency and no mutation of another tool's native scheduler state.",
-      "External modules receive only declared inputs, run as argv without a shell, and cannot directly write core state.",
+      "External modules receive only declared inputs, run as explicitly approved trusted local executables with shell disabled, and return proposals that only core code may persist; they are not OS-sandboxed.",
       "Scheduled processing may propose focus but learner confirmation owns commitments."
     ]
   },
@@ -71,7 +71,7 @@
       "Given a manually authored recall item, when the learner starts practice, then the prompt appears before answer or feedback, elapsed recall time is captured by the program, and the answer is revealed only after an explicit attempt.",
       "Given a failed or partial attempt, when the learner requests support, then Virtuoso follows retry unaided, optional hint, worked feedback, and smaller follow-up challenge while recording exactly which support was used.",
       "Given a completed attempt, when it is recorded, then correctness, latency, confidence, context, open-notes state, and help attribution are appended to SQLite evidence without claiming competence, and the scheduler proposal records algorithm, version, configuration, and learning context.",
-      "Given a declared external module, when Virtuoso loads it, then incompatible schema versions, undeclared capabilities, shell commands, malformed output, and direct state-write requests fail closed while a valid JSON command module can return a typed proposal.",
+      "Given a declared trusted local executable, when Virtuoso loads and explicitly invokes it, then unknown fields or schema versions, undeclared capabilities, shell commands, missing consent, malformed or oversized output, timeout, and private-state projections fail closed while a valid typed proposal is hash-bound to the manifest bytes loaded before execution.",
       "Given the same fixture workspace, intent, and clock, when selection runs twice, then it returns the same ranked action and explanation; missing inputs produce explicit uncertainty rather than invented readiness.",
       "Given no Hermes or Obsidian installation, when the learner completes the hero workflow, then the core journey still works; optional adapters cannot become required dependencies."
     ]

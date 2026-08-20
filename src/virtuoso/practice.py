@@ -70,6 +70,7 @@ class SchedulerProposal:
     rationale: str
     previous_state_json: str | None
     proposed_state_json: str
+    previous_source_event_id: str | None
     created_at: datetime
 
 
@@ -154,6 +155,17 @@ class PracticeService:
             "Result [demonstrated / partial / not-demonstrated]: ",
             _RESULTS,
         )
+        unaided_responses = [initial_response] + [
+            action.response or ""
+            for action in support
+            if action.kind == "retry-unaided"
+        ]
+        if result == "demonstrated" and not any(
+            response.strip() for response in unaided_responses
+        ):
+            raise PracticeError(
+                "blank recall cannot be recorded as demonstrated; record partial or not-demonstrated"
+            )
         confidence = self._ask_confidence(io)
         if result != "demonstrated" and item.follow_up:
             io.write(f"Follow-up challenge\n{item.follow_up}")
@@ -195,20 +207,38 @@ class PracticeService:
             raise PracticeError(
                 f"unsupported built-in scheduler: {scheduler_config.get('algorithm')!r}"
             )
-        context = str(scheduler_config.get("context", item.learning_context))
-        desired_retention = float(scheduler_config.get("desired_retention", 0.9))
-        enable_fuzzing = bool(scheduler_config.get("enable_fuzzing", False))
+        context = scheduler_config.get("context", item.learning_context)
+        if not isinstance(context, str) or not context.strip():
+            raise PracticeError("scheduler context must be a non-empty string")
+        desired_retention = scheduler_config.get("desired_retention", 0.9)
+        if (
+            not isinstance(desired_retention, (int, float))
+            or isinstance(desired_retention, bool)
+            or not 0 < float(desired_retention) < 1
+        ):
+            raise PracticeError("scheduler desired_retention must be a number between 0 and 1")
+        desired_retention = float(desired_retention)
+        enable_fuzzing = scheduler_config.get("enable_fuzzing", False)
+        if not isinstance(enable_fuzzing, bool):
+            raise PracticeError("scheduler enable_fuzzing must be true or false")
         configuration: dict[str, object] = {
             "desired_retention": desired_retention,
             "enable_fuzzing": enable_fuzzing,
         }
         version = importlib.metadata.version("fsrs")
-        previous_state = self.workspace.scheduler_state(
+        previous_state, previous_source_event_id = self.workspace.scheduler_snapshot(
             item_id=item.item_id,
             algorithm="fsrs",
             learning_context=context,
         )
-        card = Card.from_json(previous_state) if previous_state else Card(due=attempt.occurred_at)
+        try:
+            card = (
+                Card.from_json(previous_state)
+                if previous_state
+                else Card(due=attempt.occurred_at)
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise PracticeError(f"stored FSRS state is invalid: {exc}") from exc
         rating = {
             "demonstrated": Rating.Good,
             "partial": Rating.Hard,
@@ -247,41 +277,48 @@ class PracticeService:
             rationale=rationale,
             previous_state_json=previous_state,
             proposed_state_json=proposed_state,
+            previous_source_event_id=previous_source_event_id,
             created_at=created_at,
         )
 
     def _persist(
         self, *, attempt: AttemptRecord, proposal: SchedulerProposal
     ) -> None:
-        self.workspace.record_attempt(
-            attempt={
-                "event_id": attempt.event_id,
-                "item_id": attempt.item_id,
-                "item_content_hash": attempt.item_content_hash,
-                "occurred_at": attempt.occurred_at.isoformat(),
-                "initial_response": attempt.initial_response,
-                "initial_latency_ms": attempt.initial_latency_ms,
-                "result": attempt.result,
-                "confidence": attempt.confidence,
-                "open_notes": attempt.open_notes,
-                "agent_help": attempt.agent_help,
-                "support_actions": [asdict(action) for action in attempt.support_actions],
-            },
-            proposal={
-                "proposal_id": proposal.proposal_id,
-                "source_event_id": proposal.source_event_id,
-                "item_id": proposal.item_id,
-                "algorithm": proposal.algorithm,
-                "algorithm_version": proposal.algorithm_version,
-                "learning_context": proposal.learning_context,
-                "configuration": proposal.configuration,
-                "previous_state_json": proposal.previous_state_json,
-                "due_at": proposal.due_at.isoformat(),
-                "rationale": proposal.rationale,
-                "created_at": proposal.created_at.isoformat(),
-            },
-            state_json=proposal.proposed_state_json,
-        )
+        try:
+            self.workspace.record_attempt(
+                attempt={
+                    "event_id": attempt.event_id,
+                    "item_id": attempt.item_id,
+                    "item_content_hash": attempt.item_content_hash,
+                    "occurred_at": attempt.occurred_at.isoformat(),
+                    "initial_response": attempt.initial_response,
+                    "initial_latency_ms": attempt.initial_latency_ms,
+                    "result": attempt.result,
+                    "confidence": attempt.confidence,
+                    "open_notes": attempt.open_notes,
+                    "agent_help": attempt.agent_help,
+                    "support_actions": [
+                        asdict(action) for action in attempt.support_actions
+                    ],
+                },
+                proposal={
+                    "proposal_id": proposal.proposal_id,
+                    "source_event_id": proposal.source_event_id,
+                    "item_id": proposal.item_id,
+                    "algorithm": proposal.algorithm,
+                    "algorithm_version": proposal.algorithm_version,
+                    "learning_context": proposal.learning_context,
+                    "configuration": proposal.configuration,
+                    "previous_state_json": proposal.previous_state_json,
+                    "previous_source_event_id": proposal.previous_source_event_id,
+                    "due_at": proposal.due_at.isoformat(),
+                    "rationale": proposal.rationale,
+                    "created_at": proposal.created_at.isoformat(),
+                },
+                state_json=proposal.proposed_state_json,
+            )
+        except WorkspaceError as exc:
+            raise PracticeError(str(exc)) from exc
 
     def _timed_answer(self, io: PracticeIO, prompt: str) -> tuple[str, int]:
         started = self.clock.monotonic()

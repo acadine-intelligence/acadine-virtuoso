@@ -39,6 +39,15 @@ class WorkspaceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "already exists"):
             WorkspaceService.init(self.root)
 
+    def test_init_rejects_symlinked_workspace_root(self) -> None:
+        target = Path(self.tmp.name) / "target"
+        target.mkdir()
+        self.root.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(WorkspaceError, "root must not be a symlink"):
+            WorkspaceService.init(self.root)
+        self.assertEqual(list(target.iterdir()), [])
+
     def test_add_item_writes_human_owned_markdown_and_index(self) -> None:
         service = WorkspaceService.init(self.root)
         item = service.add_item(
@@ -91,6 +100,71 @@ class WorkspaceServiceTests(unittest.TestCase):
                 prompt="Prompt",
                 answer="Answer",
             )
+
+    def test_add_item_rejects_symlinked_items_directory(self) -> None:
+        service = WorkspaceService.init(self.root)
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        service.items_dir.rmdir()
+        service.items_dir.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(WorkspaceError, "symlink"):
+            service.add_item(
+                item_id="escape",
+                title="Escape",
+                focus="security",
+                prompt="What must remain inside the workspace?",
+                answer="Virtuoso-owned item files.",
+            )
+        self.assertFalse((outside / "escape.md").exists())
+
+    def test_item_sections_reject_top_level_heading_injection(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with self.assertRaisesRegex(WorkspaceError, "top-level Markdown headings"):
+            service.add_item(
+                item_id="injected",
+                title="Injected",
+                focus="security",
+                prompt="Safe prompt",
+                answer="Legitimate answer\n# Answer\nInjected answer",
+            )
+
+    def test_open_wraps_corrupt_database_as_workspace_error(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.db_path.write_bytes(b"not a sqlite database")
+        with self.assertRaisesRegex(WorkspaceError, "database"):
+            WorkspaceService.open(self.root)
+
+    def test_open_rejects_incompatible_existing_schema(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("DROP TABLE attempts")
+            db.execute("CREATE VIEW attempts AS SELECT 1 AS wrong_column")
+        with self.assertRaisesRegex(WorkspaceError, "incompatible database schema"):
+            WorkspaceService.open(self.root)
+
+    def test_failed_migration_rolls_back_new_schema_objects(self) -> None:
+        (self.root / "items").mkdir(parents=True)
+        state_dir = self.root / ".virtuoso"
+        state_dir.mkdir()
+        (self.root / "virtuoso.json").write_text(
+            json.dumps({"schema": "virtuoso/workspace@0.1"}), encoding="utf-8"
+        )
+        db_path = state_dir / "state.sqlite3"
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE VIEW attempts AS SELECT 1 AS wrong_column")
+
+        with self.assertRaisesRegex(WorkspaceError, "migration failed|incompatible"):
+            WorkspaceService.open(self.root)
+
+        with sqlite3.connect(db_path) as db:
+            objects = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                )
+            }
+        self.assertEqual(objects, {"attempts"})
 
 
 if __name__ == "__main__":

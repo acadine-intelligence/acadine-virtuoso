@@ -53,7 +53,8 @@ class SelectionResult:
 
 class WorkspaceService:
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
+        self.requested_root = root.expanduser().absolute()
+        self.root = self.requested_root.resolve(strict=False)
         self.config_path = self.root / "virtuoso.json"
         self.items_dir = self.root / "items"
         self.state_dir = self.root / ".virtuoso"
@@ -62,6 +63,7 @@ class WorkspaceService:
     @classmethod
     def init(cls, root: Path | str) -> "WorkspaceService":
         service = cls(Path(root))
+        service._validate_owned_paths()
         if service.config_path.exists():
             raise WorkspaceError(f"workspace already exists at {service.root}")
         if service.root.exists() and any(service.root.iterdir()):
@@ -90,6 +92,7 @@ class WorkspaceService:
     @classmethod
     def open(cls, root: Path | str) -> "WorkspaceService":
         service = cls(Path(root))
+        service._validate_owned_paths(require_database=True)
         if not service.config_path.is_file() or not service.db_path.is_file():
             raise WorkspaceError(
                 f"not a Virtuoso workspace: {service.root}; run 'virtuoso init' first"
@@ -102,6 +105,24 @@ class WorkspaceService:
         service._migrate()
         return service
 
+    def _validate_owned_paths(self, *, require_database: bool = False) -> None:
+        if self.requested_root.is_symlink():
+            raise WorkspaceError(
+                f"workspace root must not be a symlink: {self.requested_root}"
+            )
+        owned = (self.root, self.config_path, self.items_dir, self.state_dir)
+        if require_database:
+            owned = (*owned, self.db_path)
+        for path in owned:
+            if path.is_symlink():
+                raise WorkspaceError(f"Virtuoso-owned path must not be a symlink: {path}")
+        if self.root.exists() and not self.root.is_dir():
+            raise WorkspaceError(f"workspace root is not a directory: {self.root}")
+        if self.items_dir.exists() and not self.items_dir.is_dir():
+            raise WorkspaceError(f"items path is not a directory: {self.items_dir}")
+        if self.state_dir.exists() and not self.state_dir.is_dir():
+            raise WorkspaceError(f"state path is not a directory: {self.state_dir}")
+
     def configuration(self) -> dict[str, Any]:
         try:
             value = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -112,82 +133,136 @@ class WorkspaceService:
         return value
 
     def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.db_path)
-        db.execute("PRAGMA foreign_keys = ON")
-        db.row_factory = sqlite3.Row
-        return db
+        try:
+            db = sqlite3.connect(self.db_path)
+            db.execute("PRAGMA foreign_keys = ON")
+            db.row_factory = sqlite3.Row
+            return db
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"cannot open workspace database: {exc}") from exc
 
     def _migrate(self) -> None:
+        try:
+            self._migrate_unchecked()
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"workspace database migration failed: {exc}") from exc
+
+    def _migrate_unchecked(self) -> None:
+        statements = (
+            """CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS items (
+                item_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                focus TEXT NOT NULL,
+                relative_path TEXT NOT NULL UNIQUE,
+                content_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS attempts (
+                event_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                item_content_hash TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                initial_response TEXT NOT NULL,
+                initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
+                result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
+                confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
+                open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
+                agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
+                support_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS scheduler_state (
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                algorithm TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                learning_context TEXT NOT NULL,
+                configuration_json TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL REFERENCES attempts(event_id),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, algorithm, learning_context)
+            )""",
+            """CREATE TABLE IF NOT EXISTS scheduler_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                source_event_id TEXT NOT NULL UNIQUE REFERENCES attempts(event_id),
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                algorithm TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                learning_context TEXT NOT NULL,
+                configuration_json TEXT NOT NULL,
+                previous_state_json TEXT,
+                proposed_state_json TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS module_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                module_version TEXT NOT NULL,
+                category TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+                occurred_at TEXT NOT NULL
+            )""",
+        )
         with self._connect() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS items (
-                    item_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    focus TEXT NOT NULL,
-                    relative_path TEXT NOT NULL UNIQUE,
-                    content_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS attempts (
-                    event_id TEXT PRIMARY KEY,
-                    item_id TEXT NOT NULL REFERENCES items(item_id),
-                    item_content_hash TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    initial_response TEXT NOT NULL,
-                    initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
-                    result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
-                    confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
-                    open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
-                    agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
-                    support_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS scheduler_state (
-                    item_id TEXT NOT NULL REFERENCES items(item_id),
-                    algorithm TEXT NOT NULL,
-                    algorithm_version TEXT NOT NULL,
-                    learning_context TEXT NOT NULL,
-                    configuration_json TEXT NOT NULL,
-                    state_json TEXT NOT NULL,
-                    source_event_id TEXT NOT NULL REFERENCES attempts(event_id),
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(item_id, algorithm, learning_context)
-                );
-                CREATE TABLE IF NOT EXISTS scheduler_proposals (
-                    proposal_id TEXT PRIMARY KEY,
-                    source_event_id TEXT NOT NULL UNIQUE REFERENCES attempts(event_id),
-                    item_id TEXT NOT NULL REFERENCES items(item_id),
-                    algorithm TEXT NOT NULL,
-                    algorithm_version TEXT NOT NULL,
-                    learning_context TEXT NOT NULL,
-                    configuration_json TEXT NOT NULL,
-                    previous_state_json TEXT,
-                    proposed_state_json TEXT NOT NULL,
-                    due_at TEXT NOT NULL,
-                    rationale TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS module_receipts (
-                    receipt_id TEXT PRIMARY KEY,
-                    module_id TEXT NOT NULL,
-                    module_version TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    manifest_sha256 TEXT NOT NULL,
-                    stdout_sha256 TEXT NOT NULL,
-                    duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
-                    occurred_at TEXT NOT NULL
-                );
-                """
-            )
+            db.execute("BEGIN IMMEDIATE")
+            for statement in statements:
+                db.execute(statement)
+            self._validate_database_schema(db)
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)"
             )
+
+    @staticmethod
+    def _validate_database_schema(db: sqlite3.Connection) -> None:
+        required: dict[str, set[str]] = {
+            "schema_migrations": {"version", "applied_at"},
+            "items": {"item_id", "title", "focus", "relative_path", "content_hash"},
+            "attempts": {
+                "event_id", "item_id", "item_content_hash", "occurred_at",
+                "initial_response", "initial_latency_ms", "result", "confidence",
+                "open_notes", "agent_help", "support_json",
+            },
+            "scheduler_state": {
+                "item_id", "algorithm", "algorithm_version", "learning_context",
+                "configuration_json", "state_json", "source_event_id", "updated_at",
+            },
+            "scheduler_proposals": {
+                "proposal_id", "source_event_id", "item_id", "algorithm",
+                "algorithm_version", "learning_context", "configuration_json",
+                "previous_state_json", "proposed_state_json", "due_at",
+                "rationale", "created_at",
+            },
+            "module_receipts": {
+                "receipt_id", "module_id", "module_version", "category", "kind",
+                "manifest_sha256", "stdout_sha256", "duration_ms", "occurred_at",
+            },
+        }
+        for name, expected_columns in required.items():
+            row = db.execute(
+                "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None or row[0] != "table":
+                raise WorkspaceError(
+                    f"incompatible database schema: {name} must be a table"
+                )
+            actual = {
+                column[1] for column in db.execute(f'PRAGMA table_info("{name}")')
+            }
+            missing = sorted(expected_columns - actual)
+            if missing:
+                raise WorkspaceError(
+                    f"incompatible database schema: {name} is missing "
+                    + ", ".join(missing)
+                )
 
     def add_item(
         self,
@@ -200,6 +275,7 @@ class WorkspaceService:
         hint: str | None = None,
         follow_up: str | None = None,
     ) -> ItemSummary:
+        self._validate_owned_paths(require_database=True)
         if not _ITEM_ID.fullmatch(item_id):
             raise WorkspaceError(
                 "item id must be lowercase words or numbers separated by single dashes"
@@ -213,6 +289,11 @@ class WorkspaceService:
         empty = [name for name, value in required.items() if not value.strip()]
         if empty:
             raise WorkspaceError(f"required item fields are empty: {', '.join(empty)}")
+        authored = [title, focus, prompt, answer, hint or "", follow_up or ""]
+        if any(re.search(r"(?m)^# ", value) for value in authored):
+            raise WorkspaceError(
+                "item fields must not contain top-level Markdown headings; use ## or plain text"
+            )
 
         path = self.items_dir / f"{item_id}.md"
         if path.exists():
@@ -251,6 +332,7 @@ class WorkspaceService:
         )
 
     def load_item(self, item_id: str) -> LearningItem:
+        self._validate_owned_paths(require_database=True)
         with self._connect() as db:
             row = db.execute(
                 "SELECT item_id, title, focus, relative_path, content_hash "
@@ -285,16 +367,28 @@ class WorkspaceService:
             follow_up=self._section(text, "Follow-up challenge", required=False),
         )
 
-    def scheduler_state(
+    def scheduler_snapshot(
         self, *, item_id: str, algorithm: str, learning_context: str
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         with self._connect() as db:
             row = db.execute(
-                "SELECT state_json FROM scheduler_state "
+                "SELECT state_json, source_event_id FROM scheduler_state "
                 "WHERE item_id = ? AND algorithm = ? AND learning_context = ?",
                 (item_id, algorithm, learning_context),
             ).fetchone()
-        return row["state_json"] if row else None
+        if row is None:
+            return None, None
+        return row["state_json"], row["source_event_id"]
+
+    def scheduler_state(
+        self, *, item_id: str, algorithm: str, learning_context: str
+    ) -> str | None:
+        state, _source_event_id = self.scheduler_snapshot(
+            item_id=item_id,
+            algorithm=algorithm,
+            learning_context=learning_context,
+        )
+        return state
 
     def record_attempt(
         self,
@@ -306,6 +400,22 @@ class WorkspaceService:
         support_json = json.dumps(attempt["support_actions"], sort_keys=True)
         config_json = json.dumps(proposal["configuration"], sort_keys=True)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT source_event_id FROM scheduler_state "
+                "WHERE item_id = ? AND algorithm = ? AND learning_context = ?",
+                (
+                    proposal["item_id"],
+                    proposal["algorithm"],
+                    proposal["learning_context"],
+                ),
+            ).fetchone()
+            current_source = row["source_event_id"] if row else None
+            expected_source = proposal.get("previous_source_event_id")
+            if current_source != expected_source:
+                raise WorkspaceError(
+                    "scheduler state changed during practice; retry so the attempt can be rescheduled safely"
+                )
             db.execute(
                 """
                 INSERT INTO attempts(
@@ -413,10 +523,9 @@ class WorkspaceService:
     def record_module_receipt(
         self, *, manifest: Any, result: Any
     ) -> dict[str, Any]:
-        try:
-            manifest_sha256 = hashlib.sha256(manifest.path.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise WorkspaceError(f"cannot hash module manifest: {exc}") from exc
+        manifest_sha256 = getattr(manifest, "manifest_sha256", None)
+        if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
+            raise WorkspaceError("module manifest has no load-time SHA-256 identity")
         receipt = {
             "receipt_id": f"module-{uuid.uuid4().hex}",
             "module_id": result.module_id,
@@ -451,6 +560,15 @@ class WorkspaceService:
         if now.tzinfo is None or now.utcoffset() is None:
             raise WorkspaceError("selection timestamp must be timezone-aware")
         now_utc = now.astimezone(timezone.utc)
+        scheduler = self.configuration().get("scheduler")
+        if not isinstance(scheduler, dict):
+            raise WorkspaceError("workspace scheduler configuration is missing")
+        algorithm = scheduler.get("algorithm")
+        learning_context = scheduler.get("context")
+        if not isinstance(algorithm, str) or not algorithm:
+            raise WorkspaceError("scheduler algorithm must be a non-empty string")
+        if not isinstance(learning_context, str) or not learning_context:
+            raise WorkspaceError("scheduler context must be a non-empty string")
         with self._connect() as db:
             rows = db.execute(
                 """
@@ -458,12 +576,13 @@ class WorkspaceService:
                 FROM items AS i
                 LEFT JOIN scheduler_state AS s
                   ON s.item_id = i.item_id
-                 AND s.algorithm = 'fsrs'
-                 AND s.learning_context = 'atomic-recall'
+                 AND s.algorithm = ?
+                 AND s.learning_context = ?
                 LEFT JOIN scheduler_proposals AS p
                   ON p.source_event_id = s.source_event_id
                 ORDER BY i.item_id
-                """
+                """,
+                (algorithm, learning_context),
             ).fetchall()
 
         due: list[tuple[datetime, str]] = []
@@ -494,6 +613,7 @@ class WorkspaceService:
         )
 
     def doctor(self) -> dict[str, Any]:
+        self._validate_owned_paths(require_database=True)
         config = self.configuration()
         stale_items: list[str] = []
         with self._connect() as db:

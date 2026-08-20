@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from virtuoso.practice import PracticeError, PracticeService
+from virtuoso.practice import AttemptRecord, PracticeError, PracticeService
 from virtuoso.workspace import WorkspaceService
 
 
@@ -171,6 +171,55 @@ class PracticeServiceTests(unittest.TestCase):
                 item_id="testing-effect", io=io, now=self.now
             )
         self.assertEqual(self.workspace.list_attempts(), [])
+
+    def test_blank_unaided_recall_cannot_be_recorded_as_demonstrated(self) -> None:
+        io = ScriptedIO(["n", "", "reveal", "demonstrated", "4"])
+        with self.assertRaisesRegex(PracticeError, "blank recall"):
+            PracticeService(
+                self.workspace, clock=FakeClock([100.0, 101.0])
+            ).run(
+                item_id="testing-effect",
+                io=io,
+                now=self.now,
+                agent_help="none",
+            )
+        self.assertEqual(self.workspace.list_attempts(), [])
+
+    def test_invalid_scheduler_configuration_fails_actionably(self) -> None:
+        config = self.workspace.configuration()
+        config["scheduler"]["desired_retention"] = "very high"
+        self.workspace.config_path.write_text(json.dumps(config))
+        io = ScriptedIO(["n", "answer", "reveal", "partial", "3"])
+        with self.assertRaisesRegex(PracticeError, "desired_retention"):
+            PracticeService(
+                self.workspace, clock=FakeClock([0.0, 1.0])
+            ).run(item_id="testing-effect", io=io, now=self.now)
+
+    def test_stale_concurrent_scheduler_update_is_rejected_atomically(self) -> None:
+        item = self.workspace.load_item("testing-effect")
+        service = PracticeService(self.workspace)
+        attempts = [
+            AttemptRecord(
+                event_id=f"attempt-concurrent-{index}",
+                item_id=item.item_id,
+                item_content_hash=item.content_hash,
+                occurred_at=self.now,
+                initial_response="retrieval changes memory",
+                initial_latency_ms=1000,
+                result="demonstrated",
+                confidence=4,
+                open_notes=False,
+                agent_help="none",
+                support_actions=(),
+            )
+            for index in (1, 2)
+        ]
+        proposals = [service._schedule(item=item, attempt=value) for value in attempts]
+
+        service._persist(attempt=attempts[0], proposal=proposals[0])
+        with self.assertRaisesRegex(PracticeError, "scheduler state changed"):
+            service._persist(attempt=attempts[1], proposal=proposals[1])
+        self.assertEqual(len(self.workspace.list_attempts()), 1)
 
 
 if __name__ == "__main__":

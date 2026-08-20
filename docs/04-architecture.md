@@ -46,7 +46,7 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one JSON object on stdout. It uses `shell=False`, a bounded working directory, sanitized environment, output-size cap, and timeout. It validates the response before the application layer can persist an event. Modules never receive a database handle and never write core state directly.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables, not an OS sandbox: they run with the invoking user’s permissions and require explicit consent. The runner uses `shell=False`, a sanitized environment, temporary-file output capture, a process-group timeout, strict schemas, and load-time manifest hashing. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because the operating system does not prevent it from accessing other user-readable files.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 

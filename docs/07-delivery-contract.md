@@ -10,7 +10,7 @@ This iteration is complete only when all of the following work from a clean loca
 4. `virtuoso --workspace PATH practice --item ID` shows the prompt before the answer, measures initial recall with a monotonic clock, supports retry then hint then worked answer, and records the result, confidence, notes state, response text, and support sequence.
 5. The completed attempt appends immutable evidence and an FSRS next-review proposal that names algorithm `fsrs`, installed version, configuration, learning context, source event, and due time.
 6. `virtuoso --workspace PATH attempts --json` returns the recorded attempt and proposal without claiming mastery.
-7. The extension boundary validates and invokes one synthetic external command module through `virtuoso/module@0.1`, while tests prove unknown schema, shell command, malformed output, timeout, and direct-write capability fail closed.
+7. The extension boundary validates and invokes one explicitly approved trusted local executable through `virtuoso/module@0.1`, while tests prove unknown fields/schema, missing consent, shell command, malformed output, timeout, oversized output, private-state projections, and manifest identity drift fail closed. This boundary is not an OS sandbox.
 8. `virtuoso --workspace PATH doctor --json` reports a healthy workspace after the journey and reports actionable errors for missing or damaged state.
 9. The full unit/integration suite, compile check, Build OS verification, representative CLI journey, exact-commit independent review, and clean-worktree check pass.
 

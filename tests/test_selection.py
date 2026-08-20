@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -77,6 +78,19 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(report["items"], 2)
         self.assertEqual(report["stale_items"], [])
         self.assertEqual(before, after)
+
+    def test_selection_uses_configured_learning_context(self) -> None:
+        config = self.workspace.configuration()
+        config["scheduler"]["context"] = "project-transfer"
+        self.workspace.config_path.write_text(json.dumps(config))
+        PracticeService(self.workspace, clock=_Clock()).run(
+            item_id="alpha",
+            io=_IO(["n", "answer", "reveal", "demonstrated", "4"]),
+            now=self.now,
+        )
+
+        selection = self.workspace.select_next(self.now)
+        self.assertEqual(selection.item.item_id, "beta")
 
 
 if __name__ == "__main__":
