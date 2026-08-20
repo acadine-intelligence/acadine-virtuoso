@@ -20,13 +20,15 @@ optional read projections: Obsidian vault, Hermes context, project systems
 ## Package boundaries
 
 - `domain`: immutable values, evidence semantics, scheduler and module contracts. No filesystem or SQLite imports.
-- `application`: initialize, add item, select, practise, record attempt, inspect evidence.
+- `application`: initialize, add item, select, practise, record recall and project-transfer events, inspect evidence.
 - `infrastructure`: Markdown, SQLite, FSRS serialization, clock, external process runner.
 - `cli`: argument parsing, prompts, JSON output, exit codes.
 
 ## Storage and synchronization
 
 Markdown owns item prose. SQLite owns derived and append-only state. Every item version is content-hashed. A future sync adapter compares owned fields and hashes; it never applies generic last-write-wins. Conflicting learner-authored edits become explicit conflict records.
+
+Recall attempts and project-transfer events stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. Its schema fixes `claims_mastery` to false. Capability views may later interpret repeated evidence, but cannot rewrite the source events.
 
 SQLite migrations run in transactions. Before any destructive migration, Virtuoso creates a SQLite backup. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
 

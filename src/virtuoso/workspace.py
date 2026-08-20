@@ -7,7 +7,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,8 @@ _ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SOURCE_KINDS = {"markdown", "obsidian"}
+_TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
+_TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
 
 
 class WorkspaceError(RuntimeError):
@@ -83,6 +85,22 @@ class SourceScanReceipt:
     skipped: int
     total_bytes: int
     occurred_at: str
+
+
+@dataclass(frozen=True)
+class TransferEvidence:
+    event_id: str
+    item_id: str
+    item_content_hash: str
+    project_id: str
+    use_case: str
+    outcome: str
+    independence: str
+    artifact_reference: str | None
+    reflection: str | None
+    occurred_at: str
+    delayed_check_due_at: str
+    claims_mastery: bool = False
 
 
 class WorkspaceService:
@@ -280,6 +298,21 @@ class WorkspaceService:
                 linked_at TEXT NOT NULL,
                 PRIMARY KEY(item_id, source_id, source_relative_path)
             )""",
+            """CREATE TABLE IF NOT EXISTS transfer_events (
+                event_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                item_content_hash TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                use_case TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('successful','partial','unsuccessful')),
+                independence TEXT NOT NULL CHECK(independence IN ('independent','guided','agent-produced','unknown')),
+                artifact_reference TEXT,
+                reflection TEXT,
+                occurred_at TEXT NOT NULL,
+                delayed_check_due_at TEXT NOT NULL,
+                claims_mastery INTEGER NOT NULL DEFAULT 0 CHECK(claims_mastery = 0),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -291,6 +324,9 @@ class WorkspaceService:
             )
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)"
             )
 
     def add_source(
@@ -627,6 +663,12 @@ class WorkspaceService:
                 "item_id", "source_id", "source_relative_path",
                 "source_content_hash", "linked_at",
             },
+            "transfer_events": {
+                "event_id", "item_id", "item_content_hash", "project_id",
+                "use_case", "outcome", "independence", "artifact_reference",
+                "reflection", "occurred_at", "delayed_check_due_at",
+                "claims_mastery", "created_at",
+            },
         }
         for name, expected_columns in required.items():
             row = db.execute(
@@ -645,6 +687,113 @@ class WorkspaceService:
                     f"incompatible database schema: {name} is missing "
                     + ", ".join(missing)
                 )
+
+    def record_transfer(
+        self,
+        *,
+        item_id: str,
+        project_id: str,
+        use_case: str,
+        outcome: str,
+        independence: str,
+        artifact_reference: str | None = None,
+        reflection: str | None = None,
+        occurred_at: datetime | None = None,
+    ) -> TransferEvidence:
+        if not _ITEM_ID.fullmatch(project_id):
+            raise WorkspaceError(
+                "project id must be lowercase words or numbers separated by single dashes"
+            )
+        if not use_case.strip():
+            raise WorkspaceError("transfer use case must not be empty")
+        if len(use_case) > 10_000:
+            raise WorkspaceError("transfer use case exceeds 10000 characters")
+        if outcome not in _TRANSFER_OUTCOMES:
+            raise WorkspaceError(
+                "transfer outcome must be successful, partial, or unsuccessful"
+            )
+        if independence not in _TRANSFER_INDEPENDENCE:
+            raise WorkspaceError(
+                "transfer independence must be independent, guided, agent-produced, or unknown"
+            )
+        artifact = artifact_reference.strip() if artifact_reference else None
+        note = reflection.strip() if reflection else None
+        if artifact and len(artifact) > 2_048:
+            raise WorkspaceError("artifact reference exceeds 2048 characters")
+        if note and len(note) > 50_000:
+            raise WorkspaceError("transfer reflection exceeds 50000 characters")
+
+        item = self.load_item(item_id)
+        moment = occurred_at or datetime.now(timezone.utc)
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise WorkspaceError("transfer occurred_at must include a timezone")
+        moment = moment.astimezone(timezone.utc)
+        event = TransferEvidence(
+            event_id=f"transfer-{uuid.uuid4().hex}",
+            item_id=item.item_id,
+            item_content_hash=item.content_hash,
+            project_id=project_id,
+            use_case=use_case.strip(),
+            outcome=outcome,
+            independence=independence,
+            artifact_reference=artifact,
+            reflection=note,
+            occurred_at=moment.isoformat(),
+            delayed_check_due_at=(moment + timedelta(days=7)).isoformat(),
+        )
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO transfer_events(
+                    event_id, item_id, item_content_hash, project_id, use_case,
+                    outcome, independence, artifact_reference, reflection,
+                    occurred_at, delayed_check_due_at, claims_mastery
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    event.event_id,
+                    event.item_id,
+                    event.item_content_hash,
+                    event.project_id,
+                    event.use_case,
+                    event.outcome,
+                    event.independence,
+                    event.artifact_reference,
+                    event.reflection,
+                    event.occurred_at,
+                    event.delayed_check_due_at,
+                ),
+            )
+        return event
+
+    def list_transfer_events(self) -> list[TransferEvidence]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT event_id, item_id, item_content_hash, project_id, use_case,
+                       outcome, independence, artifact_reference, reflection,
+                       occurred_at, delayed_check_due_at, claims_mastery
+                FROM transfer_events
+                ORDER BY occurred_at, event_id
+                """
+            ).fetchall()
+        return [
+            TransferEvidence(
+                event_id=row["event_id"],
+                item_id=row["item_id"],
+                item_content_hash=row["item_content_hash"],
+                project_id=row["project_id"],
+                use_case=row["use_case"],
+                outcome=row["outcome"],
+                independence=row["independence"],
+                artifact_reference=row["artifact_reference"],
+                reflection=row["reflection"],
+                occurred_at=row["occurred_at"],
+                delayed_check_due_at=row["delayed_check_due_at"],
+                claims_mastery=bool(row["claims_mastery"]),
+            )
+            for row in rows
+        ]
 
     def add_item(
         self,
@@ -1008,6 +1157,9 @@ class WorkspaceService:
             proposal_count = db.execute(
                 "SELECT COUNT(*) FROM scheduler_proposals"
             ).fetchone()[0]
+            transfer_count = db.execute(
+                "SELECT COUNT(*) FROM transfer_events"
+            ).fetchone()[0]
             source_links = db.execute(
                 """
                 SELECT l.item_id, l.source_id, l.source_relative_path,
@@ -1028,6 +1180,15 @@ class WorkspaceService:
                 stale_items.append(row["item_id"])
         for row in source_links:
             root = Path(row["root_path"])
+            if root.is_symlink() or root.resolve(strict=False) != root:
+                stale_source_links.append(
+                    {
+                        "item_id": row["item_id"],
+                        "source_id": row["source_id"],
+                        "relative_path": row["source_relative_path"],
+                    }
+                )
+                continue
             path = (root / row["source_relative_path"]).resolve()
             try:
                 path.relative_to(root.resolve())
@@ -1050,6 +1211,7 @@ class WorkspaceService:
             "items": len(rows),
             "attempts": attempt_count,
             "proposals": proposal_count,
+            "transfer_events": transfer_count,
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
         }

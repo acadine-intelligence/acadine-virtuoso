@@ -1,4 +1,4 @@
-# Delivery contract: active recall and read-only source index
+# Delivery contract: active recall, source index, and project transfer
 
 ## Observable outcomes
 
@@ -15,7 +15,9 @@ This iteration is complete only when all of the following work from a clean loca
 9. `virtuoso --workspace PATH source add ...` connects an existing Markdown folder or Obsidian vault as an explicit read-only source without making Obsidian or Hermes a runtime dependency.
 10. `source scan` indexes only bounded note metadata, hashes, and wikilinks; it never writes to source files or copies note bodies into SQLite, and symlink escapes fail closed.
 11. `source link` binds a manually authored learning item to the exact indexed source-note hash, while `doctor` reports a linked note that changed or disappeared.
-12. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
+12. `transfer record` appends one project-application event bound to the exact learning-item hash with outcome, independence, artifact reference, reflection, and a seven-day delayed-check date; it cannot claim mastery.
+13. `transfer list` returns project evidence without merging it into recall attempts, scheduler state, XP, or capability claims.
+14. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
 
 ## Automated verification
 
@@ -26,6 +28,7 @@ The implementation must declare and execute:
 - Build/install smoke check in the project-local virtual environment.
 - Deterministic synthetic CLI journey.
 - Module-boundary security tests.
+- Project-transfer attribution and stale-item tests.
 - Build OS `verify` against the exact commit.
 
 The CLI has no visual surface, network service, browser console, or responsive layout in this slice. Accessibility is verified through keyboard-only prompts, no color dependency, stable plain text, and JSON output tests.

@@ -177,6 +177,53 @@ class CliJourneyTests(unittest.TestCase):
         self.assertEqual(notes["documents"][0]["wikilinks"], ["Active Recall"])
         self.assertNotIn("makes retrieval visible", json.dumps(notes))
 
+    def test_project_transfer_cli_records_attributed_evidence_without_mastery_claim(self) -> None:
+        self._run("init", "--json")
+        self._run(
+            "add",
+            "--id",
+            "testing-effect",
+            "--title",
+            "Explain the testing effect",
+            "--focus",
+            "learning-science",
+            "--prompt",
+            "Why does retrieval strengthen memory?",
+            "--answer",
+            "Retrieval changes memory.",
+            "--json",
+        )
+
+        recorded = json.loads(
+            self._run(
+                "transfer",
+                "record",
+                "--item",
+                "testing-effect",
+                "--project",
+                "virtuoso-cli",
+                "--use-case",
+                "Applied retrieval practice to a real CLI journey.",
+                "--outcome",
+                "successful",
+                "--independence",
+                "guided",
+                "--artifact",
+                "git:abc123",
+                "--reflection",
+                "One design hint was used.",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(recorded["project_id"], "virtuoso-cli")
+        self.assertEqual(recorded["independence"], "guided")
+        self.assertFalse(recorded["claims_mastery"])
+
+        listed = json.loads(self._run("transfer", "list", "--json").stdout)
+        self.assertEqual(len(listed["events"]), 1)
+        self.assertEqual(listed["events"][0]["artifact_reference"], "git:abc123")
+        self.assertNotIn("mastered", json.dumps(listed).lower())
+
 
 if __name__ == "__main__":
     unittest.main()

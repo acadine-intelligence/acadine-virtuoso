@@ -190,6 +190,34 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
             ],
         )
 
+    def test_doctor_marks_link_stale_if_source_root_becomes_symlink(self) -> None:
+        note = self.vault / "Testing Effect.md"
+        note.write_text("# Testing Effect\n\nOriginal.\n", encoding="utf-8")
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        self.service.link_item_source(
+            item_id="testing-effect", source_id="vault", relative_path="Testing Effect.md"
+        )
+
+        original = Path(self.tmp.name) / "original-vault"
+        self.vault.rename(original)
+        outside = Path(self.tmp.name) / "outside-vault"
+        outside.mkdir()
+        (outside / "Testing Effect.md").write_text("# Private replacement\n", encoding="utf-8")
+        self.vault.symlink_to(outside, target_is_directory=True)
+
+        health = self.service.doctor()
+
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(health["stale_source_links"][0]["source_id"], "vault")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -89,6 +90,32 @@ def _parser() -> argparse.ArgumentParser:
     source_notes = source_commands.add_parser("notes", help="list indexed note metadata")
     source_notes.add_argument("--id", required=True)
     source_notes.add_argument("--json", action="store_true")
+
+    transfer = commands.add_parser(
+        "transfer", help="record and inspect real project application evidence"
+    )
+    transfer_commands = transfer.add_subparsers(dest="transfer_command", required=True)
+    transfer_record = transfer_commands.add_parser(
+        "record", help="record an attributed project transfer event"
+    )
+    transfer_record.add_argument("--item", required=True)
+    transfer_record.add_argument("--project", required=True)
+    transfer_record.add_argument("--use-case", required=True)
+    transfer_record.add_argument(
+        "--outcome", choices=("successful", "partial", "unsuccessful"), required=True
+    )
+    transfer_record.add_argument(
+        "--independence",
+        choices=("independent", "guided", "agent-produced", "unknown"),
+        required=True,
+    )
+    transfer_record.add_argument("--artifact")
+    transfer_record.add_argument("--reflection")
+    transfer_record.add_argument("--json", action="store_true")
+    transfer_list = transfer_commands.add_parser(
+        "list", help="list project transfer evidence"
+    )
+    transfer_list.add_argument("--json", action="store_true")
     return parser
 
 
@@ -158,6 +185,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "transfer":
+            if args.transfer_command == "record":
+                event = workspace.record_transfer(
+                    item_id=args.item,
+                    project_id=args.project,
+                    use_case=args.use_case,
+                    outcome=args.outcome,
+                    independence=args.independence,
+                    artifact_reference=args.artifact,
+                    reflection=args.reflection,
+                )
+                _emit(asdict(event), as_json=args.json)
+                return 0
+            if args.transfer_command == "list":
+                _emit(
+                    {"events": [asdict(event) for event in workspace.list_transfer_events()]},
+                    as_json=args.json,
+                )
+                return 0
         if args.command == "source":
             if args.source_command == "add":
                 source = workspace.add_source(
