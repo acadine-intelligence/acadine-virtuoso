@@ -30,7 +30,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 8
+_CURRENT_MIGRATION_VERSION = 9
 
 
 class WorkspaceError(RuntimeError):
@@ -789,6 +789,25 @@ class WorkspaceService:
                 PRIMARY KEY(candidate_id, ordinal)
             )""",
             "ALTER TABLE items ADD COLUMN retired_at TEXT",
+            """CREATE TABLE IF NOT EXISTS candidate_decisions (
+                decision_id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL
+                    REFERENCES review_candidates(candidate_id) ON DELETE RESTRICT,
+                decision TEXT NOT NULL CHECK(decision IN ('accept','reject')),
+                note TEXT CHECK(note IS NULL OR length(note) BETWEEN 1 AND 2000),
+                decided_at TEXT NOT NULL,
+                UNIQUE(candidate_id)
+            )""",
+            """CREATE TRIGGER candidate_decisions_reject_update
+                BEFORE UPDATE ON candidate_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate_decisions is append-only');
+                END""",
+            """CREATE TRIGGER candidate_decisions_reject_delete
+                BEFORE DELETE ON candidate_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate_decisions is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -852,7 +871,8 @@ class WorkspaceService:
                 5: statements[13:16],
                 6: statements[16:24],
                 7: statements[24:27],
-                8: statements[27:],
+                8: statements[27:28],
+                9: statements[28:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -1494,9 +1514,16 @@ class WorkspaceService:
                        r.generator_id, r.generator_version,
                        r.source_id AS run_source_id,
                        r.scope_relative_path, r.snapshot_sha256,
-                       r.max_candidates
+                       r.max_candidates,
+                       CASE
+                           WHEN d.decision = 'accept' THEN 'accepted'
+                           WHEN d.decision = 'reject' THEN 'rejected'
+                           ELSE c.review_state
+                       END AS effective_review_state
                 FROM review_candidates AS c
                 JOIN candidate_runs AS r ON r.run_id = c.run_id
+                LEFT JOIN candidate_decisions AS d
+                    ON d.candidate_id = c.candidate_id
                 """
                 + where
                 + " ORDER BY r.created_at DESC, r.run_id, c.ordinal",
