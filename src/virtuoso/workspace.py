@@ -28,7 +28,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 5
+_CURRENT_MIGRATION_VERSION = 6
 
 
 class WorkspaceError(RuntimeError):
@@ -610,6 +610,46 @@ class WorkspaceService:
                     )
                 )
             )""",
+            """CREATE TRIGGER transfer_events_reject_update
+                BEFORE UPDATE ON transfer_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_events is append-only');
+                END""",
+            """CREATE TRIGGER transfer_events_reject_delete
+                BEFORE DELETE ON transfer_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_events is append-only');
+                END""",
+            """CREATE TRIGGER transfer_checks_reject_update
+                BEFORE UPDATE ON transfer_checks
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_checks is append-only');
+                END""",
+            """CREATE TRIGGER transfer_checks_reject_delete
+                BEFORE DELETE ON transfer_checks
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_checks is append-only');
+                END""",
+            """CREATE TRIGGER transfer_check_predictions_reject_update
+                BEFORE UPDATE ON transfer_check_predictions
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_check_predictions is append-only');
+                END""",
+            """CREATE TRIGGER transfer_check_predictions_reject_delete
+                BEFORE DELETE ON transfer_check_predictions
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_check_predictions is append-only');
+                END""",
+            """CREATE TRIGGER transfer_check_completions_reject_update
+                BEFORE UPDATE ON transfer_check_completions
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_check_completions is append-only');
+                END""",
+            """CREATE TRIGGER transfer_check_completions_reject_delete
+                BEFORE DELETE ON transfer_check_completions
+                BEGIN
+                    SELECT RAISE(ABORT, 'transfer_check_completions is append-only');
+                END""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -662,37 +702,59 @@ class WorkspaceService:
             else:
                 latest = 0
 
-            prior_statements = statements[:-3]
-            transfer_check_statements = statements[-3:]
-            for statement in prior_statements:
-                db.execute(statement)
-            if latest < 5:
-                for statement in transfer_check_statements:
+            migration_statements: dict[int, tuple[str, ...]] = {
+                1: statements[:6],
+                2: statements[6:10],
+                3: statements[10:11],
+                4: statements[11:13],
+                5: statements[13:16],
+                6: statements[16:],
+            }
+
+            def statements_through(version: int) -> tuple[str, ...]:
+                return tuple(
+                    statement
+                    for migration_version in range(1, version + 1)
+                    for statement in migration_statements[migration_version]
+                )
+
+            if latest:
+                self._validate_database_schema(
+                    db, statements=statements_through(latest)
+                )
+                if latest >= 5:
+                    self._validate_transfer_check_chronology(db)
+
+            for version in range(latest + 1, _CURRENT_MIGRATION_VERSION + 1):
+                for statement in migration_statements[version]:
                     db.execute(
                         statement.replace(
                             "CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1
                         )
                     )
-            if latest < 4:
-                db.execute(
-                    """INSERT OR IGNORE INTO attempt_timings(
-                           event_id, started_at, completed_at
-                       )
-                       SELECT event_id, occurred_at, occurred_at FROM attempts"""
+                if version == 4:
+                    db.execute(
+                        """INSERT OR IGNORE INTO attempt_timings(
+                               event_id, started_at, completed_at
+                           )
+                           SELECT event_id, occurred_at, occurred_at FROM attempts"""
+                    )
+                    db.execute(
+                        """INSERT OR IGNORE INTO module_run_receipts(
+                               receipt_id, module_id, module_version, category, kind,
+                               manifest_sha256, stdout_sha256, status, error,
+                               duration_ms, started_at, completed_at
+                           )
+                           SELECT receipt_id, module_id, module_version, category, kind,
+                                  manifest_sha256, stdout_sha256, 'succeeded', NULL,
+                                  duration_ms, occurred_at, occurred_at
+                           FROM module_receipts"""
+                    )
+                self._validate_database_schema(
+                    db, statements=statements_through(version)
                 )
-                db.execute(
-                    """INSERT OR IGNORE INTO module_run_receipts(
-                           receipt_id, module_id, module_version, category, kind,
-                           manifest_sha256, stdout_sha256, status, error,
-                           duration_ms, started_at, completed_at
-                       )
-                       SELECT receipt_id, module_id, module_version, category, kind,
-                              manifest_sha256, stdout_sha256, 'succeeded', NULL,
-                              duration_ms, occurred_at, occurred_at
-                       FROM module_receipts"""
-                )
-            self._validate_database_schema(db, statements=statements)
-            for version in range(latest + 1, _CURRENT_MIGRATION_VERSION + 1):
+                if version >= 5:
+                    self._validate_transfer_check_chronology(db)
                 db.execute(
                     "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
                 )
@@ -1083,7 +1145,59 @@ class WorkspaceService:
                 "workspace database corruption: delayed transfer check due_at "
                 "does not match source transfer event"
             )
+        if created_at < occurred_at:
+            raise WorkspaceError(
+                "stored delayed transfer check creation timestamp predates its source "
+                "transfer event"
+            )
         return check_due_at, created_at
+
+    @classmethod
+    def _validate_transfer_check_chronology(cls, db: sqlite3.Connection) -> None:
+        rows = db.execute(
+            """SELECT
+                   c.due_at AS check_due_at,
+                   c.created_at AS check_created_at,
+                   e.occurred_at AS source_occurred_at,
+                   e.delayed_check_due_at AS source_due_at,
+                   p.recorded_at AS prediction_recorded_at,
+                   completed.completed_at AS completion_completed_at
+               FROM transfer_checks AS c
+               JOIN transfer_events AS e ON e.event_id = c.transfer_event_id
+               LEFT JOIN transfer_check_predictions AS p ON p.check_id = c.check_id
+               LEFT JOIN transfer_check_completions AS completed
+                 ON completed.check_id = c.check_id"""
+        ).fetchall()
+        for row in rows:
+            due_at, created_at = cls._validated_transfer_check_timestamps(row)
+            if row["prediction_recorded_at"] is None:
+                continue
+            prediction_at = cls._parse_stored_timestamp(
+                row["prediction_recorded_at"],
+                field="transfer check prediction recorded_at",
+            )
+            if prediction_at < due_at:
+                raise WorkspaceError(
+                    "stored transfer check prediction predates the delayed due time"
+                )
+            if prediction_at < created_at:
+                raise WorkspaceError(
+                    "stored transfer check prediction predates the check creation"
+                )
+            if row["completion_completed_at"] is None:
+                continue
+            completed_at = cls._parse_stored_timestamp(
+                row["completion_completed_at"],
+                field="transfer check completion completed_at",
+            )
+            if completed_at < prediction_at:
+                raise WorkspaceError(
+                    "stored transfer check completion predates its prediction"
+                )
+            if completed_at < created_at:
+                raise WorkspaceError(
+                    "stored transfer check completion predates the check creation"
+                )
 
     @staticmethod
     def _normalized_schema_sql(value: str | None) -> str:
@@ -1160,6 +1274,25 @@ class WorkspaceService:
                 raise WorkspaceError(
                     "incompatible database schema: " + "; ".join(details)
                 )
+
+            for trigger_name, object_type in sorted(expected_objects):
+                if object_type != "trigger":
+                    continue
+                expected_sql = expected_db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                    (trigger_name,),
+                ).fetchone()[0]
+                actual_sql = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                    (trigger_name,),
+                ).fetchone()[0]
+                if cls._normalized_schema_sql(actual_sql) != cls._normalized_schema_sql(
+                    expected_sql
+                ):
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"trigger {trigger_name} definition does not match"
+                    )
 
             for table_name, object_type in sorted(expected_objects):
                 if object_type != "table":
@@ -1325,6 +1458,11 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "stored transfer event delayed_check_due_at must be later than occurred_at"
                     )
+                if datetime.fromisoformat(created_at) < occurred:
+                    raise WorkspaceError(
+                        "transfer check creation timestamp cannot precede its source "
+                        "transfer event"
+                    )
                 due_at = self._serialize_utc_timestamp(
                     due, field="transfer check due timestamp"
                 )
@@ -1463,6 +1601,10 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "stored transfer check prediction predates the delayed due time"
                     )
+                if prediction_at < check_created_at:
+                    raise WorkspaceError(
+                        "stored transfer check prediction predates the check creation"
+                    )
                 prediction_recorded_at = self._serialize_utc_timestamp(
                     prediction_at,
                     field="transfer check prediction recorded_at",
@@ -1571,7 +1713,14 @@ class WorkspaceService:
                     raise WorkspaceError(
                         f"no delayed transfer check with id: {check_id}"
                     )
-                due_at, _created_at = self._validated_transfer_check_timestamps(row)
+                due_at, created_at = self._validated_transfer_check_timestamps(row)
+                if recorded_moment < created_at:
+                    raise WorkspaceError(
+                        "delayed transfer check cannot begin before its creation at "
+                        + self._serialize_utc_timestamp(
+                            created_at, field="delayed transfer check created_at"
+                        )
+                    )
                 if recorded_moment < due_at:
                     raise WorkspaceError(
                         "delayed transfer check is not due until "
@@ -1720,7 +1869,11 @@ class WorkspaceService:
                     raise WorkspaceError(
                         f"no delayed transfer check with id: {check_id}"
                     )
-                due_at, _created_at = self._validated_transfer_check_timestamps(row)
+                due_at, created_at = self._validated_transfer_check_timestamps(row)
+                if completed_moment < created_at:
+                    raise WorkspaceError(
+                        "transfer check completion timestamp cannot precede its check creation"
+                    )
                 if completed_moment < due_at:
                     raise WorkspaceError(
                         "delayed transfer check is not due until "
@@ -1740,6 +1893,10 @@ class WorkspaceService:
                 if prediction_moment < due_at:
                     raise WorkspaceError(
                         "stored transfer check prediction predates the delayed due time"
+                    )
+                if prediction_moment < created_at:
+                    raise WorkspaceError(
+                        "stored transfer check prediction predates the check creation"
                     )
                 self._stored_transfer_text(
                     row["pre_attempt_prediction"],

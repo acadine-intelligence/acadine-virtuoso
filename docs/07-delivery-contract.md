@@ -17,10 +17,10 @@ This iteration is complete only when all of the following work from a clean loca
 11. `source link` binds a manually authored learning item to the exact indexed source-note hash, while `doctor` reports a linked note that changed or disappeared.
 12. `transfer record` appends one project-application event bound to the exact learning-item hash with outcome, independence, artifact reference, reflection, and a seven-day delayed-check date; it cannot claim mastery.
 13. `transfer list` returns project evidence without merging it into recall attempts, scheduler state, XP, or capability claims.
-14. `transfer check create` links one immutable, manually authored changed/novel challenge, acceptance criteria, and scorer to an existing transfer event and inherits its validated due date.
+14. `transfer check create` links one immutable, manually authored changed/novel challenge, acceptance criteria, and scorer to an existing transfer event and inherits its validated due date. Check creation cannot precede the source event. A check may be created after its due date, but its UTC creation timestamp cannot be backdated.
 15. `transfer check due` lists pending and started incomplete checks chronologically without writing state or becoming a scheduler/project-priority recommendation.
-16. `transfer check begin` appends one prediction at or after the due time before the learner attempts the changed challenge or requests help.
-17. `transfer check complete` appends one independent attempt with assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, optional inert artifact reference, timestamps, and `claims_mastery: false`; it cannot update scheduler, project selection, or capability state.
+16. `transfer check begin` appends one prediction at or after both the inherited due time and check creation time, before the learner attempts the changed challenge or requests help.
+17. `transfer check complete` appends one independent attempt no earlier than both check creation and its required prediction, with assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, optional inert artifact reference, timestamps, and `claims_mastery: false`; it cannot update scheduler, project selection, or capability state.
 18. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
 
 ## Automated verification

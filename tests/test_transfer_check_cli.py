@@ -326,10 +326,11 @@ class TransferCheckCliTests(unittest.TestCase):
         )
         second_check = self._create_check_domain(second_event, suffix="human")
         due_at = datetime.fromisoformat(second_event.delayed_check_due_at)
+        created_at = datetime.fromisoformat(second_check.created_at)
         self.service.begin_transfer_check(
             check_id=second_check.check_id,
             pre_attempt_prediction="Human-output prediction.",
-            now=due_at,
+            now=max(due_at, created_at),
         )
 
         human = self._run(

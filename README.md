@@ -64,9 +64,9 @@ Scanning never writes to the source. It indexes relative paths, titles, content 
 .venv/bin/virtuoso --workspace "$WORKSPACE" transfer list --json
 ```
 
-Transfer events are append-only and bound to the exact learning-item hash. Outcome, independence, artifact reference, and reflection remain separate. Each event proposes a seven-day delayed check and explicitly records that it does not claim mastery.
+Transfer events are append-only and bound to the exact learning-item hash. Outcome, independence, artifact reference, and reflection remain separate. Each event proposes a seven-day delayed check and explicitly records that it does not claim mastery. Transfer events, checks, predictions, and completions all reject direct update or deletion.
 
-Create a check only after authoring the changed or novel context, challenge, acceptance criteria, and scorer. The due command is a chronological capability-evidence queue, not a scheduler or project-priority recommendation:
+Create a check only after authoring the changed or novel context, challenge, acceptance criteria, and scorer. Its UTC creation time cannot precede the source transfer event. Late creation after the inherited due time is allowed, but cannot be backdated. The due command is a chronological capability-evidence queue, not a scheduler or project-priority recommendation:
 
 ```bash
 EVENT=transfer-00000000000000000000000000000000 # use an id from transfer list
@@ -82,7 +82,7 @@ EVENT=transfer-00000000000000000000000000000000 # use an id from transfer list
 .venv/bin/virtuoso --workspace "$WORKSPACE" transfer check due --json
 ```
 
-**Before attempting the challenge or requesting help**, record the prediction. Then complete the changed task and append the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional opaque artifact reference:
+At or after both the inherited due time and check creation time, **before attempting the challenge or requesting help**, record the prediction. Completion cannot precede either check creation or that prediction. Then complete the changed task and append the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional opaque artifact reference:
 
 ```bash
 CHECK=transfer-check-00000000000000000000000000000000 # use an id from check create/due

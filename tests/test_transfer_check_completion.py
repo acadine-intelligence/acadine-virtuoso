@@ -235,6 +235,66 @@ class TransferCheckCompletionTests(unittest.TestCase):
             }
         self.assertTrue(all(value == 0 for rows in claims.values() for (value,) in rows))
 
+    def test_transfer_evidence_lineage_rejects_direct_update_and_delete(
+        self,
+    ) -> None:
+        self._complete()
+        probes = (
+            (
+                "transfer_events",
+                "UPDATE transfer_events SET item_content_hash = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' WHERE event_id = ?",
+                self.event.event_id,
+            ),
+            (
+                "transfer_checks",
+                "UPDATE transfer_checks SET transfer_event_id = 'transfer-00000000000000000000000000000000' WHERE check_id = ?",
+                self.check.check_id,
+            ),
+            (
+                "transfer_check_predictions",
+                "UPDATE transfer_check_predictions SET pre_attempt_prediction = 'rewritten prediction' WHERE check_id = ?",
+                self.check.check_id,
+            ),
+            (
+                "transfer_check_completions",
+                "UPDATE transfer_check_completions SET outcome = 'successful' WHERE check_id = ?",
+                self.check.check_id,
+            ),
+            (
+                "transfer_events",
+                "DELETE FROM transfer_events WHERE event_id = ?",
+                self.event.event_id,
+            ),
+            (
+                "transfer_checks",
+                "DELETE FROM transfer_checks WHERE check_id = ?",
+                self.check.check_id,
+            ),
+            (
+                "transfer_check_predictions",
+                "DELETE FROM transfer_check_predictions WHERE check_id = ?",
+                self.check.check_id,
+            ),
+            (
+                "transfer_check_completions",
+                "DELETE FROM transfer_check_completions WHERE check_id = ?",
+                self.check.check_id,
+            ),
+        )
+        with sqlite3.connect(self.service.db_path) as db:
+            db.execute("PRAGMA foreign_keys = OFF")
+            for table, statement, record_id in probes:
+                with self.subTest(table=table, operation=statement.split()[0]):
+                    db.execute("SAVEPOINT immutable_probe")
+                    try:
+                        with self.assertRaisesRegex(
+                            sqlite3.IntegrityError, f"{table} is append-only"
+                        ):
+                            db.execute(statement, (record_id,))
+                    finally:
+                        db.execute("ROLLBACK TO immutable_probe")
+                        db.execute("RELEASE immutable_probe")
+
     def test_completion_is_single_insert_and_concurrent_retry_cannot_overwrite(
         self,
     ) -> None:
@@ -417,6 +477,92 @@ class TransferCheckCompletionTests(unittest.TestCase):
             ],
         )
 
+    def test_open_rejects_stored_completion_before_prediction(self) -> None:
+        self._complete()
+        invalid_completed_at = self.due_at - timedelta(seconds=1)
+        with sqlite3.connect(self.service.db_path) as db:
+            trigger_sql = db.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type = 'trigger'
+                     AND name = 'transfer_check_completions_reject_update'"""
+            ).fetchone()[0]
+            db.execute("DROP TRIGGER transfer_check_completions_reject_update")
+            db.execute(
+                "UPDATE transfer_check_completions SET completed_at = ? WHERE check_id = ?",
+                (invalid_completed_at.isoformat(), self.check.check_id),
+            )
+            db.execute(trigger_sql)
+
+        with self.assertRaisesRegex(
+            WorkspaceError, "stored transfer check completion predates its prediction"
+        ):
+            WorkspaceService.open(self.root)
+
+        with sqlite3.connect(self.service.db_path) as db:
+            stored = db.execute(
+                """SELECT completed_at FROM transfer_check_completions
+                   WHERE check_id = ?""",
+                (self.check.check_id,),
+            ).fetchone()[0]
+        self.assertEqual(stored, invalid_completed_at.isoformat())
+
+    def test_completion_cannot_precede_late_check_creation(self) -> None:
+        event = self._record_event("late-completion", minute=23)
+        due_at = self._timestamp(event.delayed_check_due_at)
+        created_at = due_at + timedelta(days=1)
+        check = self.service.create_transfer_check(
+            transfer_event_id=event.event_id,
+            context_kind="changed",
+            context_description="A late-authored completion chronology check.",
+            challenge_prompt="Complete the late-authored challenge.",
+            acceptance_criteria="Meet the late-authored criterion.",
+            scorer_kind="human",
+            scorer_reference="late-completion-reviewer",
+            now=created_at,
+        )
+        self.service.begin_transfer_check(
+            check_id=check.check_id,
+            pre_attempt_prediction="A valid prediction recorded when the check was authored.",
+            now=created_at,
+        )
+        with sqlite3.connect(self.service.db_path) as db:
+            trigger_sql = db.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type = 'trigger'
+                     AND name = 'transfer_check_predictions_reject_update'"""
+            ).fetchone()[0]
+            db.execute("DROP TRIGGER transfer_check_predictions_reject_update")
+            db.execute(
+                """UPDATE transfer_check_predictions
+                   SET recorded_at = ? WHERE check_id = ?""",
+                (due_at.isoformat(), check.check_id),
+            )
+            db.execute(trigger_sql)
+
+        with self.assertRaisesRegex(
+            WorkspaceError, "completion timestamp cannot precede its check creation"
+        ):
+            self._complete(
+                check_id=check.check_id,
+                now=due_at + timedelta(minutes=1),
+            )
+        self.assertNotIn(
+            check.check_id,
+            [row[0] for row in self._table_rows("transfer_check_completions")],
+        )
+
+        with self.assertRaisesRegex(
+            WorkspaceError, "prediction predates the check creation"
+        ):
+            self._complete(
+                check_id=check.check_id,
+                now=created_at + timedelta(minutes=1),
+            )
+        self.assertNotIn(
+            check.check_id,
+            [row[0] for row in self._table_rows("transfer_check_completions")],
+        )
+
     def test_completion_validates_fields_and_timestamp_order_without_partial_write(
         self,
     ) -> None:
@@ -448,10 +594,17 @@ class TransferCheckCompletionTests(unittest.TestCase):
         )
         later_prediction_time = later_due + timedelta(minutes=5)
         with sqlite3.connect(self.service.db_path) as db:
+            trigger_sql = db.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type = 'trigger'
+                     AND name = 'transfer_check_predictions_reject_update'"""
+            ).fetchone()[0]
+            db.execute("DROP TRIGGER transfer_check_predictions_reject_update")
             db.execute(
                 "UPDATE transfer_check_predictions SET recorded_at = ? WHERE check_id = ?",
                 (later_prediction_time.isoformat(), later_check.check_id),
             )
+            db.execute(trigger_sql)
         with self.assertRaisesRegex(WorkspaceError, "cannot precede|prediction"):
             self._complete(
                 check_id=later_check.check_id,
