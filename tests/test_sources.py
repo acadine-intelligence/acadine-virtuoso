@@ -310,6 +310,41 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
         self.assertEqual(health["status"], "needs-attention")
         self.assertEqual(health["stale_source_links"][0]["source_id"], "vault")
 
+    def test_doctor_does_not_follow_source_note_replaced_by_symlink(self) -> None:
+        note = self.vault / "Testing Effect.md"
+        body = "# Testing Effect\n\nOriginal.\n"
+        note.write_text(body, encoding="utf-8")
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        self.service.link_item_source(
+            item_id="testing-effect", source_id="vault", relative_path="Testing Effect.md"
+        )
+        outside = Path(self.tmp.name).resolve() / "outside-private.md"
+        outside.write_text(body, encoding="utf-8")
+        note.unlink()
+        note.symlink_to(outside)
+
+        health = self.service.doctor()
+
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(
+            health["stale_source_links"],
+            [
+                {
+                    "item_id": "testing-effect",
+                    "source_id": "vault",
+                    "relative_path": "Testing Effect.md",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

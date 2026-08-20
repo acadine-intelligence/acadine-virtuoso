@@ -25,8 +25,8 @@
     "current_workaround": "Use Obsidian notes, a small path-bound SM-2-lite script, manually chosen exercises, project work, and separate reflections; due dates, response latency, assistance, transfer evidence, and project relevance are not joined into one inspectable loop.",
     "evidence": [
       "Jonathan's 2026-08-19 voice and chat discussion explicitly asked for a mental-gym CLI built around active recall, testing effect, recall latency, project application, modularity, and optional direction-led learning.",
-      "The local Core vault already contains five Virtuoso pilot items plus learner-state and evidence-ledger structures under 07-learning/virtuoso.",
-      "The existing local script at projects/hermes-tools/virtuoso/virtuoso.py schedules Markdown items but does not run the active-recall journey, isolate workspaces, or provide a product extension contract."
+      "Private dogfood material already includes pilot items plus learner-state and evidence-ledger structures; none of that private content is shipped in this repository.",
+      "A prior local scheduling script established the basic Markdown due-queue workflow but did not run the active-recall journey, isolate workspaces, or provide a product extension contract."
     ],
     "frequency": "Daily or several times per week whenever a learner begins focused study or encounters a transferable concept in project work.",
     "consequence": "Passive familiarity is mistaken for retrieval, recall remains slow, practice drifts away from active work, and evidence about what the learner did independently is lost or conflated with agent assistance.",
@@ -36,15 +36,15 @@
   },
   "research": {
     "sources": [
-      "Direct Jonathan voice/chat source preserved at vaults/acadine-core/14-tasks/00-active/virtuoso_chat_transcript_2026-08-19.md and synthesized in the Core Virtuoso PRD discovery note.",
-      "Existing deployed reference at projects/hermes-tools/virtuoso/virtuoso.py and vaults/acadine-core/07-learning/virtuoso, inspected 2026-08-19.",
+      "Private 2026-08-19 product-discovery discussion and its internal PRD synthesis; private source material is not included in this repository.",
+      "A private deployed scheduling reference and pilot learning workspace, inspected 2026-08-19; paths and learner content are intentionally omitted.",
       "Open Spaced Repetition py-fsrs official repository and PyPI package, FSRS 6.3.2, retrieved 2026-08-19: https://github.com/open-spaced-repetition/py-fsrs and https://pypi.org/project/fsrs/.",
       "Anki official FAQ describing SM-2 and FSRS scheduler choices, retrieved 2026-08-19: https://faqs.ankiweb.net/what-spaced-repetition-algorithm.",
       "Yang et al. (2021) classroom testing meta-analysis: https://doi.org/10.1037/bul0000309.",
       "Adesope et al. (2017) practice-testing meta-analysis: https://doi.org/10.3102/0034654316689306.",
       "Cepeda et al. (2006, 2008) distributed-practice synthesis and retention-interval study: https://doi.org/10.1037/0033-2909.132.3.354 and https://doi.org/10.1111/j.1467-9280.2008.02209.x.",
       "Tabibian et al. (2019) adaptive spaced-repetition optimization: https://doi.org/10.1073/pnas.1815156116.",
-      "Local learning-system notes and the Acadine Core PRD/design plan referenced by .project-meta.json."
+      "Private learning-system notes and the internal PRD/design plan; neither is shipped as product authority."
     ],
     "alternatives": [
       "Anki or Obsidian flashcards: mature atomic recall scheduling, but weak linkage to current projects, assistance attribution, practical bundles, and local agent workflows.",
@@ -170,7 +170,7 @@
     "known_limitations": [
       "The simple-mode active-recall slice, read-only Markdown/Obsidian source index, and attributed project-transfer event capture are implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
       "Connected sources currently provide path-scoped metadata, wikilinks, hash provenance, and stale-link detection. Delayed transfer checks are manually authored; late creation is allowed without backdating, and prediction begins only at or after both the inherited date and creation time. They append immutable prediction and attributable completion evidence; they do not execute scorers, dereference artifacts, retry/supersede checks, update FSRS, rank projects, or derive capability/mastery. Search, explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization follow through dogfood evidence.",
-      "No Git remote or public repository has been created or pushed."
+      "The initial GitHub repository is private; public release, packaging, and distribution remain pending."
     ]
   },
   "adoption": {

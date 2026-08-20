@@ -107,7 +107,7 @@ The research basis and limits behind active recall, spacing, latency, transfer, 
 
 ## Extension boundary
 
-External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, rejects shell and command-wrapper indirection, invokes argv with `shell=False`, sends only declared projections whose supplied fields pass the protocol’s nested type checks, and requires each result kind’s declared fields. Output is captured in bounded temporary files, and the manifest hash is captured when loaded. V0 grants no descendant-process capability: on supported POSIX systems the child starts with a zero process limit and the runner always terminates its process group; module execution fails closed when that OS limit is unavailable. Core code alone decides whether to accept a returned proposal.
+External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user’s OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, rejects shell and command-wrapper indirection by declared name, resolved executable identity, and script-interpreter ancestry, invokes argv with `shell=False`, sends only declared projections whose supplied fields pass the protocol’s nested type checks, and requires each result kind’s declared fields. Output is captured in bounded temporary files, and the manifest hash is captured when loaded. V0 grants no descendant-process capability: on supported POSIX systems the child starts with a zero process limit and the runner always terminates its process group; module execution fails closed when that OS limit is unavailable. Core code alone decides whether to accept a returned proposal.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are deliberately out of scope.
 
@@ -120,4 +120,4 @@ Initial categories are scheduler, practice-format, source-adapter, scoring-signa
 python3 "$HOME/projects/acadine-build-os/scripts/buildos.py" verify .
 ```
 
-`product.json` and `docs/07-delivery-contract.md` define the current completion boundary. No remote repository or public release is part of this slice.
+`product.json` and `docs/07-delivery-contract.md` define the current completion boundary. The initial GitHub repository is private; no public release is part of this slice.

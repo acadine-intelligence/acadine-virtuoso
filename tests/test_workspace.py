@@ -112,6 +112,31 @@ class WorkspaceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "already exists"):
             WorkspaceService.init(self.root)
 
+    def test_open_does_not_recreate_missing_current_schema_table(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            db.execute("DROP TABLE module_run_receipts")
+
+        with self.assertRaisesRegex(WorkspaceError, "missing objects"):
+            WorkspaceService.open(self.root)
+
+        with sqlite3.connect(service.db_path) as db:
+            self.assertIsNone(
+                db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'module_run_receipts'"
+                ).fetchone()
+            )
+            self.assertEqual(
+                [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ],
+                list(range(1, 8)),
+            )
+
     def test_init_rejects_symlinked_workspace_root(self) -> None:
         target = Path(self.tmp.name).resolve() / "target"
         target.mkdir()

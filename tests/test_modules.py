@@ -243,6 +243,51 @@ print(json.dumps({
         with self.assertRaisesRegex(ModuleError, "shell executables"):
             ModuleManifest.load(path)
 
+    def test_manifest_rejects_resolved_shell_identity_and_interpreter_ancestry(self) -> None:
+        request = {"schema": "virtuoso/module-request@0.1", "projections": {}}
+        result_json = json.dumps(
+            {
+                "schema": "virtuoso/module-result@0.1",
+                "module_id": "example-score",
+                "kind": "score-proposal",
+                "payload": {"score": 1},
+            }
+        )
+        shell_alias = self.root / "reviewed-module"
+        shell_alias.symlink_to("/bin/sh")
+        script_alias = self._script(
+            "reviewed-script",
+            f"#!{shell_alias}\nprintf '%s\\n' {json.dumps(result_json)}\n",
+        )
+        script_alias.chmod(0o700)
+
+        cases = (
+            (
+                "resolved executable alias",
+                [
+                    str(shell_alias),
+                    "-c",
+                    f"printf '%s\\n' {json.dumps(result_json)}",
+                ],
+            ),
+            ("resolved interpreter ancestry", [str(script_alias)]),
+        )
+        for label, argv in cases:
+            with self.subTest(label=label):
+                path = self._manifest(
+                    self._script(f"{label.replace(' ', '-')}.py", ""),
+                    command={"argv": argv, "timeout_seconds": 2},
+                )
+                try:
+                    manifest = ModuleManifest.load(path)
+                except ModuleError as exc:
+                    self.assertRegex(str(exc), "shell executables|command wrappers")
+                else:
+                    result = self._run(manifest, request)
+                    self.fail(
+                        f"{label} was accepted and executed with payload {result.payload!r}"
+                    )
+
     def test_manifest_rejects_shell_executable_via_env_indirection(self) -> None:
         script = self._script("unused.py", "")
         path = self._manifest(

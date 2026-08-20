@@ -3215,6 +3215,48 @@ class WorkspaceService:
             alternatives=tuple(candidates[1:]),
         )
 
+    @staticmethod
+    def _read_source_document_bytes(
+        root: Path, relative_path: str, *, max_bytes: int
+    ) -> bytes:
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise WorkspaceError("source relative path must stay inside its source root")
+        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            raise WorkspaceError("source reads require no-follow filesystem access")
+        root_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+        descriptors: list[int] = []
+        try:
+            descriptor = os.open(root, root_flags)
+            descriptors.append(descriptor)
+            for component in relative.parts[:-1]:
+                descriptor = os.open(component, root_flags, dir_fd=descriptor)
+                descriptors.append(descriptor)
+            file_descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            descriptors.append(file_descriptor)
+            opened = os.fstat(file_descriptor)
+            if not stat_module.S_ISREG(opened.st_mode):
+                raise WorkspaceError("source document is not a regular file")
+            with os.fdopen(descriptors.pop(), "rb") as handle:
+                raw = handle.read(max_bytes + 1)
+                completed = os.fstat(handle.fileno())
+            if (
+                len(raw) > max_bytes
+                or completed.st_size != len(raw)
+                or completed.st_mtime_ns != opened.st_mtime_ns
+            ):
+                raise WorkspaceError("source document changed during read")
+            return raw
+        except OSError as exc:
+            raise WorkspaceError(f"source document cannot be read safely: {exc}") from exc
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
     def doctor(self) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
         config = self.configuration()
@@ -3235,9 +3277,12 @@ class WorkspaceService:
             source_links = db.execute(
                 """
                 SELECT l.item_id, l.source_id, l.source_relative_path,
-                       l.source_content_hash, s.root_path
+                       l.source_content_hash, d.byte_size, s.root_path
                 FROM item_source_links AS l
                 JOIN sources AS s ON s.source_id = l.source_id
+                LEFT JOIN source_documents AS d
+                  ON d.source_id = l.source_id
+                 AND d.relative_path = l.source_relative_path
                 ORDER BY l.item_id, l.source_id, l.source_relative_path
                 """
             ).fetchall()
@@ -3266,11 +3311,24 @@ class WorkspaceService:
                     }
                 )
                 continue
-            path = (root / row["source_relative_path"]).resolve()
+            if row["byte_size"] is None:
+                stale_source_links.append(
+                    {
+                        "item_id": row["item_id"],
+                        "source_id": row["source_id"],
+                        "relative_path": row["source_relative_path"],
+                    }
+                )
+                continue
             try:
-                path.relative_to(root.resolve())
-                current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except (OSError, ValueError):
+                current_hash = hashlib.sha256(
+                    self._read_source_document_bytes(
+                        root,
+                        row["source_relative_path"],
+                        max_bytes=int(row["byte_size"]),
+                    )
+                ).hexdigest()
+            except WorkspaceError:
                 current_hash = ""
             if current_hash != row["source_content_hash"]:
                 stale_source_links.append(

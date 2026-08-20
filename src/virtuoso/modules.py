@@ -5,6 +5,8 @@ import json
 import math
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -159,6 +161,71 @@ _SUPPORT_ACTION_KINDS = {
 }
 
 
+def _resolved_executable(command: str, *, cwd: Path) -> Path | None:
+    """Resolve an executable far enough to enforce the no-shell boundary."""
+    if "/" in command or "\\" in command:
+        candidate = Path(command)
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            return candidate.resolve(strict=True)
+        except OSError:
+            return None
+    located = shutil.which(command)
+    if located is None:
+        return None
+    try:
+        return Path(located).resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _shebang_command(executable: Path) -> str | None:
+    try:
+        with executable.open("rb") as handle:
+            first_line = handle.readline(4097)
+    except OSError:
+        return None
+    if len(first_line) > 4096 or not first_line.startswith(b"#!"):
+        return None
+    try:
+        tokens = shlex.split(first_line[2:].decode("utf-8").strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not tokens:
+        return None
+    interpreter = tokens[0]
+    if Path(interpreter).name.casefold() != "env":
+        return interpreter
+    remaining = tokens[1:]
+    # Complex env option processing is a wrapper, not an executable identity
+    # Virtuoso can inspect safely.
+    if not remaining or any(token.startswith("-") for token in remaining[:-1]):
+        return "env"
+    return remaining[-1]
+
+
+def _reject_disallowed_executable(command: str, *, cwd: Path) -> None:
+    seen: set[Path] = set()
+    current = command
+    for _ in range(8):
+        resolved = _resolved_executable(current, cwd=cwd)
+        if resolved is None or resolved in seen:
+            return
+        seen.add(resolved)
+        name = resolved.name.casefold()
+        if name in _SHELL_EXECUTABLES or name in _COMMAND_WRAPPERS:
+            raise ModuleError(
+                "module command argv must not invoke shell executables or command wrappers"
+            )
+        interpreter = _shebang_command(resolved)
+        if interpreter is None:
+            return
+        current = interpreter
+        cwd = resolved.parent
+    raise ModuleError("module executable interpreter ancestry is too deep")
+
+
 class ModuleError(RuntimeError):
     """A module invocation failed before Virtuoso accepted its proposal."""
 
@@ -237,6 +304,7 @@ class ModuleManifest:
             raise ModuleError(
                 "module command argv must not invoke shell executables or command wrappers"
             )
+        _reject_disallowed_executable(argv[0], cwd=manifest_path.parent)
         timeout = command["timeout_seconds"]
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
             raise ModuleError("module timeout_seconds must be numeric")

@@ -19,7 +19,7 @@ dependencies = [
 virtuoso = "virtuoso.cli:main"
 
 [project.urls]
-Repository = "https://github.com/acadine-hermes/acadine-virtuoso"
+Repository = "https://github.com/acadine-intelligence/acadine-virtuoso"
 
 [tool.setuptools.packages.find]
 where = ["src"]

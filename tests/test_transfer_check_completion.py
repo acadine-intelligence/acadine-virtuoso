@@ -344,6 +344,8 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "event_id": "attempt-" + "a" * 32,
                 "item_id": self.item.item_id,
                 "item_content_hash": self.item.content_hash,
+                "started_at": "2026-08-25T08:59:59+00:00",
+                "completed_at": "2026-08-25T09:00:00+00:00",
                 "occurred_at": "2026-08-25T09:00:00+00:00",
                 "initial_response": "Synthetic independent response.",
                 "initial_latency_ms": 10,
@@ -367,7 +369,7 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "rationale": "Synthetic scheduler fixture.",
                 "created_at": "2026-08-25T09:00:00+00:00",
             },
-            state_json='{"synthetic": true}',
+            state_json='{"due": "2026-08-26T09:00:00+00:00", "synthetic": true}',
         )
         protected_tables = ("attempts", "scheduler_state", "scheduler_proposals")
         before = {table: self._table_rows(table) for table in protected_tables}
