@@ -170,14 +170,15 @@ virtuoso --workspace PATH candidate generate --source SOURCE --path RELATIVE_PAT
 
 Generates candidates for one indexed note (default limit 20). Output is a run record (`virtuoso/review-candidate-run@0.1`) containing the created candidates. Generation is deterministic and idempotent for an unchanged snapshot; every candidate carries `claims_mastery: false`.
 
-### `candidate list` / `candidate show`
+### `candidate list` / `candidate show` / `candidate decide`
 
 ```
 virtuoso --workspace PATH candidate list [--source S] [--kind atomic-note|link|practice] [--run RUN] [--current-only] [--json]
 virtuoso --workspace PATH candidate show --id CANDIDATE_ID [--json]
+virtuoso --workspace PATH candidate decide --id CANDIDATE_ID --decision accept|reject [--note TEXT] [--json]
 ```
 
-`list` filters proposed candidates; `--current-only` excludes candidates superseded by newer runs. `show` prints one candidate's full proposal payload.
+`list` filters candidates; `--current-only` excludes candidates superseded by newer runs. `show` prints one candidate's full proposal payload. `decide` records a human accept or reject as append-only evidence: the proposal row stays immutable, one decision per candidate, and nothing is auto-applied — accepted proposals still need human drafting (every proposal carries `requires_human_drafting` or `requires_human_answer`). After deciding, `review_state` reads `accepted` or `rejected` in list/show output.
 
 ## Transfer evidence (project application)
 

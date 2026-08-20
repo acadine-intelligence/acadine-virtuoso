@@ -82,6 +82,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 "candidate_source_refs",
                 "review_candidates",
                 "candidate_runs",
+                "candidate_decisions",
                 "transfer_check_completions",
                 "transfer_check_predictions",
                 "transfer_checks",
@@ -127,7 +128,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (8,))
+            self.assertEqual(migration, (9,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -156,7 +157,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 9)),
+                list(range(1, 10)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -489,7 +490,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()

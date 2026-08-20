@@ -66,6 +66,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_source_refs",
                 "review_candidates",
                 "candidate_runs",
+                "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
             db.execute("PRAGMA legacy_alter_table = ON")
@@ -98,6 +99,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_source_refs",
                 "review_candidates",
                 "candidate_runs",
+                "candidate_decisions",
                 "transfer_check_completions",
                 "transfer_check_predictions",
                 "transfer_checks",
@@ -117,7 +119,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
 
         reopened = WorkspaceService.open(self.root)
 
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9])
         with sqlite3.connect(reopened.db_path) as db:
             tables = {
                 row[0]
@@ -248,8 +250,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
             ).fetchone()[0]
         self.assertEqual(after, before)
-        self.assertEqual(trigger_count, 8)
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(trigger_count, 10)
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     def test_v5_open_rejects_missing_historical_table_before_v6_creation(
         self,
@@ -286,7 +288,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
         self._downgrade_fixture_to_v4(service)
         with sqlite3.connect(service.db_path) as db:
             db.execute(
@@ -320,7 +322,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
         with sqlite3.connect(service.db_path) as db:
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE transfer_check_completions")
@@ -377,6 +379,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_source_refs",
                 "review_candidates",
                 "candidate_runs",
+                "candidate_decisions",
                 "transfer_check_completions",
                 "transfer_check_predictions",
             ):
@@ -409,6 +412,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_source_refs",
                 "review_candidates",
                 "candidate_runs",
+                "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
             db.execute("PRAGMA legacy_alter_table = ON")
@@ -470,7 +474,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                    WHERE type = 'trigger' AND name = 'transfer_checks_reject_delete'"""
             ).fetchone()[0]
         self.assertIn("altered trigger", sql)
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
 
 
 class DelayedTransferCheckCreationTests(unittest.TestCase):

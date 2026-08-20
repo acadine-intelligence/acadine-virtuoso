@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -712,6 +713,51 @@ class CandidateService:
             raise CandidateError("workspace database corruption: duplicate candidate id")
         return self._candidate_from_record(records[0])
 
+    def decide(
+        self,
+        *,
+        candidate_id: str,
+        decision: str,
+        note: str | None,
+    ) -> ReviewCandidate:
+        """Record a human accept/reject decision on a proposed candidate.
+
+        The decision is append-only evidence. It never mutates the vault,
+        the item pool, scheduler state, or the proposal itself.
+        """
+        if decision not in {"accept", "reject"}:
+            raise CandidateError("candidate decision must be accept or reject")
+        if note is not None and not (1 <= len(note) <= 2000):
+            raise CandidateError("candidate decision note must be 1-2000 characters")
+        candidate = self.get(candidate_id)
+        decided_at = datetime.now(timezone.utc).isoformat()
+        decision_id = "decision-" + hashlib.sha256(
+            json.dumps(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "decision": decision,
+                    "decided_at": decided_at,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            with self.workspace._connect() as db:
+                db.execute(
+                    """
+                    INSERT INTO candidate_decisions(
+                        decision_id, candidate_id, decision, note, decided_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (decision_id, candidate.candidate_id, decision, note, decided_at),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise CandidateError(
+                f"a decision for candidate {candidate.candidate_id} already exists"
+            ) from exc
+        return self.get(candidate_id)
+
     @staticmethod
     def _has_derived_id(value: object, *, prefix: str) -> bool:
         if not isinstance(value, str) or not value.startswith(prefix):
@@ -875,6 +921,7 @@ class CandidateService:
             proposal=draft.proposal,
             source_refs=draft.source_refs,
             source_status=self._source_status(draft.source_refs),
+            review_state=record.get("effective_review_state") or "proposed",
         )
 
     def _source_status(self, refs: tuple[IndexedNoteRef, ...]) -> SourceStatus:

@@ -139,10 +139,20 @@ def _parser() -> argparse.ArgumentParser:
     candidate_list.add_argument("--current-only", action="store_true")
     candidate_list.add_argument("--json", action="store_true")
     candidate_show = candidate_commands.add_parser(
-        "show", help="show one proposed structural candidate"
+        "show", help="show one candidate in full"
     )
     candidate_show.add_argument("--id", required=True)
     candidate_show.add_argument("--json", action="store_true")
+
+    candidate_decide = candidate_commands.add_parser(
+        "decide", help="record a human accept/reject decision"
+    )
+    candidate_decide.add_argument("--id", required=True)
+    candidate_decide.add_argument(
+        "--decision", required=True, choices=["accept", "reject"]
+    )
+    candidate_decide.add_argument("--note")
+    candidate_decide.add_argument("--json", action="store_true")
 
     transfer = commands.add_parser(
         "transfer", help="record and inspect real project application evidence"
@@ -330,6 +340,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.candidate_command == "show":
                 _emit(service.get(args.id).to_dict(), as_json=args.json)
+                return 0
+            if args.candidate_command == "decide":
+                result = service.decide(
+                    candidate_id=args.id,
+                    decision=args.decision,
+                    note=args.note,
+                )
+                _emit(result.to_dict(), as_json=args.json)
                 return 0
         if args.command == "transfer":
             if args.transfer_command == "record":
