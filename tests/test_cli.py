@@ -110,6 +110,73 @@ class CliJourneyTests(unittest.TestCase):
         self.assertIn("run 'virtuoso init' first", failed.stderr)
         self.assertNotIn("Traceback", failed.stderr)
 
+    def test_source_cli_connects_scans_and_lists_note_metadata(self) -> None:
+        vault = Path(self.tmp.name) / "vault"
+        vault.mkdir()
+        (vault / "Testing Effect.md").write_text(
+            "# Testing Effect\n\n[[Active Recall]] makes retrieval visible.\n",
+            encoding="utf-8",
+        )
+        self._run("init", "--json")
+
+        added = json.loads(
+            self._run(
+                "source",
+                "add",
+                "--id",
+                "vault",
+                "--kind",
+                "obsidian",
+                "--path",
+                str(vault),
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(added["source_id"], "vault")
+        self.assertTrue(added["read_only"])
+
+        scanned = json.loads(
+            self._run("source", "scan", "--id", "vault", "--json").stdout
+        )
+        self.assertEqual(scanned["indexed"], 1)
+
+        self._run(
+            "add",
+            "--id",
+            "testing-effect",
+            "--title",
+            "Explain the testing effect",
+            "--focus",
+            "learning-science",
+            "--prompt",
+            "Why does retrieval strengthen memory?",
+            "--answer",
+            "Retrieval changes memory.",
+            "--json",
+        )
+        linked = json.loads(
+            self._run(
+                "source",
+                "link",
+                "--id",
+                "vault",
+                "--path",
+                "Testing Effect.md",
+                "--item",
+                "testing-effect",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(linked["item_id"], "testing-effect")
+        self.assertEqual(linked["relative_path"], "Testing Effect.md")
+
+        notes = json.loads(
+            self._run("source", "notes", "--id", "vault", "--json").stdout
+        )
+        self.assertEqual(notes["documents"][0]["title"], "Testing Effect")
+        self.assertEqual(notes["documents"][0]["wikilinks"], ["Active Recall"])
+        self.assertNotIn("makes retrieval visible", json.dumps(notes))
+
 
 if __name__ == "__main__":
     unittest.main()

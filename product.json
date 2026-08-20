@@ -73,6 +73,8 @@
       "Given a completed attempt, when it is recorded, then correctness, latency, confidence, context, open-notes state, and help attribution are appended to SQLite evidence without claiming competence, and the scheduler proposal records algorithm, version, configuration, and learning context.",
       "Given a declared trusted local executable, when Virtuoso loads and explicitly invokes it, then unknown fields or schema versions, undeclared capabilities, shell commands, missing consent, malformed or oversized output, timeout, and private-state projections fail closed while a valid typed proposal is hash-bound to the manifest bytes loaded before execution.",
       "Given the same fixture workspace, intent, and clock, when selection runs twice, then it returns the same ranked action and explanation; missing inputs produce explicit uncertainty rather than invented readiness.",
+      "Given an explicit Markdown or Obsidian source root, when the learner connects and scans it, then Virtuoso stores only bounded note metadata, hashes, and wikilinks, never writes to the source, never copies note bodies into SQLite, and rejects Markdown symlinks.",
+      "Given a learning item linked to an indexed note hash, when that note changes or disappears, then doctor reports the stale provenance link without deleting the learning item or source prose.",
       "Given no Hermes or Obsidian installation, when the learner completes the hero workflow, then the core journey still works; optional adapters cannot become required dependencies."
     ]
   },
@@ -96,7 +98,7 @@
   },
   "architecture": {
     "system_context": "A standalone Python CLI and importable domain library operate on a learner-selected local workspace. Markdown stores authored focus items, prompts, hints, answers, reflections, and optional direction prose. SQLite stores append-only attempts, scheduler states, derived proposals, module receipts, XP events, and sync history. Optional Obsidian, Hermes, project, and external-resource adapters project context through typed read contracts; they do not own the core or mutate commitments.",
-    "data_model": "Workspace contains authored LearningItems and Connections. LearningItem references Focus and Concept nodes and can produce PracticeChallenges. Attempt records prompt version, timestamps, latency, response, result, confidence, notes state, and SupportUsed. SchedulerProposal records item, algorithm, version, configuration, learning context, inputs, due proposal, and reason; algorithm-specific SchedulerState is isolated by scheduler id. EvidenceEvent is append-only and derives CapabilityView without erasing history. ModuleManifest declares category, protocol version, command argv, capabilities, read projections, and output schema. FocusProposal remains uncommitted until a LearnerDecision accepts, changes, or rejects it.",
+    "data_model": "Workspace contains authored LearningItems and Connections. LearningItem references Focus and Concept nodes and can produce PracticeChallenges. Attempt records prompt version, timestamps, latency, response, result, confidence, notes state, and SupportUsed. SchedulerProposal records item, algorithm, version, configuration, learning context, inputs, due proposal, and reason; algorithm-specific SchedulerState is isolated by scheduler id. EvidenceEvent is append-only and derives CapabilityView without erasing history. Source records an explicit read-only Markdown/Obsidian root; SourceDocument stores only relative path, title, hash, wikilinks, modification time, and byte size; ItemSourceLink binds a learner-authored item to the exact source hash and remains visible when the note drifts. ModuleManifest declares category, protocol version, command argv, capabilities, read projections, and output schema. FocusProposal remains uncommitted until a LearnerDecision accepts, changes, or rejects it.",
     "api_contract": "Core Python ports are Repository, EvidenceLedger, Scheduler, Selector, PracticeFormat, and ModuleRunner. Third-party v0 extensions are out-of-process command modules declared by virtuoso.module.json using protocol virtuoso/module@0.1. Virtuoso sends one bounded JSON request on stdin and accepts one typed JSON response on stdout, invokes argv directly with shell disabled and a timeout, and persists only validated core-owned events. Initial module categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are out of scope until the external contract survives dogfooding.",
     "hermes_integration": {
       "mode": "hybrid",
@@ -160,8 +162,8 @@
       "evidence": ""
     },
     "known_limitations": [
-      "The first simple-mode active-recall slice is implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
-      "Simple mode and manually authored recall items are the first slice; direction-led planning, project transfer workflows, two-way Obsidian synchronization, scheduled proposals, XP, and meta-scheduler optimization follow through dogfood evidence.",
+      "The simple-mode active-recall slice and read-only Markdown/Obsidian source index are implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
+      "Connected sources currently provide path-scoped metadata, wikilinks, hash provenance, and stale-link detection. Search, explicit field-owned two-way synchronization, direction-led planning, project transfer workflows, scheduled proposals, XP, and meta-scheduler optimization follow through dogfood evidence.",
       "No Git remote or public repository has been created or pushed."
     ]
   },

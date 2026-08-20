@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -14,6 +15,9 @@ from typing import Any
 WORKSPACE_SCHEMA = "virtuoso/workspace@0.1"
 ITEM_SCHEMA = "virtuoso/item@0.1"
 _ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+_SOURCE_KINDS = {"markdown", "obsidian"}
 
 
 class WorkspaceError(RuntimeError):
@@ -49,6 +53,36 @@ class SelectionResult:
     rationale: str
     alternatives: tuple[str, ...]
     uncertainty: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceSummary:
+    source_id: str
+    kind: str
+    root: Path
+    read_only: bool = True
+
+
+@dataclass(frozen=True)
+class SourceDocument:
+    source_id: str
+    relative_path: str
+    title: str
+    content_hash: str
+    wikilinks: tuple[str, ...]
+    modified_ns: int
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class SourceScanReceipt:
+    receipt_id: str
+    source_id: str
+    indexed: int
+    removed: int
+    skipped: int
+    total_bytes: int
+    occurred_at: str
 
 
 class WorkspaceService:
@@ -211,6 +245,41 @@ class WorkspaceService:
                 duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
                 occurred_at TEXT NOT NULL
             )""",
+            """CREATE TABLE IF NOT EXISTS sources (
+                source_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK(kind IN ('markdown','obsidian')),
+                root_path TEXT NOT NULL,
+                read_only INTEGER NOT NULL CHECK(read_only = 1),
+                created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS source_documents (
+                source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                wikilinks_json TEXT NOT NULL,
+                modified_ns INTEGER NOT NULL,
+                byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                indexed_at TEXT NOT NULL,
+                PRIMARY KEY(source_id, relative_path)
+            )""",
+            """CREATE TABLE IF NOT EXISTS source_scan_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL REFERENCES sources(source_id),
+                indexed INTEGER NOT NULL CHECK(indexed >= 0),
+                removed INTEGER NOT NULL CHECK(removed >= 0),
+                skipped INTEGER NOT NULL CHECK(skipped >= 0),
+                total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0),
+                occurred_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS item_source_links (
+                item_id TEXT NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+                source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+                source_relative_path TEXT NOT NULL,
+                source_content_hash TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, source_id, source_relative_path)
+            )""",
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -220,6 +289,304 @@ class WorkspaceService:
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)"
             )
+            db.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
+            )
+
+    def add_source(
+        self, *, source_id: str, kind: str, root: Path | str
+    ) -> SourceSummary:
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise WorkspaceError(
+                "source id must be lowercase words or numbers separated by single dashes"
+            )
+        if kind not in _SOURCE_KINDS:
+            raise WorkspaceError("source kind must be 'markdown' or 'obsidian'")
+        requested_root = Path(root).expanduser().absolute()
+        if requested_root.is_symlink():
+            raise WorkspaceError(f"source root must not be a symlink: {requested_root}")
+        source_root = requested_root.resolve()
+        if not source_root.exists():
+            raise WorkspaceError(f"source root does not exist: {source_root}")
+        if not source_root.is_dir():
+            raise WorkspaceError(f"source root is not a directory: {source_root}")
+        created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connect() as db:
+                db.execute(
+                    """
+                    INSERT INTO sources(source_id, kind, root_path, read_only, created_at)
+                    VALUES (?, ?, ?, 1, ?)
+                    """,
+                    (source_id, kind, str(source_root), created_at),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise WorkspaceError(f"source already exists: {source_id}") from exc
+        return SourceSummary(source_id=source_id, kind=kind, root=source_root)
+
+    def list_sources(self) -> list[SourceSummary]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT source_id, kind, root_path, read_only FROM sources ORDER BY source_id"
+            ).fetchall()
+        return [
+            SourceSummary(
+                source_id=row["source_id"],
+                kind=row["kind"],
+                root=Path(row["root_path"]),
+                read_only=bool(row["read_only"]),
+            )
+            for row in rows
+        ]
+
+    def scan_source(
+        self,
+        source_id: str,
+        *,
+        max_files: int = 10_000,
+        max_file_bytes: int = 2_000_000,
+        max_total_bytes: int = 64_000_000,
+    ) -> SourceScanReceipt:
+        source = self._source(source_id)
+        documents: list[SourceDocument] = []
+        skipped = 0
+        total_bytes = 0
+
+        for directory, dirnames, filenames in os.walk(source.root, followlinks=False):
+            directory_path = Path(directory)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if not (directory_path / name).is_symlink()
+            )
+            for filename in sorted(filenames):
+                path = directory_path / filename
+                if path.suffix.lower() != ".md":
+                    continue
+                if path.is_symlink():
+                    raise WorkspaceError(f"source contains a Markdown symlink: {path}")
+                if len(documents) >= max_files:
+                    raise WorkspaceError(f"source exceeds Markdown file limit: {max_files}")
+                stat = path.stat()
+                if stat.st_size > max_file_bytes:
+                    skipped += 1
+                    continue
+                total_bytes += stat.st_size
+                if total_bytes > max_total_bytes:
+                    raise WorkspaceError(
+                        f"source exceeds total Markdown byte limit: {max_total_bytes}"
+                    )
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    skipped += 1
+                    continue
+                relative_path = path.relative_to(source.root).as_posix()
+                documents.append(
+                    SourceDocument(
+                        source_id=source_id,
+                        relative_path=relative_path,
+                        title=self._source_title(text, path.stem),
+                        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        wikilinks=self._wikilinks(text),
+                        modified_ns=stat.st_mtime_ns,
+                        byte_size=stat.st_size,
+                    )
+                )
+
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        receipt_id = f"scan-{uuid.uuid4().hex}"
+        current_paths = {document.relative_path for document in documents}
+        with self._connect() as db:
+            existing = {
+                row["relative_path"]
+                for row in db.execute(
+                    "SELECT relative_path FROM source_documents WHERE source_id = ?",
+                    (source_id,),
+                ).fetchall()
+            }
+            removed_paths = existing - current_paths
+            for relative_path in sorted(removed_paths):
+                db.execute(
+                    "DELETE FROM source_documents WHERE source_id = ? AND relative_path = ?",
+                    (source_id, relative_path),
+                )
+            for document in documents:
+                db.execute(
+                    """
+                    INSERT INTO source_documents(
+                        source_id, relative_path, title, content_hash, wikilinks_json,
+                        modified_ns, byte_size, indexed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, relative_path) DO UPDATE SET
+                        title = excluded.title,
+                        content_hash = excluded.content_hash,
+                        wikilinks_json = excluded.wikilinks_json,
+                        modified_ns = excluded.modified_ns,
+                        byte_size = excluded.byte_size,
+                        indexed_at = excluded.indexed_at
+                    """,
+                    (
+                        document.source_id,
+                        document.relative_path,
+                        document.title,
+                        document.content_hash,
+                        json.dumps(document.wikilinks),
+                        document.modified_ns,
+                        document.byte_size,
+                        occurred_at,
+                    ),
+                )
+            db.execute(
+                """
+                INSERT INTO source_scan_receipts(
+                    receipt_id, source_id, indexed, removed, skipped,
+                    total_bytes, occurred_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    source_id,
+                    len(documents),
+                    len(removed_paths),
+                    skipped,
+                    total_bytes,
+                    occurred_at,
+                ),
+            )
+        return SourceScanReceipt(
+            receipt_id=receipt_id,
+            source_id=source_id,
+            indexed=len(documents),
+            removed=len(removed_paths),
+            skipped=skipped,
+            total_bytes=total_bytes,
+            occurred_at=occurred_at,
+        )
+
+    def list_source_documents(self, source_id: str) -> list[SourceDocument]:
+        self._source(source_id)
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT source_id, relative_path, title, content_hash,
+                       wikilinks_json, modified_ns, byte_size
+                FROM source_documents
+                WHERE source_id = ?
+                ORDER BY relative_path
+                """,
+                (source_id,),
+            ).fetchall()
+        return [
+            SourceDocument(
+                source_id=row["source_id"],
+                relative_path=row["relative_path"],
+                title=row["title"],
+                content_hash=row["content_hash"],
+                wikilinks=tuple(json.loads(row["wikilinks_json"])),
+                modified_ns=row["modified_ns"],
+                byte_size=row["byte_size"],
+            )
+            for row in rows
+        ]
+
+    def link_item_source(
+        self, *, item_id: str, source_id: str, relative_path: str
+    ) -> dict[str, str]:
+        normalized = Path(relative_path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            raise WorkspaceError("source relative path must stay inside its source root")
+        normalized_path = normalized.as_posix()
+        linked_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            item = db.execute(
+                "SELECT item_id FROM items WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            if item is None:
+                raise WorkspaceError(f"no learning item with id: {item_id}")
+            document = db.execute(
+                """
+                SELECT content_hash FROM source_documents
+                WHERE source_id = ? AND relative_path = ?
+                """,
+                (source_id, normalized_path),
+            ).fetchone()
+            if document is None:
+                raise WorkspaceError(
+                    f"source note is not indexed: {source_id}/{normalized_path}; scan it first"
+                )
+            try:
+                db.execute(
+                    """
+                    INSERT INTO item_source_links(
+                        item_id, source_id, source_relative_path,
+                        source_content_hash, linked_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item_id,
+                        source_id,
+                        normalized_path,
+                        document["content_hash"],
+                        linked_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise WorkspaceError(
+                    f"item source link already exists: {item_id} -> {source_id}/{normalized_path}"
+                ) from exc
+        return {
+            "item_id": item_id,
+            "source_id": source_id,
+            "relative_path": normalized_path,
+            "source_content_hash": document["content_hash"],
+            "linked_at": linked_at,
+        }
+
+    def _source(self, source_id: str) -> SourceSummary:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT source_id, kind, root_path, read_only FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            raise WorkspaceError(f"no source with id: {source_id}")
+        root = Path(row["root_path"])
+        if root.is_symlink() or root.resolve(strict=False) != root:
+            raise WorkspaceError(f"source root changed or became a symlink: {root}")
+        if not root.is_dir():
+            raise WorkspaceError(f"source root is unavailable: {root}")
+        return SourceSummary(
+            source_id=row["source_id"],
+            kind=row["kind"],
+            root=root,
+            read_only=bool(row["read_only"]),
+        )
+
+    @staticmethod
+    def _source_title(text: str, fallback: str) -> str:
+        lines = text.splitlines()
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                match = re.match(r"^title\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+                if match:
+                    return match.group(1).strip().strip("\"'") or fallback
+        for line in lines:
+            match = re.match(r"^#\s+(.+?)\s*$", line)
+            if match:
+                return match.group(1).strip()
+        return fallback
+
+    @staticmethod
+    def _wikilinks(text: str) -> tuple[str, ...]:
+        links: set[str] = set()
+        for match in _WIKILINK.finditer(text):
+            target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+            if target:
+                links.add(target)
+        return tuple(sorted(links, key=str.casefold))
 
     @staticmethod
     def _validate_database_schema(db: sqlite3.Connection) -> None:
@@ -244,6 +611,21 @@ class WorkspaceService:
             "module_receipts": {
                 "receipt_id", "module_id", "module_version", "category", "kind",
                 "manifest_sha256", "stdout_sha256", "duration_ms", "occurred_at",
+            },
+            "sources": {
+                "source_id", "kind", "root_path", "read_only", "created_at",
+            },
+            "source_documents": {
+                "source_id", "relative_path", "title", "content_hash",
+                "wikilinks_json", "modified_ns", "byte_size", "indexed_at",
+            },
+            "source_scan_receipts": {
+                "receipt_id", "source_id", "indexed", "removed", "skipped",
+                "total_bytes", "occurred_at",
+            },
+            "item_source_links": {
+                "item_id", "source_id", "source_relative_path",
+                "source_content_hash", "linked_at",
             },
         }
         for name, expected_columns in required.items():
@@ -616,6 +998,7 @@ class WorkspaceService:
         self._validate_owned_paths(require_database=True)
         config = self.configuration()
         stale_items: list[str] = []
+        stale_source_links: list[dict[str, str]] = []
         with self._connect() as db:
             database = db.execute("PRAGMA quick_check").fetchone()[0]
             rows = db.execute(
@@ -625,6 +1008,15 @@ class WorkspaceService:
             proposal_count = db.execute(
                 "SELECT COUNT(*) FROM scheduler_proposals"
             ).fetchone()[0]
+            source_links = db.execute(
+                """
+                SELECT l.item_id, l.source_id, l.source_relative_path,
+                       l.source_content_hash, s.root_path
+                FROM item_source_links AS l
+                JOIN sources AS s ON s.source_id = l.source_id
+                ORDER BY l.item_id, l.source_id, l.source_relative_path
+                """
+            ).fetchall()
         for row in rows:
             path = self.root / row["relative_path"]
             try:
@@ -634,7 +1026,23 @@ class WorkspaceService:
                 continue
             if current_hash != row["content_hash"]:
                 stale_items.append(row["item_id"])
-        healthy = database == "ok" and not stale_items
+        for row in source_links:
+            root = Path(row["root_path"])
+            path = (root / row["source_relative_path"]).resolve()
+            try:
+                path.relative_to(root.resolve())
+                current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            except (OSError, ValueError):
+                current_hash = ""
+            if current_hash != row["source_content_hash"]:
+                stale_source_links.append(
+                    {
+                        "item_id": row["item_id"],
+                        "source_id": row["source_id"],
+                        "relative_path": row["source_relative_path"],
+                    }
+                )
+        healthy = database == "ok" and not stale_items and not stale_source_links
         return {
             "status": "healthy" if healthy else "needs-attention",
             "workspace_schema": config.get("schema"),
@@ -643,6 +1051,7 @@ class WorkspaceService:
             "attempts": attempt_count,
             "proposals": proposal_count,
             "stale_items": stale_items,
+            "stale_source_links": stale_source_links,
         }
 
     @staticmethod

@@ -2,7 +2,7 @@
 
 Virtuoso is a local-first CLI mental gym. It presents a prompt before feedback, times active recall, records what help was used, and asks FSRS 6.3.2 for an attributable next-review proposal. Markdown remains human-owned; SQLite holds derived evidence and scheduler state.
 
-The current slice is simple mode. Hermes and Obsidian are optional, and the core CLI works without either. Direction-led pathways, project-transfer exercises, synchronization, XP, and meta-scheduling remain later modules.
+The current slices cover simple-mode active recall plus a read-only Markdown/Obsidian source index. Hermes and Obsidian remain optional, and the core CLI works without either. A connected source stores only its path-scoped note metadata, hashes, and wikilinks in SQLite; source prose stays in its owning vault. Direction-led pathways, project-transfer exercises, two-way synchronization, XP, and meta-scheduling remain later modules.
 
 ## Install
 
@@ -31,6 +31,23 @@ WORKSPACE=/tmp/virtuoso-learner
 ```
 
 Virtuoso does not infer competence from XP, completion, a test, or an agent-produced answer. Attempts retain result, latency, confidence, open-notes state, response, help attribution, and support sequence.
+
+## Read-only Markdown and Obsidian sources
+
+```bash
+VAULT=/path/to/your/vault
+.venv/bin/virtuoso --workspace "$WORKSPACE" source add \
+  --id personal-vault --kind obsidian --path "$VAULT" --json
+.venv/bin/virtuoso --workspace "$WORKSPACE" source scan \
+  --id personal-vault --json
+.venv/bin/virtuoso --workspace "$WORKSPACE" source notes \
+  --id personal-vault --json
+.venv/bin/virtuoso --workspace "$WORKSPACE" source link \
+  --id personal-vault --path "Learning/Testing Effect.md" \
+  --item testing-effect --json
+```
+
+Scanning never writes to the source. It indexes relative paths, titles, content hashes, byte sizes, modification times, and Obsidian wikilinks. It does not copy note bodies into Virtuoso state. Markdown symlinks fail closed, scans have file and byte limits, deleted note metadata is removed transactionally, and `doctor` reports linked notes that changed or disappeared.
 
 ## Extension boundary
 

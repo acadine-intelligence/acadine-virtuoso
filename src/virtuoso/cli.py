@@ -64,6 +64,31 @@ def _parser() -> argparse.ArgumentParser:
 
     doctor = commands.add_parser("doctor", help="check workspace health")
     doctor.add_argument("--json", action="store_true")
+
+    source = commands.add_parser(
+        "source", help="connect and inspect read-only Markdown or Obsidian sources"
+    )
+    source_commands = source.add_subparsers(dest="source_command", required=True)
+    source_add = source_commands.add_parser("add", help="connect a read-only source")
+    source_add.add_argument("--id", required=True)
+    source_add.add_argument("--kind", choices=("markdown", "obsidian"), required=True)
+    source_add.add_argument("--path", type=Path, required=True)
+    source_add.add_argument("--json", action="store_true")
+    source_list = source_commands.add_parser("list", help="list connected sources")
+    source_list.add_argument("--json", action="store_true")
+    source_scan = source_commands.add_parser("scan", help="index source metadata")
+    source_scan.add_argument("--id", required=True)
+    source_scan.add_argument("--json", action="store_true")
+    source_link = source_commands.add_parser(
+        "link", help="link a learning item to an indexed source note"
+    )
+    source_link.add_argument("--id", required=True)
+    source_link.add_argument("--path", required=True)
+    source_link.add_argument("--item", required=True)
+    source_link.add_argument("--json", action="store_true")
+    source_notes = source_commands.add_parser("notes", help="list indexed note metadata")
+    source_notes.add_argument("--id", required=True)
+    source_notes.add_argument("--json", action="store_true")
     return parser
 
 
@@ -133,6 +158,79 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "source":
+            if args.source_command == "add":
+                source = workspace.add_source(
+                    source_id=args.id, kind=args.kind, root=args.path
+                )
+                _emit(
+                    {
+                        "source_id": source.source_id,
+                        "kind": source.kind,
+                        "root": str(source.root),
+                        "read_only": source.read_only,
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.source_command == "list":
+                _emit(
+                    {
+                        "sources": [
+                            {
+                                "source_id": source.source_id,
+                                "kind": source.kind,
+                                "root": str(source.root),
+                                "read_only": source.read_only,
+                            }
+                            for source in workspace.list_sources()
+                        ]
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.source_command == "scan":
+                receipt = workspace.scan_source(args.id)
+                _emit(
+                    {
+                        "receipt_id": receipt.receipt_id,
+                        "source_id": receipt.source_id,
+                        "indexed": receipt.indexed,
+                        "removed": receipt.removed,
+                        "skipped": receipt.skipped,
+                        "total_bytes": receipt.total_bytes,
+                        "occurred_at": receipt.occurred_at,
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.source_command == "link":
+                link = workspace.link_item_source(
+                    item_id=args.item,
+                    source_id=args.id,
+                    relative_path=args.path,
+                )
+                _emit(link, as_json=args.json)
+                return 0
+            if args.source_command == "notes":
+                _emit(
+                    {
+                        "source_id": args.id,
+                        "documents": [
+                            {
+                                "relative_path": document.relative_path,
+                                "title": document.title,
+                                "content_hash": document.content_hash,
+                                "wikilinks": list(document.wikilinks),
+                                "modified_ns": document.modified_ns,
+                                "byte_size": document.byte_size,
+                            }
+                            for document in workspace.list_source_documents(args.id)
+                        ],
+                    },
+                    as_json=args.json,
+                )
+                return 0
     except (WorkspaceError, PracticeError, ModuleError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

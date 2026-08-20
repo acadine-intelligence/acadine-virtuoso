@@ -1,4 +1,4 @@
-# Delivery contract: first active-recall slice
+# Delivery contract: active recall and read-only source index
 
 ## Observable outcomes
 
@@ -12,7 +12,10 @@ This iteration is complete only when all of the following work from a clean loca
 6. `virtuoso --workspace PATH attempts --json` returns the recorded attempt and proposal without claiming mastery.
 7. The extension boundary validates and invokes one explicitly approved trusted local executable through `virtuoso/module@0.1`, while tests prove unknown fields/schema, missing consent, shell command, malformed output, timeout, oversized output, private-state projections, and manifest identity drift fail closed. This boundary is not an OS sandbox.
 8. `virtuoso --workspace PATH doctor --json` reports a healthy workspace after the journey and reports actionable errors for missing or damaged state.
-9. The full unit/integration suite, compile check, Build OS verification, representative CLI journey, exact-commit independent review, and clean-worktree check pass.
+9. `virtuoso --workspace PATH source add ...` connects an existing Markdown folder or Obsidian vault as an explicit read-only source without making Obsidian or Hermes a runtime dependency.
+10. `source scan` indexes only bounded note metadata, hashes, and wikilinks; it never writes to source files or copies note bodies into SQLite, and symlink escapes fail closed.
+11. `source link` binds a manually authored learning item to the exact indexed source-note hash, while `doctor` reports a linked note that changed or disappeared.
+12. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
 
 ## Automated verification
 
