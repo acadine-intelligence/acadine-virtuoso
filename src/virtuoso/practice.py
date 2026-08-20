@@ -4,7 +4,7 @@ import importlib.metadata
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from fsrs import Card, Rating, Scheduler
@@ -48,6 +48,8 @@ class AttemptRecord:
     item_id: str
     item_content_hash: str
     occurred_at: datetime
+    started_at: datetime
+    completed_at: datetime
     initial_response: str
     initial_latency_ms: int
     result: str
@@ -97,10 +99,13 @@ class PracticeService:
             raise PracticeError(
                 "agent_help must be one of none, light, substantial, or unknown"
             )
-        observed_at = now or datetime.now(timezone.utc)
-        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        requested_start = now
+        if requested_start is not None and (
+            requested_start.tzinfo is None or requested_start.utcoffset() is None
+        ):
             raise PracticeError("practice timestamps must be timezone-aware")
-        observed_at = observed_at.astimezone(timezone.utc)
+        if requested_start is not None:
+            requested_start = requested_start.astimezone(timezone.utc)
 
         try:
             item = self.workspace.load_item(item_id)
@@ -111,8 +116,15 @@ class PracticeService:
         io.write(f"Challenge: {item.title}")
         io.write(item.prompt)
 
-        initial_response, initial_latency_ms = self._timed_answer(
-            io, "Your recall: "
+        attempt_started_at = requested_start or datetime.now(timezone.utc)
+        (
+            initial_response,
+            initial_latency_ms,
+            attempt_started_monotonic,
+            _initial_completed_monotonic,
+        ) = self._timed_answer_observation(
+            io,
+            "Your recall: ",
         )
         io.write(f"Initial recall time: {initial_latency_ms} ms")
 
@@ -150,6 +162,7 @@ class PracticeService:
             break
 
         io.write(f"Answer\n{item.answer}")
+        support.append(SupportAction(kind="worked-feedback"))
         result = self._ask_choice(
             io,
             "Result [demonstrated / partial / not-demonstrated]: ",
@@ -169,14 +182,27 @@ class PracticeService:
         confidence = self._ask_confidence(io)
         if result != "demonstrated" and item.follow_up:
             io.write(f"Follow-up challenge\n{item.follow_up}")
-            support.append(SupportAction(kind="follow-up-offered"))
+            response, latency = self._timed_answer(io, "Follow-up response: ")
+            support.append(
+                SupportAction(
+                    kind="follow-up",
+                    response=response,
+                    latency_ms=latency,
+                )
+            )
+
+        completed_monotonic = self.clock.monotonic()
+        elapsed_seconds = max(0.0, completed_monotonic - attempt_started_monotonic)
+        completed_at = attempt_started_at + timedelta(seconds=elapsed_seconds)
 
         event_id = f"attempt-{uuid.uuid4().hex}"
         attempt = AttemptRecord(
             event_id=event_id,
             item_id=item.item_id,
             item_content_hash=item.content_hash,
-            occurred_at=observed_at,
+            occurred_at=completed_at,
+            started_at=attempt_started_at,
+            completed_at=completed_at,
             initial_response=initial_response,
             initial_latency_ms=initial_latency_ms,
             result=result,
@@ -229,10 +255,24 @@ class PracticeService:
             "enable_fuzzing": enable_fuzzing,
         }
         version = importlib.metadata.version("fsrs")
-        previous_state, previous_source_event_id = self.workspace.scheduler_snapshot(
+        snapshot = self.workspace.scheduler_snapshot(
             item_id=item.item_id,
             algorithm="fsrs",
             learning_context=context,
+        )
+        if snapshot is not None and snapshot.algorithm_version != version:
+            raise PracticeError(
+                "stored FSRS state has an incompatible algorithm version: "
+                f"{snapshot.algorithm_version!r}; expected {version!r}"
+            )
+        if snapshot is not None and snapshot.configuration != configuration:
+            raise PracticeError(
+                "stored FSRS state has an incompatible scheduler configuration; "
+                "start a new context or migrate the state explicitly"
+            )
+        previous_state = snapshot.state_json if snapshot is not None else None
+        previous_source_event_id = (
+            snapshot.source_event_id if snapshot is not None else None
         )
         try:
             card = (
@@ -294,6 +334,8 @@ class PracticeService:
                     "item_id": attempt.item_id,
                     "item_content_hash": attempt.item_content_hash,
                     "occurred_at": attempt.occurred_at.isoformat(),
+                    "started_at": attempt.started_at.isoformat(),
+                    "completed_at": attempt.completed_at.isoformat(),
                     "initial_response": attempt.initial_response,
                     "initial_latency_ms": attempt.initial_latency_ms,
                     "result": attempt.result,
@@ -324,11 +366,19 @@ class PracticeService:
             raise PracticeError(str(exc)) from exc
 
     def _timed_answer(self, io: PracticeIO, prompt: str) -> tuple[str, int]:
+        response, latency_ms, _started, _ended = self._timed_answer_observation(
+            io, prompt
+        )
+        return response, latency_ms
+
+    def _timed_answer_observation(
+        self, io: PracticeIO, prompt: str
+    ) -> tuple[str, int, float, float]:
         started = self.clock.monotonic()
         response = io.ask(prompt)
         ended = self.clock.monotonic()
         latency_ms = max(0, round((ended - started) * 1000))
-        return response, latency_ms
+        return response, latency_ms, started, ended
 
     @staticmethod
     def _ask_choice(io: PracticeIO, prompt: str, choices: set[str]) -> str:

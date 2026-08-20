@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from virtuoso.practice import PracticeService
-from virtuoso.workspace import WorkspaceService
+from virtuoso.workspace import WorkspaceError, WorkspaceService
 
 
 class _IO:
@@ -91,6 +91,20 @@ class SelectionTests(unittest.TestCase):
 
         selection = self.workspace.select_next(self.now)
         self.assertEqual(selection.item.item_id, "beta")
+
+    def test_selection_wraps_malformed_scheduler_due_timestamp(self) -> None:
+        import sqlite3
+
+        PracticeService(self.workspace, clock=_Clock()).run(
+            item_id="alpha",
+            io=_IO(["n", "answer", "reveal", "demonstrated", "4"]),
+            now=self.now,
+        )
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("UPDATE scheduler_proposals SET due_at = 'not-a-date'")
+
+        with self.assertRaisesRegex(WorkspaceError, "invalid scheduler due timestamp"):
+            self.workspace.select_next(self.now)
 
 
 if __name__ == "__main__":

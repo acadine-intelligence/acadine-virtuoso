@@ -30,7 +30,7 @@ Markdown owns item prose. SQLite owns derived and append-only state. Every item 
 
 Recall attempts and project-transfer events stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. Its schema fixes `claims_mastery` to false. Capability views may later interpret repeated evidence, but cannot rewrite the source events.
 
-SQLite migrations run in transactions. Before any destructive migration, Virtuoso creates a SQLite backup. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
+SQLite migrations run in transactions and fail closed. The current migrations are additive or reconstruct constrained tables without inventing evidence; automatic backup and restore are not implemented. Operators must make a consistent local backup before a future destructive migration. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
 
 ## Scheduler portfolio
 
@@ -48,7 +48,7 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables, not an OS sandbox: they run with the invoking user’s permissions and require explicit consent. The runner uses `shell=False`, a sanitized environment, temporary-file output capture, a process-group timeout, strict schemas, and load-time manifest hashing. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because the operating system does not prevent it from accessing other user-readable files.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables, not an OS sandbox: they run with the invoking user’s permissions and require explicit consent. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 

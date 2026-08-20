@@ -4,11 +4,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from virtuoso.practice import AttemptRecord, PracticeError, PracticeService
-from virtuoso.workspace import WorkspaceService
+from virtuoso.workspace import WorkspaceError, WorkspaceService
 
 
 class ScriptedIO:
@@ -68,7 +69,7 @@ class PracticeServiceTests(unittest.TestCase):
             ]
         )
         result = PracticeService(
-            self.workspace, clock=FakeClock([100.0, 101.25])
+            self.workspace, clock=FakeClock([100.0, 101.25, 102.0])
         ).run(
             item_id="testing-effect",
             io=io,
@@ -95,7 +96,10 @@ class PracticeServiceTests(unittest.TestCase):
         self.assertEqual(result.attempt.initial_latency_ms, 1250)
         self.assertEqual(result.attempt.confidence, 4)
         self.assertFalse(result.attempt.open_notes)
-        self.assertEqual(result.attempt.support_actions, ())
+        self.assertEqual(
+            [action.kind for action in result.attempt.support_actions],
+            ["worked-feedback"],
+        )
         self.assertEqual(result.proposal.algorithm, "fsrs")
         self.assertEqual(result.proposal.algorithm_version, "6.3.2")
         self.assertEqual(result.proposal.learning_context, "atomic-recall")
@@ -129,11 +133,12 @@ class PracticeServiceTests(unittest.TestCase):
                 "Retrieval is effortful.",
                 "not-demonstrated",
                 "1",
+                "A smaller response.",
             ]
         )
         result = PracticeService(
             self.workspace,
-            clock=FakeClock([0.0, 1.0, 2.0, 4.0, 5.0, 8.0]),
+            clock=FakeClock([0.0, 1.0, 2.0, 4.0, 5.0, 8.0, 9.0, 10.5, 11.0]),
         ).run(
             item_id="testing-effect",
             io=io,
@@ -143,8 +148,10 @@ class PracticeServiceTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(action.kind for action in result.attempt.support_actions),
-            ("retry-unaided", "hint", "follow-up-offered"),
+            ("retry-unaided", "hint", "worked-feedback", "follow-up"),
         )
+        self.assertEqual(result.attempt.support_actions[-1].response, "A smaller response.")
+        self.assertEqual(result.attempt.support_actions[-1].latency_ms, 1500)
         self.assertEqual(result.attempt.result, "not-demonstrated")
         self.assertEqual(result.attempt.initial_latency_ms, 1000)
         self.assertEqual(result.attempt.agent_help, "light")
@@ -158,7 +165,61 @@ class PracticeServiceTests(unittest.TestCase):
         stored_support = json.loads(attempts[0]["support_json"])
         self.assertEqual(
             [entry["kind"] for entry in stored_support],
-            ["retry-unaided", "hint", "follow-up-offered"],
+            ["retry-unaided", "hint", "worked-feedback", "follow-up"],
+        )
+
+    def test_persists_actual_attempt_timing_reveal_and_follow_up_attribution(self) -> None:
+        io = ScriptedIO(
+            [
+                "n",
+                "initial response",
+                "reveal",
+                "partial",
+                "3",
+                "smaller follow-up response",
+            ]
+        )
+        result = PracticeService(
+            self.workspace,
+            clock=FakeClock([10.0, 11.25, 12.0, 13.5, 14.0]),
+        ).run(
+            item_id="testing-effect",
+            io=io,
+            now=self.now,
+            agent_help="none",
+        )
+
+        with sqlite3.connect(self.workspace.db_path) as db:
+            timing = db.execute(
+                "SELECT started_at, completed_at FROM attempt_timings "
+                "WHERE event_id = ?",
+                (result.attempt.event_id,),
+            ).fetchone()
+        stored = self.workspace.list_attempts()[0]
+        observed = {
+            "support": [
+                (action.kind, action.response, action.latency_ms)
+                for action in result.attempt.support_actions
+            ],
+            "timing": timing,
+            "listed_started_at": stored.get("started_at"),
+            "listed_completed_at": stored.get("completed_at"),
+            "occurred_at": result.attempt.occurred_at.isoformat(),
+        }
+        expected_started = self.now.isoformat()
+        expected_completed = (self.now + timedelta(seconds=4)).isoformat()
+        self.assertEqual(
+            observed,
+            {
+                "support": [
+                    ("worked-feedback", None, None),
+                    ("follow-up", "smaller follow-up response", 1500),
+                ],
+                "timing": (expected_started, expected_completed),
+                "listed_started_at": expected_started,
+                "listed_completed_at": expected_completed,
+                "occurred_at": expected_completed,
+            },
         )
 
     def test_changed_markdown_fails_stale_instead_of_recording_against_wrong_prompt(self) -> None:
@@ -189,10 +250,12 @@ class PracticeServiceTests(unittest.TestCase):
         config = self.workspace.configuration()
         config["scheduler"]["desired_retention"] = "very high"
         self.workspace.config_path.write_text(json.dumps(config))
-        io = ScriptedIO(["n", "answer", "reveal", "partial", "3"])
+        io = ScriptedIO(
+            ["n", "answer", "reveal", "partial", "3", "follow-up response"]
+        )
         with self.assertRaisesRegex(PracticeError, "desired_retention"):
             PracticeService(
-                self.workspace, clock=FakeClock([0.0, 1.0])
+                self.workspace, clock=FakeClock([0.0, 1.0, 2.0, 3.0, 4.0])
             ).run(item_id="testing-effect", io=io, now=self.now)
 
     def test_stale_concurrent_scheduler_update_is_rejected_atomically(self) -> None:
@@ -204,6 +267,8 @@ class PracticeServiceTests(unittest.TestCase):
                 item_id=item.item_id,
                 item_content_hash=item.content_hash,
                 occurred_at=self.now,
+                started_at=self.now - timedelta(seconds=1),
+                completed_at=self.now,
                 initial_response="retrieval changes memory",
                 initial_latency_ms=1000,
                 result="demonstrated",
@@ -219,6 +284,151 @@ class PracticeServiceTests(unittest.TestCase):
         service._persist(attempt=attempts[0], proposal=proposals[0])
         with self.assertRaisesRegex(PracticeError, "scheduler state changed"):
             service._persist(attempt=attempts[1], proposal=proposals[1])
+        self.assertEqual(len(self.workspace.list_attempts()), 1)
+
+    def test_cross_item_attempt_and_scheduler_transition_is_rejected_atomically(self) -> None:
+        other = self.workspace.add_item(
+            item_id="other-item",
+            title="Other item",
+            focus="integrity",
+            prompt="Which item owns this transition?",
+            answer="Only the attempted item.",
+        )
+        attempted = self.workspace.load_item("testing-effect")
+        attempt = AttemptRecord(
+            event_id="attempt-cross-item",
+            item_id=attempted.item_id,
+            item_content_hash=attempted.content_hash,
+            occurred_at=self.now,
+            started_at=self.now - timedelta(seconds=1),
+            completed_at=self.now,
+            initial_response="synthetic response",
+            initial_latency_ms=100,
+            result="partial",
+            confidence=3,
+            open_notes=False,
+            agent_help="none",
+            support_actions=(),
+        )
+        service = PracticeService(self.workspace)
+        proposal = service._schedule(
+            item=self.workspace.load_item(other.item_id),
+            attempt=attempt,
+        )
+
+        with self.assertRaisesRegex(PracticeError, "attempt and scheduler item identity"):
+            service._persist(attempt=attempt, proposal=proposal)
+        self.assertEqual(self.workspace.list_attempts(), [])
+        self.assertEqual(self.workspace.list_proposals(), [])
+
+    def test_malformed_due_timestamp_is_rejected_before_any_transition_is_written(self) -> None:
+        item = self.workspace.load_item("testing-effect")
+        attempt = AttemptRecord(
+            event_id="attempt-malformed-due",
+            item_id=item.item_id,
+            item_content_hash=item.content_hash,
+            occurred_at=self.now,
+            started_at=self.now - timedelta(seconds=1),
+            completed_at=self.now,
+            initial_response="synthetic response",
+            initial_latency_ms=100,
+            result="partial",
+            confidence=3,
+            open_notes=False,
+            agent_help="none",
+            support_actions=(),
+        )
+        proposal = PracticeService(self.workspace)._schedule(item=item, attempt=attempt)
+        attempt_payload = {
+            "event_id": attempt.event_id,
+            "item_id": attempt.item_id,
+            "item_content_hash": attempt.item_content_hash,
+            "occurred_at": attempt.occurred_at.isoformat(),
+            "started_at": attempt.started_at.isoformat(),
+            "completed_at": attempt.completed_at.isoformat(),
+            "initial_response": attempt.initial_response,
+            "initial_latency_ms": attempt.initial_latency_ms,
+            "result": attempt.result,
+            "confidence": attempt.confidence,
+            "open_notes": attempt.open_notes,
+            "agent_help": attempt.agent_help,
+            "support_actions": [asdict(action) for action in attempt.support_actions],
+        }
+        proposal_payload = {
+            "proposal_id": proposal.proposal_id,
+            "source_event_id": proposal.source_event_id,
+            "item_id": proposal.item_id,
+            "algorithm": proposal.algorithm,
+            "algorithm_version": proposal.algorithm_version,
+            "learning_context": proposal.learning_context,
+            "configuration": proposal.configuration,
+            "previous_state_json": proposal.previous_state_json,
+            "previous_source_event_id": proposal.previous_source_event_id,
+            "due_at": "not-a-date",
+            "rationale": proposal.rationale,
+            "created_at": proposal.created_at.isoformat(),
+        }
+
+        with self.assertRaisesRegex(WorkspaceError, "scheduler due timestamp"):
+            self.workspace.record_attempt(
+                attempt=attempt_payload,
+                proposal=proposal_payload,
+                state_json=proposal.proposed_state_json,
+            )
+        self.assertEqual(self.workspace.list_attempts(), [])
+        self.assertEqual(self.workspace.list_proposals(), [])
+
+    def test_incompatible_stored_fsrs_version_and_configuration_fail_closed(self) -> None:
+        PracticeService(self.workspace, clock=FakeClock([0.0, 1.0, 2.0])).run(
+            item_id="testing-effect",
+            io=ScriptedIO(["n", "answer", "reveal", "demonstrated", "4"]),
+            now=self.now,
+        )
+        later = self.now + timedelta(days=1)
+
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("UPDATE scheduler_state SET algorithm_version = '0.0.0'")
+        with self.assertRaisesRegex(PracticeError, "incompatible.*version"):
+            PracticeService(
+                self.workspace, clock=FakeClock([0.0, 1.0, 2.0, 3.0, 4.0])
+            ).run(
+                item_id="testing-effect",
+                io=ScriptedIO(
+                    [
+                        "n",
+                        "answer",
+                        "reveal",
+                        "partial",
+                        "3",
+                        "follow-up",
+                    ]
+                ),
+                now=later,
+            )
+
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute(
+                "UPDATE scheduler_state SET algorithm_version = '6.3.2', "
+                "configuration_json = ?",
+                (json.dumps({"desired_retention": 0.1, "enable_fuzzing": False}),),
+            )
+        with self.assertRaisesRegex(PracticeError, "incompatible.*configuration"):
+            PracticeService(
+                self.workspace, clock=FakeClock([0.0, 1.0, 2.0, 3.0, 4.0])
+            ).run(
+                item_id="testing-effect",
+                io=ScriptedIO(
+                    [
+                        "n",
+                        "answer",
+                        "reveal",
+                        "partial",
+                        "3",
+                        "follow-up",
+                    ]
+                ),
+                now=later,
+            )
         self.assertEqual(len(self.workspace.list_attempts()), 1)
 
 

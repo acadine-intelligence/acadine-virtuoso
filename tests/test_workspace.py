@@ -20,6 +20,59 @@ class WorkspaceServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def _prepare_v3_workspace_with_legacy_evidence(self) -> WorkspaceService:
+        service = WorkspaceService.init(self.root)
+        item = service.add_item(
+            item_id="legacy-item",
+            title="Legacy item",
+            focus="migration",
+            prompt="What must migration preserve?",
+            answer="Only evidence that actually existed.",
+        )
+        occurred_at = "2026-08-19T12:00:00+00:00"
+        with sqlite3.connect(service.db_path) as db:
+            db.execute(
+                """INSERT INTO attempts(
+                       event_id, item_id, item_content_hash, occurred_at,
+                       initial_response, initial_latency_ms, result, confidence,
+                       open_notes, agent_help, support_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "attempt-legacy",
+                    item.item_id,
+                    item.content_hash,
+                    occurred_at,
+                    "legacy answer",
+                    125,
+                    "partial",
+                    3,
+                    0,
+                    "none",
+                    "[]",
+                ),
+            )
+            db.execute(
+                """INSERT INTO module_receipts(
+                       receipt_id, module_id, module_version, category, kind,
+                       manifest_sha256, stdout_sha256, duration_ms, occurred_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "module-legacy",
+                    "legacy-module",
+                    "0.1.0",
+                    "scoring-signal",
+                    "score-proposal",
+                    "a" * 64,
+                    "b" * 64,
+                    12,
+                    occurred_at,
+                ),
+            )
+            db.execute("DROP TABLE attempt_timings")
+            db.execute("DROP TABLE module_run_receipts")
+            db.execute("DELETE FROM schema_migrations WHERE version = 4")
+        return service
+
     def test_init_creates_owned_markdown_and_sqlite_boundaries(self) -> None:
         summary = WorkspaceService.init(self.root)
 
@@ -268,6 +321,59 @@ class WorkspaceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "migration history is not contiguous"):
             WorkspaceService.open(self.root)
 
+    def test_v3_to_v4_migration_returns_each_legacy_module_receipt_once(self) -> None:
+        self._prepare_v3_workspace_with_legacy_evidence()
+
+        migrated = WorkspaceService.open(self.root)
+
+        self.assertEqual(
+            [receipt["receipt_id"] for receipt in migrated.list_module_receipts()],
+            ["module-legacy"],
+        )
+        with sqlite3.connect(migrated.db_path) as db:
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+        self.assertEqual(versions, [1, 2, 3, 4])
+
+    def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
+        self._prepare_v3_workspace_with_legacy_evidence()
+
+        migrated = WorkspaceService.open(self.root)
+
+        with sqlite3.connect(migrated.db_path) as db:
+            timings = db.execute(
+                "SELECT event_id, started_at, completed_at FROM attempt_timings"
+            ).fetchall()
+            attempts = db.execute("SELECT event_id FROM attempts").fetchall()
+        self.assertEqual(attempts, [("attempt-legacy",)])
+        self.assertEqual(timings, [])
+
+    def test_opening_v3_workspace_repairs_private_permissions_during_migration(self) -> None:
+        service = self._prepare_v3_workspace_with_legacy_evidence()
+        item_path = service.items_dir / "legacy-item.md"
+        for directory in (service.root, service.items_dir, service.state_dir):
+            directory.chmod(0o755)
+        for file_path in (service.config_path, service.db_path, item_path):
+            file_path.chmod(0o644)
+
+        migrated = WorkspaceService.open(self.root)
+
+        expected_modes = {
+            migrated.root: 0o700,
+            migrated.items_dir: 0o700,
+            migrated.state_dir: 0o700,
+            migrated.config_path: 0o600,
+            migrated.db_path: 0o600,
+            item_path: 0o600,
+        }
+        for path, expected in expected_modes.items():
+            with self.subTest(path=path):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+
     def test_open_rejects_constraint_free_schema_with_expected_column_names(self) -> None:
         service = WorkspaceService.init(self.root)
         with sqlite3.connect(service.db_path) as db:
@@ -287,6 +393,27 @@ class WorkspaceServiceTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(WorkspaceError, "incompatible database schema"):
+            WorkspaceService.open(self.root)
+
+    def test_open_rejects_check_constraint_with_case_changed_quoted_literals(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            original_sql = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attempts'"
+            ).fetchone()[0]
+            changed_sql = (
+                original_sql.replace("'demonstrated'", "'DEMONSTRATED'")
+                .replace("'partial'", "'PARTIAL'")
+                .replace("'not-demonstrated'", "'NOT-DEMONSTRATED'")
+            )
+            self.assertNotEqual(changed_sql, original_sql)
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("DROP TABLE attempts")
+            db.execute(changed_sql)
+
+        with self.assertRaisesRegex(
+            WorkspaceError, "attempts constraints or definition do not match"
+        ):
             WorkspaceService.open(self.root)
 
     def test_open_rejects_foreign_key_violations(self) -> None:

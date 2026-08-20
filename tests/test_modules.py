@@ -243,6 +243,103 @@ print(json.dumps({
         with self.assertRaisesRegex(ModuleError, "shell executables"):
             ModuleManifest.load(path)
 
+    def test_manifest_rejects_shell_executable_via_env_indirection(self) -> None:
+        script = self._script("unused.py", "")
+        path = self._manifest(
+            script,
+            command={
+                "argv": ["/usr/bin/env", "sh", "-c", "exit 0"],
+                "timeout_seconds": 2,
+            },
+        )
+        with self.assertRaisesRegex(ModuleError, "shell executables"):
+            ModuleManifest.load(path)
+
+    def test_nested_access_token_is_rejected_before_module_execution(self) -> None:
+        marker = self.root / "module-received-secret"
+        script = self._script(
+            "secret-reader.py",
+            "import json,pathlib,sys\n"
+            "request=json.load(sys.stdin)\n"
+            f"pathlib.Path({str(marker)!r}).write_text(request['projections']['attempt.summary']['support_actions'][0]['access_token'])\n"
+            "print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1,'rationale':'synthetic'}}))\n",
+        )
+        manifest = ModuleManifest.load(
+            self._manifest(
+                script,
+                capabilities={
+                    "reads": ["attempt.summary"],
+                    "returns": "score-proposal",
+                },
+            )
+        )
+
+        with self.assertRaisesRegex(ModuleError, "private state path or secret"):
+            self._run(
+                manifest,
+                {
+                    "schema": "virtuoso/module-request@0.1",
+                    "projections": {
+                        "attempt.summary": {
+                            "support_actions": [
+                                {
+                                    "kind": "hint",
+                                    "response": "synthetic",
+                                    "latency_ms": 1,
+                                    "access_token": "must-not-cross-boundary",
+                                }
+                            ]
+                        }
+                    },
+                },
+            )
+        self.assertFalse(marker.exists())
+
+    def test_nested_support_actions_require_exact_typed_shapes(self) -> None:
+        script = self._script(
+            "unused-valid.py",
+            "import json; print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1,'rationale':'synthetic'}}))\n",
+        )
+        manifest = ModuleManifest.load(
+            self._manifest(
+                script,
+                capabilities={
+                    "reads": ["attempt.summary"],
+                    "returns": "score-proposal",
+                },
+            )
+        )
+
+        with self.assertRaisesRegex(ModuleError, "support_actions"):
+            self._run(
+                manifest,
+                {
+                    "schema": "virtuoso/module-request@0.1",
+                    "projections": {
+                        "attempt.summary": {"support_actions": ["hint"]}
+                    },
+                },
+            )
+
+    def test_scheduler_result_requires_complete_typed_shape(self) -> None:
+        script = self._script(
+            "incomplete-scheduler.py",
+            "import json; print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'scheduler-proposal','payload':{'rationale':'incomplete'}}))\n",
+        )
+        manifest = ModuleManifest.load(
+            self._manifest(
+                script,
+                category="scheduler",
+                capabilities={"reads": [], "returns": "scheduler-proposal"},
+            )
+        )
+
+        with self.assertRaisesRegex(ModuleError, "missing scheduler-proposal fields"):
+            self._run(
+                manifest,
+                {"schema": "virtuoso/module-request@0.1", "projections": {}},
+            )
+
     def test_malformed_or_oversized_output_fails_closed(self) -> None:
         bad = self._script("bad.py", "print('not json')\n")
         with self.assertRaisesRegex(ModuleError, "valid JSON"):
@@ -301,7 +398,10 @@ print(json.dumps({
         parent = self._script(
             "parent.py",
             "import subprocess,sys,time\n"
-            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "try:\n"
+            f"    subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "except OSError:\n"
+            "    pass\n"
             "time.sleep(5)\n",
         )
         path = self._manifest(parent)
@@ -326,7 +426,10 @@ print(json.dumps({
         parent = self._script(
             "detached-parent.py",
             "import subprocess,sys,time\n"
-            f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+            "try:\n"
+            f"    subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+            "except OSError:\n"
+            "    pass\n"
             "time.sleep(5)\n",
         )
         path = self._manifest(parent)
@@ -351,7 +454,10 @@ print(json.dumps({
         parent = self._script(
             "successful-parent.py",
             "import json,subprocess,sys\n"
-            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "try:\n"
+            f"    subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "except OSError:\n"
+            "    pass\n"
             "print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1}}))\n",
         )
 
@@ -362,6 +468,30 @@ print(json.dumps({
         self.assertEqual(result.payload, {"score": 1})
         time.sleep(0.65)
         self.assertFalse(marker.exists())
+
+    def test_successful_parent_exit_kills_fast_setsid_descendant(self) -> None:
+        marker = self.root / "successful-detached-descendant-survived"
+        child = (
+            "import pathlib,time; time.sleep(0.5); "
+            f"pathlib.Path({str(marker)!r}).write_text('escaped')"
+        )
+        parent = self._script(
+            "successful-detached-parent.py",
+            "import json,subprocess,sys\n"
+            "try:\n"
+            f"    subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+            "except OSError:\n"
+            "    pass\n"
+            "print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1}}))\n",
+        )
+
+        result = self._run(
+            ModuleManifest.load(self._manifest(parent)),
+            {"schema": "virtuoso/module-request@0.1", "projections": {}},
+        )
+        self.assertEqual(result.payload, {"score": 1})
+        time.sleep(0.65)
+        self.assertFalse(marker.exists(), "detached child wrote after ModuleRunner.run returned")
 
     def test_workspace_records_success_and_failed_run_receipts_with_completion_times(self) -> None:
         workspace = WorkspaceService.init(self.root / "receipt-learner")
