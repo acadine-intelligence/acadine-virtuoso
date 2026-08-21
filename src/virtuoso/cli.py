@@ -41,9 +41,12 @@ def _parse_cli_timestamp(value: str, *, field: str) -> datetime:
 
 
 def _parser() -> argparse.ArgumentParser:
+    from . import __version__
+
     parser = argparse.ArgumentParser(
         prog="virtuoso", description="Local-first active-recall practice"
     )
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--workspace", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
 

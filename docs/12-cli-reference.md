@@ -8,7 +8,8 @@ Complete reference for the `virtuoso` command-line interface. Every command, fla
 virtuoso --workspace PATH <command> [subcommand] [flags]
 ```
 
-- `--workspace PATH` is required and always comes before the command. It selects the learner workspace directory created by `init`.
+- `--workspace PATH` is required for every command except `--version`, and always comes before the command. It selects the learner workspace directory created by `init`.
+- `--version` prints the package version (`0.1.0.dev0`) and exits 0; no workspace needed.
 - Most commands accept `--json`. With `--json`, stdout is a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
 
 ## Exit codes
@@ -160,7 +161,7 @@ Rebinds an existing stale item-source link to the note's current content hash. T
 
 ## Candidates (metadata-only structural proposals)
 
-Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path; reviewing and acting on a candidate is a human/agent decision made outside Virtuoso.
+Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path: `candidate decide` records a human accept/reject decision as append-only evidence, and acting on an accepted proposal (drafting the note, answering the practice item) remains human work outside Virtuoso.
 
 ### `candidate generate`
 

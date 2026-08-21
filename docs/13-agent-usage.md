@@ -7,7 +7,7 @@ How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Vi
 1. **Always pass `--json`.** Human output is `key: value` lines; JSON output is the stable machine contract. Parse stdout, never scrape the human format.
 2. **Check the exit code.** 0 means success; 2 means a domain error. On 2, read stderr (`Error: ...`), which is written to be actionable, and either fix the input or surface it to the human. Never retry the same failing input unchanged.
 3. **Never fabricate evidence.** Attempts, transfer events and check completions are append-only records of what a real learner did. An agent may administer a session and transcribe the learner's answers; it may not invent results, and `--agent-help` / `--assistance` must honestly reflect any help the agent gave. When an agent runs a smoke test itself, record it as `substantial`, not `none`.
-4. **Respect the boundaries.** Candidates are proposal-only; there is no apply command, and acting on one is a decision made outside Virtuoso. Sources are read-only. Scheduling and selection changes come from recorded evidence, never from an agent editing the database.
+4. **Respect the boundaries.** Candidates are proposal-only; `candidate decide` records the human accept/reject decision as append-only evidence, and there is no apply command — acting on an accepted proposal stays outside Virtuoso. Sources are read-only. Scheduling and selection changes come from recorded evidence, never from an agent editing the database.
 5. **Never edit the SQLite database directly.** All state changes go through the CLI (or the Python services behind it). The schema is fail-closed: tampering is detected on next open and the workspace refuses to start.
 
 ## Natural language to command mapping

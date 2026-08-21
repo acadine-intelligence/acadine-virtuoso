@@ -258,6 +258,20 @@ class CliJourneyTests(unittest.TestCase):
         self.assertEqual(listed["events"][0]["artifact_reference"], "git:abc123")
         self.assertNotIn("mastered", json.dumps(listed).lower())
 
+    def test_version_flag_prints_package_version_without_workspace(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "virtuoso.cli", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(
+            completed.stdout.strip(),
+            __import__("virtuoso").__version__,
+        )
+        self.assertEqual(completed.stderr, "")
+
 
 if __name__ == "__main__":
     unittest.main()
