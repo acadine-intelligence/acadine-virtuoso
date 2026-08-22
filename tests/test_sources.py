@@ -408,6 +408,57 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
             )
         self.assertIn("not stale", str(caught.exception))
 
+    def test_unlink_item_source_removes_dead_link_after_note_rename(self) -> None:
+        note = self.vault / "Testing Effect.md"
+        note.write_text("# Testing Effect\n\nStable.\n", encoding="utf-8")
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        self.service.link_item_source(
+            item_id="testing-effect",
+            source_id="vault",
+            relative_path="Testing Effect.md",
+        )
+
+        note.rename(self.vault / "Renamed Note.md")
+        self.service.scan_source("vault")
+        health = self.service.doctor()
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(len(health["stale_source_links"]), 1)
+
+        result = self.service.unlink_item_source(
+            item_id="testing-effect",
+            source_id="vault",
+            relative_path="Testing Effect.md",
+        )
+        self.assertEqual(result["status"], "unlinked")
+        self.assertEqual(self.service.doctor()["stale_source_links"], [])
+        self.assertEqual(self.service.doctor()["status"], "healthy")
+
+    def test_unlink_fails_closed_on_unknown_link(self) -> None:
+        self.service.add_source(source_id="vault", kind="obsidian", root=self.vault)
+        self.service.scan_source("vault")
+        self.service.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen memory?",
+            answer="Retrieval changes memory.",
+        )
+        with self.assertRaises(WorkspaceError) as caught:
+            self.service.unlink_item_source(
+                item_id="testing-effect",
+                source_id="vault",
+                relative_path="Never Linked.md",
+            )
+        self.assertIn("no item source link", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

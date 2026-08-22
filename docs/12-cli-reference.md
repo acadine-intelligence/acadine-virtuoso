@@ -159,6 +159,14 @@ virtuoso --workspace PATH source relink --id ID --path PATH --item ITEM [--json]
 
 Rebinds an existing stale item-source link to the note's current content hash. This is the conscious recovery path after a note edit: `source link` refuses a pair that already exists, so editing a linked note otherwise leaves the link permanently stale. `relink` refuses a link that is not stale and a note that is not indexed (scan first). It never edits the source.
 
+### `source unlink`
+
+```
+virtuoso --workspace PATH source unlink --id ID --path PATH --item ITEM [--json]
+```
+
+Removes one item-source link when its note moved away or was deleted — the recovery path after a vault rename, where `relink` cannot help because the old path no longer exists to rebind. Fails closed if no such link exists. The item, its Markdown, and any recorded evidence are untouched; only the link row goes. Pair it with `source link` at the new path to carry provenance across a rename.
+
 ## Candidates (metadata-only structural proposals)
 
 Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path: `candidate decide` records a human accept/reject decision as append-only evidence, and acting on an accepted proposal (drafting the note, answering the practice item) remains human work outside Virtuoso.

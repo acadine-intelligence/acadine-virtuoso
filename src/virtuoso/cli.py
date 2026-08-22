@@ -114,6 +114,13 @@ def _parser() -> argparse.ArgumentParser:
     source_relink.add_argument("--path", required=True)
     source_relink.add_argument("--item", required=True)
     source_relink.add_argument("--json", action="store_true")
+    source_unlink = source_commands.add_parser(
+        "unlink", help="remove a dead item-source link after a rename or delete"
+    )
+    source_unlink.add_argument("--id", required=True)
+    source_unlink.add_argument("--path", required=True)
+    source_unlink.add_argument("--item", required=True)
+    source_unlink.add_argument("--json", action="store_true")
     source_notes = source_commands.add_parser("notes", help="list indexed note metadata")
     source_notes.add_argument("--id", required=True)
     source_notes.add_argument("--json", action="store_true")
@@ -507,6 +514,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     relative_path=args.path,
                 )
                 _emit(link, as_json=args.json)
+                return 0
+            if args.source_command == "unlink":
+                result = workspace.unlink_item_source(
+                    item_id=args.item,
+                    source_id=args.id,
+                    relative_path=args.path,
+                )
+                _emit(result, as_json=args.json)
                 return 0
             if args.source_command == "notes":
                 _emit(

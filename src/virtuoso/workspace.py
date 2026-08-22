@@ -1310,6 +1310,40 @@ class WorkspaceService:
             "linked_at": relinked_at,
         }
 
+    def unlink_item_source(
+        self, *, item_id: str, source_id: str, relative_path: str
+    ) -> dict[str, str]:
+        """Remove one item-source link after the note moved away or was deleted."""
+        normalized = Path(relative_path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            raise WorkspaceError("source relative path must stay inside its source root")
+        normalized_path = normalized.as_posix()
+        with self._connect() as db:
+            existing = db.execute(
+                """
+                SELECT source_content_hash FROM item_source_links
+                WHERE item_id = ? AND source_id = ? AND source_relative_path = ?
+                """,
+                (item_id, source_id, normalized_path),
+            ).fetchone()
+            if existing is None:
+                raise WorkspaceError(
+                    f"no item source link to unlink: {item_id} -> {source_id}/{normalized_path}"
+                )
+            db.execute(
+                """
+                DELETE FROM item_source_links
+                WHERE item_id = ? AND source_id = ? AND source_relative_path = ?
+                """,
+                (item_id, source_id, normalized_path),
+            )
+        return {
+            "status": "unlinked",
+            "item_id": item_id,
+            "source_id": source_id,
+            "relative_path": normalized_path,
+        }
+
     def persist_candidate_run(
         self,
         *,
