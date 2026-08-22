@@ -1,0 +1,16 @@
+{
+  "name": "virtuoso-obsidian",
+  "version": "0.1.0",
+  "description": "Human review queue for Virtuoso learning items inside Obsidian.",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "obsidian": "1.8.7",
+    "typescript": "5.9.3"
+  }
+}

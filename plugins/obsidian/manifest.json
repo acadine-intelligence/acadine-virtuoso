@@ -1,0 +1,10 @@
+{
+  "id": "virtuoso",
+  "name": "Virtuoso",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Human review queue for Virtuoso learning items — accept/reject proposals, see what is due. Scheduling stays with the Virtuoso CLI; flashcards stay with Obsidian SR.",
+  "author": "Acadine",
+  "authorUrl": "https://github.com/acadine-intelligence",
+  "isDesktopOnly": true
+}
