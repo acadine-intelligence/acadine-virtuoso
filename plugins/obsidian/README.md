@@ -6,8 +6,14 @@ Human review queue for Virtuoso learning items, inside Obsidian.
 
 - Ribbon icon + command "Open review queue"
 - Lists notes in `07-learning/virtuoso/items/` with
-  `schema: virtuoso-learning-item*` and `review-state: proposed`
-- Accept / Reject buttons flip `review-state` to `accepted` / `rejected`
+  `schema: virtuoso-learning-item*` and `review_state: proposed`
+  (snake_case keys are canonical; legacy hyphenated spellings are tolerated)
+- Accept / Reject buttons flip `review_state` to `accepted` / `rejected`
+- Command "Cycle today's cards" (cmd+alt+N): rep session over CLI items and
+  book deck chapters due today. One scheduler call per card per session; a
+  chapter grades at most once per session (first card's rating). Parsing
+  lives in `src/parsing.ts`, session grading rules in `src/grading.ts`;
+  both are pure modules covered by `npm run test` (vitest).
 
 That single frontmatter flip is the **entire write surface**. Scheduling,
 intervals, and evidence stay with the Virtuoso CLI; flashcards stay with the

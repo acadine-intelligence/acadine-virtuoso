@@ -1,5 +1,7 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Vault } from "obsidian";
 import { spawn } from "child_process";
+import { deckChapterCards, fmKey, frontmatter, parseDueOutput } from "./parsing";
+import { GradeGate } from "./grading";
 
 /**
  * Virtuoso for Obsidian.
@@ -33,6 +35,8 @@ interface VirtuosoItem {
 interface DueCard {
 	source: "item" | "deck";
 	id: string;
+	/** Deck cards only: chapter number this card belongs to ("2" for "deck-ch2"). */
+	chapter?: string;
 	title: string;
 	promptLines: string[];
 	detail?: string;
@@ -47,50 +51,6 @@ const DEFAULT_SETTINGS: VirtuosoSettings = {
 	itemsDir: "07-learning/virtuoso/items",
 	cliPath: "~/projects/hermes-tools/virtuoso/virtuoso.py",
 };
-
-const FM_PATTERN = /^---\n([\s\S]*?)\n---/;
-
-function frontmatter(raw: string): Record<string, string> {
-	const m = raw.match(FM_PATTERN);
-	if (!m) return {};
-	const out: Record<string, string> = {};
-	for (const line of m[1].split("\n")) {
-		const idx = line.indexOf(":");
-		if (idx === -1) continue;
-		const key = line.slice(0, idx).trim();
-		const val = line.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
-		out[key] = val;
-	}
-	return out;
-}
-
-/** Extract `### Ch N — Title` sections from the deck note as Q/A pairs. */
-function deckChapterCards(raw: string): { ch: string; title: string; qa: { q: string; a: string }[] }[] {
-	const out: { ch: string; title: string; qa: { q: string; a: string }[] }[] = [];
-	let current: { ch: string; title: string; qa: { q: string; a: string }[] } | null = null;
-	for (const line of raw.split("\n")) {
-		const h = line.match(/^### Ch (\d+) — (.+)$/);
-		if (h) {
-			current = { ch: h[1], title: h[2].trim(), qa: [] };
-			out.push(current);
-			continue;
-		}
-		if (current && /^## /.test(line)) current = null; // next top section ends the deck
-		if (current) {
-			const q = line.match(/^- Q: (.+)$/);
-			const a = line.match(/^- A: (.+)$/);
-			if (q) {
-				const full = q[1].trim();
-				const split = full.match(/^(.*?)\s+A:\s+(.*)$/s);
-				if (split) current.qa.push({ q: split[1].trim(), a: split[2].trim() });
-				else current.qa.push({ q: full, a: "" });
-			} else if (a && current.qa.length > 0 && !current.qa[current.qa.length - 1].a) {
-				current.qa[current.qa.length - 1].a = a[1].trim();
-			}
-		}
-	}
-	return out;
-}
 
 class ReviewQueueModal extends Modal {
 	private items: VirtuosoItem[];
@@ -151,6 +111,8 @@ class RepSessionModal extends Modal {
 	private revealed = false;
 	private statusEl!: HTMLElement;
 	private bodyEl!: HTMLElement;
+	/** One scheduler call per card per session; one chapter grade per session. See grading.ts. */
+	private gate = new GradeGate();
 
 	constructor(
 		app: App,
@@ -209,7 +171,11 @@ class RepSessionModal extends Modal {
 			return;
 		}
 		const card = this.cards[this.index];
-		statusEl.setText(`Card ${this.index + 1} of ${this.cards.length}${this.revealed ? "" : "  ·  recall first, then Space to reveal"}`);
+		const gradedHint =
+			card.source === "deck" && card.chapter && this.gate.isChapterGraded(card.chapter)
+				? "  ·  chapter already graded — practice only"
+				: "";
+		statusEl.setText(`Card ${this.index + 1} of ${this.cards.length}${gradedHint}${this.revealed ? "" : "  ·  recall first, then Space to reveal"}`);
 		bodyEl.createEl("h3", { text: card.title });
 		for (let i = 0; i < card.promptLines.length; i++) {
 			bodyEl.createEl("p", { text: card.promptLines[i] });
@@ -237,8 +203,17 @@ class RepSessionModal extends Modal {
 
 	private async submit(rating: Rating | "skip") {
 		const card = this.cards[this.index];
-		const err = await this.grade(card, rating);
-		if (err) new Notice(`Virtuoso CLI: ${err}`, 6000);
+		if (rating !== "skip") {
+			// NB-3 + NB-2 gate: true only for the first answer of a card whose
+			// chapter has not been graded yet (deck cards); item cards have no
+			// chapter, so only the per-card rule applies.
+			if (this.gate.consume(card.id, card.chapter)) {
+				const err = await this.grade(card, rating);
+				if (err) new Notice(`Virtuoso CLI: ${err}`, 6000);
+			} else {
+				new Notice("Practice retry — already graded this session.", 2500);
+			}
+		}
 		this.revealed = false;
 		if (rating !== "again") this.index++; // "again" re-queues the same card within the session
 		else this.cards.push(card); // retry later in this session
@@ -305,27 +280,30 @@ export default class VirtuosoPlugin extends Plugin {
 			const fm = frontmatter(raw);
 			if (
 				fm["schema"]?.startsWith("virtuoso-learning-item") &&
-				fm["review-state"] === "proposed"
+				fmKey(fm, "review_state") === "proposed"
 			) {
 				items.push({
 					file: child,
-					itemId: fm["item-id"] ?? child.basename,
-					title: fm["title"] ?? child.basename,
-					exerciseType: fm["exercise-type"] ?? "?",
-					practiceMode: fm["practice-mode"] ?? "?",
-					createdDate: fm["created-date"] ?? "",
+					itemId: fmKey(fm, "item_id") || child.basename,
+					title: fmKey(fm, "title") || child.basename,
+					exerciseType: fmKey(fm, "exercise_type") || "?",
+					practiceMode: fmKey(fm, "practice_mode") || "?",
+					createdDate: fmKey(fm, "created_date") || "",
 				});
 			}
 		}
 		return items;
 	}
 
-	/** The human-review write: flip review-state on a proposal. */
+	/** The human-review write: flip review_state on a proposal. */
 	private async decide(item: VirtuosoItem, verdict: "accepted" | "rejected") {
 		const vault = this.app.vault as Vault;
 		const raw = await vault.read(item.file);
-		if (!/^review-state:.*$/m.test(raw)) return;
-		await vault.modify(item.file, raw.replace(/^review-state:.*$/m, `review-state: ${verdict}`));
+		// Canonical key is review_state (underscore); tolerate the legacy
+		// hyphenated spelling from older drafts.
+		const line = /(^review_state:.*$)|(^review-state:.*$)/m;
+		if (!line.test(raw)) return;
+		await vault.modify(item.file, raw.replace(line, `review_state: ${verdict}`));
 		new Notice(`Virtuoso: "${item.title}" ${verdict}`);
 	}
 
@@ -341,12 +319,9 @@ export default class VirtuosoPlugin extends Plugin {
 
 		// Deck chapters due, straight from the CLI verdict.
 		const due = await this.cliRun(["due"]);
-		const deckSection = due.stdout.split("BOOK DECK DUE")[1] ?? "";
-		const deckIds = new Set<string>();
-		for (const m of deckSection.matchAll(/Ch (\d+) — ([^\n(]+)/g)) {
-			deckIds.add(m[1]);
-		}
-		if (deckIds.size > 0) {
+		const parsed = parseDueOutput(due.stdout);
+		if (parsed.deckChaptersDue.length > 0) {
+			const deckIds = new Set(parsed.deckChaptersDue);
 			const deckFile = vault.getAbstractFileByPath("07-learning/nlp-llms-zong-2026-spaced-reps.md");
 			if (deckFile instanceof TFile) {
 				const raw = await vault.read(deckFile);
@@ -356,7 +331,8 @@ export default class VirtuosoPlugin extends Plugin {
 						const card = chap.qa[i];
 						cards.push({
 							source: "deck",
-							id: `deck-ch${chap.ch}`,
+							id: `deck-ch${chap.ch}-${i}`,
+							chapter: chap.ch,
 							title: `Book deck · Ch ${chap.ch} — ${chap.title} (${i + 1}/${chap.qa.length})`,
 							promptLines: [card.q],
 							detail: card.a || "(no answer key in deck note — check the source)",
@@ -367,25 +343,34 @@ export default class VirtuosoPlugin extends Plugin {
 		}
 
 		// Virtuoso items due per the CLI, rendered from their notes.
-		const itemSection = due.stdout.split("REVIEWS DUE:")[1]?.split("BOOK DECK DUE")[0] ?? "";
-		for (const m of itemSection.matchAll(/\[([^\]]+)\]/g)) {
-			const itemId = m[1];
+		if (parsed.itemsDue.length > 0) {
 			const folder = vault.getAbstractFileByPath(this.settings.itemsDir);
-			if (!folder || !("children" in folder)) continue;
-			for (const child of (folder as unknown as { children: TFile[] }).children) {
-				if (!(child instanceof TFile) || child.extension !== "md") continue;
-				const raw = await vault.read(child);
-				const fm = frontmatter(raw);
-				if ((fm["item-id"] ?? "") !== itemId || !fm["schema"]?.startsWith("virtuoso-learning-item")) continue;
-				const body = raw.slice(raw.indexOf("---", 4) + 4);
-				const lines = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-				cards.push({
-					source: "item",
-					id: itemId,
-					title: fm["title"] ?? child.basename,
-					promptLines: lines,
-				});
-				break;
+			if (folder && "children" in folder) {
+				// One vault read per note: build an item_id -> note lookup first (was: one
+				// full folder rescan per due id — O(items x due) reads).
+				const byItemId = new Map<string, { fm: Record<string, string>; body: string; basename: string }>();
+				for (const child of (folder as unknown as { children: TFile[] }).children) {
+					if (!(child instanceof TFile) || child.extension !== "md") continue;
+					const raw = await vault.read(child);
+					const fm = frontmatter(raw);
+					if (!fm["schema"]?.startsWith("virtuoso-learning-item")) continue;
+					const id = fmKey(fm, "item_id");
+					if (id) {
+						const body = raw.slice(raw.indexOf("---", 4) + 4);
+						byItemId.set(id, { fm, body, basename: child.basename });
+					}
+				}
+				for (const itemId of parsed.itemsDue) {
+					const hit = byItemId.get(itemId);
+					if (!hit) continue;
+					const lines = hit.body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+					cards.push({
+						source: "item",
+						id: itemId,
+						title: fmKey(hit.fm, "title") || hit.basename,
+						promptLines: lines,
+					});
+				}
 			}
 		}
 		return cards;
@@ -404,8 +389,8 @@ export default class VirtuosoPlugin extends Plugin {
 	private async gradeCard(card: DueCard, rating: Rating | "skip"): Promise<string | null> {
 		if (rating === "skip") return null;
 		const args =
-			card.source === "deck"
-				? ["deck-rep", card.id.replace(/^deck-ch/, ""), rating]
+			card.source === "deck" && card.chapter
+				? ["deck-rep", card.chapter, rating]
 				: ["review", card.id, rating];
 		const res = await this.cliRun(args);
 		if (!res.ok) return res.stdout.trim() || "command failed";
