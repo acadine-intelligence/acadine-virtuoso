@@ -42,3 +42,6 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+# Plugin local settings (personal paths)
+plugins/obsidian/data.json
