@@ -3,7 +3,7 @@
 Thin wrappers around the installed ``virtuoso`` CLI. The plugin never
 reimplements scheduling logic — it shells out with ``--json`` and passes the
 CLI's structured output through, so behaviour always matches the canonical
-workspace at ``~/projects/virtuoso-workspace`` (override with the
+workspace (default ``~/.virtuoso/workspace``, override with the
 ``workspace`` plugin setting).
 
 Scheduling ownership reminder (2026-07-24 architecture decision): Virtuoso
@@ -21,7 +21,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKSPACE = str(Path.home() / "projects" / "virtuoso-workspace")
+DEFAULT_WORKSPACE = str(Path.home() / ".virtuoso" / "workspace")
 TIMEOUT_S = 30
 
 

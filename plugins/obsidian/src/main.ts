@@ -45,11 +45,13 @@ interface DueCard {
 interface VirtuosoSettings {
 	itemsDir: string;
 	cliPath: string;
+	deckPath: string;
 }
 
 const DEFAULT_SETTINGS: VirtuosoSettings = {
 	itemsDir: "07-learning/virtuoso/items",
-	cliPath: "~/projects/hermes-tools/virtuoso/virtuoso.py",
+	cliPath: "~/.virtuoso/scheduler.py",
+	deckPath: "07-learning/deck.md",
 };
 
 class ReviewQueueModal extends Modal {
@@ -322,7 +324,7 @@ export default class VirtuosoPlugin extends Plugin {
 		const parsed = parseDueOutput(due.stdout);
 		if (parsed.deckChaptersDue.length > 0) {
 			const deckIds = new Set(parsed.deckChaptersDue);
-			const deckFile = vault.getAbstractFileByPath("07-learning/nlp-llms-zong-2026-spaced-reps.md");
+			const deckFile = vault.getAbstractFileByPath(this.settings.deckPath);
 			if (deckFile instanceof TFile) {
 				const raw = await vault.read(deckFile);
 				for (const chap of deckChapterCards(raw)) {
@@ -434,6 +436,20 @@ class VirtuosoSettingTab extends PluginSettingTab {
 					.onChange((value) => {
 						void (async () => {
 							this.plugin.settings.cliPath = value || DEFAULT_SETTINGS.cliPath;
+							await this.plugin.saveSettings();
+						})();
+					}),
+			);
+		new Setting(containerEl)
+			.setName("Deck note path")
+			.setDesc("Vault path to the spaced-repetition deck note")
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.deckPath)
+					.setValue(this.plugin.settings.deckPath)
+					.onChange((value) => {
+						void (async () => {
+							this.plugin.settings.deckPath = value || DEFAULT_SETTINGS.deckPath;
 							await this.plugin.saveSettings();
 						})();
 					}),

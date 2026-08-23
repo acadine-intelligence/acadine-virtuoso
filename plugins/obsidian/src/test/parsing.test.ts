@@ -4,7 +4,7 @@
  *
  * Fixtures mirror the real generators:
  * - virtuoso.py cmd_due() output format (verified against live CLI 2026-08-22)
- * - 07-learning/nlp-llms-zong-2026-spaced-reps.md deck note structure
+ * - deck note structure (`### Ch N — Title` sections with `- Q:`/`- A:` lines)
  * - virtuoso-learning-item frontmatter (snake_case keys, canonical)
  */
 import { describe, expect, it } from "vitest";

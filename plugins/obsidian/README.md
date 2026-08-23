@@ -33,8 +33,8 @@ npm run build   # emits main.js for release
 Symlink or copy this directory into your vault:
 
 ```bash
-ln -s ~/projects/acadine-virtuoso/plugins/obsidian \
-      ~/vaults/acadine-core/.obsidian/plugins/virtuoso
+ln -s /path/to/acadine-virtuoso/plugins/obsidian \
+      /path/to/vault/.obsidian/plugins/virtuoso
 ```
 
 Then enable "Virtuoso" in Obsidian's Community Plugins (restricted mode off).

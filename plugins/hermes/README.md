@@ -38,10 +38,11 @@ plugins:
   entries:
     virtuoso:
       settings:
-        workspace: /path/to/virtuoso-workspace
+        workspace: /path/to/your-virtuoso-workspace
 ```
 
-Default workspace: `~/projects/virtuoso-workspace`.
+Default workspace: `~/.virtuoso/workspace` (override with the `workspace:`
+setting or the `--workspace` flag).
 
 ## Design notes
 
