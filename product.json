@@ -4,7 +4,7 @@
     "slug": "acadine-virtuoso",
     "name": "Acadine Virtuoso",
     "kind": "standalone",
-    "owner": "Jonathan / Acadine",
+    "owner": "Acadine maintainers",
     "canonical_root": ".",
     "mission": "Turn user-owned knowledge and real work into timed active-recall challenges, attributable learning evidence, and adaptive practice that improves reliable recall speed and transfer.",
     "core_output": "One inspectable active-recall challenge or compact practice bundle, followed by an append-only attempt record and a scheduler proposal tied to the exact algorithm, context, assistance, and learner result.",
@@ -20,31 +20,31 @@
     ]
   },
   "problem": {
-    "target_user": "Jonathan first, then self-directed technical learners who keep knowledge in Markdown and want practice tied to current work",
+    "target_user": "Self-directed technical learners who keep knowledge in Markdown and want practice tied to current work",
     "painful_job": "At the start of a focused learning session, turn a large body of notes and active project context into one worthwhile challenge that tests recall before revealing help and records what the attempt actually demonstrated.",
     "current_workaround": "Use Obsidian notes, a small path-bound SM-2-lite script, manually chosen exercises, project work, and separate reflections; due dates, response latency, assistance, transfer evidence, and project relevance are not joined into one inspectable loop.",
     "evidence": [
-      "Jonathan's 2026-08-19 voice and chat discussion explicitly asked for a mental-gym CLI built around active recall, testing effect, recall latency, project application, modularity, and optional direction-led learning.",
-      "Private dogfood material already includes pilot items plus learner-state and evidence-ledger structures; none of that private content is shipped in this repository.",
-      "A prior local scheduling script established the basic Markdown due-queue workflow but did not run the active-recall journey, isolate workspaces, or provide a product extension contract."
+      "Maintainer product discovery on 2026-08-19 defined a mental-gym CLI built around active recall, the testing effect, recall latency, project application, modularity, and optional direction-led learning.",
+      "Public issue history records gaps found during maintainer dogfood; private learner content is excluded from this repository.",
+      "An earlier local scheduling tool established the basic Markdown due-queue workflow but did not run the active-recall journey, isolate workspaces, or provide a product extension contract."
     ],
     "frequency": "Daily or several times per week whenever a learner begins focused study or encounters a transferable concept in project work.",
     "consequence": "Passive familiarity is mistaken for retrieval, recall remains slow, practice drifts away from active work, and evidence about what the learner did independently is lost or conflated with agent assistance.",
     "value_hypothesis": "If Virtuoso makes the next challenge relevant, hides answers until an attempt, records latency and help, and schedules follow-up from attributable outcomes, learners will retrieve important concepts more reliably and apply them independently in real work with less manual queue maintenance.",
-    "success_metric": "During a two-week dogfood run of at least ten real sessions, every session produces inspectable evidence, at least three sessions lead to authentic project application, and Jonathan chooses Virtuoso for at least 8 of 10 eligible focused-learning sessions while reporting that the recommendation or challenge was worth the setup cost.",
+    "success_metric": "During a two-week dogfood run of at least ten real sessions, every session produces inspectable evidence, at least three sessions lead to authentic project application, and the maintainer chooses Virtuoso for at least 8 of 10 eligible focused-learning sessions while reporting that the recommendation or challenge was worth the setup cost.",
     "kill_criteria": "Stop or rescope the v0 if it adds more than two minutes of administration per session, is not chosen for at least 8 of 10 eligible sessions, cannot distinguish unaided retrieval from guided work, or does not produce better next actions than the current manual workflow."
   },
   "research": {
     "sources": [
-      "Private 2026-08-19 product-discovery discussion and its internal PRD synthesis; private source material is not included in this repository.",
-      "A private deployed scheduling reference and pilot learning workspace, inspected 2026-08-19; paths and learner content are intentionally omitted.",
+      "Maintainer product-discovery notes from 2026-08-19; private source material is excluded from this repository.",
+      "An earlier deployed scheduling reference and pilot workspace inspected on 2026-08-19; paths and learner content are intentionally omitted.",
       "Open Spaced Repetition py-fsrs official repository and PyPI package, FSRS 6.3.2, retrieved 2026-08-19: https://github.com/open-spaced-repetition/py-fsrs and https://pypi.org/project/fsrs/.",
       "Anki official FAQ describing SM-2 and FSRS scheduler choices, retrieved 2026-08-19: https://faqs.ankiweb.net/what-spaced-repetition-algorithm.",
       "Yang et al. (2021) classroom testing meta-analysis: https://doi.org/10.1037/bul0000309.",
       "Adesope et al. (2017) practice-testing meta-analysis: https://doi.org/10.3102/0034654316689306.",
       "Cepeda et al. (2006, 2008) distributed-practice synthesis and retention-interval study: https://doi.org/10.1037/0033-2909.132.3.354 and https://doi.org/10.1111/j.1467-9280.2008.02209.x.",
       "Tabibian et al. (2019) adaptive spaced-repetition optimization: https://doi.org/10.1073/pnas.1815156116.",
-      "Private learning-system notes and the internal PRD/design plan; neither is shipped as product authority."
+      "Maintainer learning-system notes and the internal PRD/design plan; neither is shipped as product authority."
     ],
     "alternatives": [
       "Anki or Obsidian flashcards: mature atomic recall scheduling, but weak linkage to current projects, assistance attribution, practical bundles, and local agent workflows.",
@@ -158,7 +158,7 @@
     "run": ".venv/bin/virtuoso --workspace PATH <command>",
     "health": ".venv/bin/virtuoso --workspace PATH doctor --json checks the workspace schema, SQLite integrity, item hashes, and evidence counts without changing learning state.",
     "rollback": "Use versioned Git commits and package releases; back up the local SQLite file before migrations and retain append-only event export so derived state can be rebuilt.",
-    "support_owner": "Jonathan / Acadine",
+    "support_owner": "Acadine maintainers",
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
   },
   "release": {
@@ -168,9 +168,9 @@
       "evidence": ""
     },
     "known_limitations": [
-      "The simple-mode active-recall slice, read-only Markdown/Obsidian source index, and attributed project-transfer event capture are implemented; exact-commit independent review and a real two-week dogfood run remain pending.",
-      "Connected sources currently provide path-scoped metadata, wikilinks, hash provenance, and stale-link detection. Delayed transfer checks are manually authored; late creation is allowed without backdating, and prediction begins only at or after both the inherited date and creation time. They append immutable prediction and attributable completion evidence; they do not execute scorers, dereference artifacts, retry/supersede checks, update FSRS, rank projects, or derive capability/mastery. Search, explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization follow through dogfood evidence.",
-      "The initial GitHub repository is private; public release, packaging, and distribution remain pending."
+      "The active-recall CLI, read-only Markdown/Obsidian source index, project-transfer evidence, delayed transfer checks, local analytics, and item retrieval are implemented. Independent exact-commit review of the current public baseline and a real two-week dogfood run remain pending.",
+      "Connected sources provide path-scoped metadata, wikilinks, hash provenance, and stale-link detection. Delayed transfer checks remain manually authored. Explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization remain future work.",
+      "The repository is public and source-checkout installation works. A package registry release and end-user upgrade path remain pending."
     ]
   },
   "adoption": {

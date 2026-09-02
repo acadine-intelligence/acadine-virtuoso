@@ -2,7 +2,7 @@
 
 Acadine Virtuoso is a local-first active-recall CLI. It turns user-owned Markdown and current work into one worthwhile challenge, records what the attempt demonstrated, and proposes when and how to practise next.
 
-The first user is Jonathan. The first slice is intentionally small: initialize a workspace, add a manually authored recall item, attempt it before seeing the answer, record latency and assistance, and obtain a transparent FSRS-backed next-review proposal.
+The first use case is maintainer dogfood. The initial slice stays small: initialize a workspace, add a manually authored recall item, attempt it before seeing the answer, record latency and assistance, and obtain a transparent FSRS-backed next-review proposal.
 
 ## Outcome
 

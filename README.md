@@ -1,5 +1,7 @@
 # Virtuoso
 
+[![CI](https://github.com/acadine-intelligence/acadine-virtuoso/actions/workflows/ci.yml/badge.svg)](https://github.com/acadine-intelligence/acadine-virtuoso/actions/workflows/ci.yml)
+
 A local-first command-line tool for deliberate practice. Virtuoso shows you a prompt before any answer, times your recall, records what help you used, and asks the FSRS spaced-repetition algorithm for a transparent next-review proposal you can inspect and override.
 
 Your material stays yours: items are plain Markdown you can read and edit; SQLite holds derived evidence and scheduler state on your own disk. No account, no cloud, no telemetry.
@@ -92,6 +94,8 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 - `docs/13-agent-usage.md`: how agents drive the CLI
 - `docs/10-learning-research.md`: the research basis and its limits
 - `docs/03-domain-model.md`: who owns which state and why
+- `docs/15-release-notes.md`: public change history
+- `docs/16-verification-history.md`: reproducible checks and historical results
 
 ## Status
 

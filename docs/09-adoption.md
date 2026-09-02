@@ -6,7 +6,7 @@ No active user has completed the new canonical CLI journey yet. The existing loc
 
 ## Planned evidence window
 
-Jonathan is the first dogfood user. After the first slice is independently verified, measure at least ten eligible focused-learning sessions over two weeks. Record whether Virtuoso was chosen, administrative time, recommendation/challenge value, overrides, help used, project transfer opportunities, and counterevidence.
+A maintainer is the first dogfood user. After the current public baseline receives independent review, measure at least ten eligible focused-learning sessions over two weeks. Record whether Virtuoso was chosen, administrative time, challenge value, overrides, help used, project transfer opportunities, and counterevidence.
 
 ## Feedback cycles
 
