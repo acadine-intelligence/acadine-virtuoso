@@ -140,7 +140,51 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (11,))
+            self.assertEqual(migration, (12,))
+
+    def test_v11_to_v12_migration_preserves_items_and_adds_skip_ledger(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="migration-twelve",
+            title="Migration twelve",
+            focus="migration",
+            prompt="What must migration twelve preserve?",
+            answer="Every existing item.",
+        )
+        with sqlite3.connect(service.db_path) as db:
+            before = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            db.execute("DROP TRIGGER IF EXISTS review_skips_reject_update")
+            db.execute("DROP TRIGGER IF EXISTS review_skips_reject_delete")
+            db.execute("DROP TABLE IF EXISTS review_skips")
+            db.execute("DELETE FROM schema_migrations WHERE version = 12")
+
+        reopened = WorkspaceService.open(self.root)
+
+        with sqlite3.connect(reopened.db_path) as db:
+            after = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+            review_table = db.execute(
+                "SELECT type FROM sqlite_master WHERE name = 'review_skips'"
+            ).fetchone()
+            review_triggers = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                    " AND name LIKE 'review_skips_reject_%'"
+                ).fetchall()
+            }
+        self.assertEqual(after, before)
+        self.assertEqual(versions, list(range(1, 13)))
+        self.assertEqual(review_table, ("table",))
+        self.assertEqual(
+            review_triggers,
+            {"review_skips_reject_update", "review_skips_reject_delete"},
+        )
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -169,7 +213,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 12)),
+                list(range(1, 13)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -503,7 +547,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -842,7 +886,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             state = db.execute(
                 "SELECT source_event_id, state_json FROM scheduler_state"
             ).fetchall()
-        self.assertEqual(versions, list(range(1, 12)))
+        self.assertEqual(versions, list(range(1, 13)))
         self.assertEqual(
             attempt,
             [

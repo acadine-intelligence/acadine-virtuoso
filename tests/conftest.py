@@ -83,6 +83,9 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
 
 def downgrade_candidate_decisions_to_v10(db: sqlite3.Connection) -> None:
     """Restore the candidate decision table to its pre-migration-11 shape."""
+    db.execute("DROP TRIGGER IF EXISTS review_skips_reject_update")
+    db.execute("DROP TRIGGER IF EXISTS review_skips_reject_delete")
+    db.execute("DROP TABLE IF EXISTS review_skips")
     exists = (
         db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table'"

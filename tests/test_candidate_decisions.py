@@ -110,7 +110,7 @@ class CandidateDecisionTests(unittest.TestCase):
     def test_v10_decision_migrates_without_inventing_materialized_item(self) -> None:
         with sqlite3.connect(self.workspace.db_path) as db:
             downgrade_candidate_decisions_to_v10(db)
-            db.execute("DELETE FROM schema_migrations WHERE version = 11")
+            db.execute("DELETE FROM schema_migrations WHERE version >= 11")
             db.execute(
                 """INSERT INTO candidate_decisions(
                        decision_id, candidate_id, decision, note, decided_at
@@ -146,7 +146,7 @@ class CandidateDecisionTests(unittest.TestCase):
                            '2026-08-20T10:01:00+00:00', 'edit', NULL, NULL
                        )"""
                 )
-        self.assertEqual(version, 11)
+        self.assertEqual(version, 12)
         self.assertEqual(row, (None, None, None))
 
 

@@ -17,9 +17,9 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain error in the `VirtuosoError` family (`WorkspaceError`, `PracticeError`, `ModuleError`, `SearchError`, or `QueryError`): stdout stays empty and stderr carries `Error: <plain actionable message>`. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and any command path that produced no result also return 2. |
+| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. |
 
-There are no silent partial failures: commands either complete and return 0 or fail closed with 2 and no state change.
+Commands either complete and return 0 or return 2 without a partial state change.
 
 ### Search input behavior
 
@@ -131,6 +131,66 @@ Contract:
 
 JSON output: `{"event_id", "item_id", "result", "confidence", "agent_help", "administered": true, "initial_latency_ms": null, "occurred_at", "proposal_due_at", "proposal_algorithm"}`.
 
+### `review` JSON contracts
+
+The Obsidian plugin and other local interfaces use this versioned contract. Always pass `--json`. The CLI remains the only scheduler and evidence writer.
+
+List due and new items without answer content:
+
+```
+virtuoso --workspace PATH review due --json
+```
+
+Output schema: `virtuoso/review-queue@0.1`. Each item has `item_id`, `content_hash`, `focus`, `project_ids`, `selection_reason`, `status` (`due` or `new`), and `due_at`. The selection reason uses the same scheduler rule as `next`. Project IDs come from explicit transfer records. New items use `null` for `due_at`. Future items stay outside the queue.
+
+Load one content snapshot:
+
+```
+virtuoso --workspace PATH review load --item ID --json
+```
+
+Output schema: `virtuoso/review-item@0.1`. The `item` object contains `item_id`, `title`, `focus`, `content_hash`, `prompt`, `answer`, optional `hint`, optional `follow_up`, and `learning_context`. An interface must keep the answer hidden until the learner asks to reveal it.
+
+Record one measured direct attempt by sending a JSON object on stdin:
+
+```
+printf '%s' "$REQUEST_JSON" | \
+  virtuoso --workspace PATH review record --json
+```
+
+Request schema: `virtuoso/review-attempt@0.1`. It requires these exact fields:
+
+- `submission_id`: 32 lowercase hexadecimal characters. Retrying uses the same value.
+- `item_id` and `item_content_hash`: the identity returned by `review load`.
+- `started_at`, `initial_answered_at`, and `completed_at`: timezone-aware timestamps measured by the interface. The CLI derives `initial_latency_ms` from the first two timestamps.
+- `initial_response`: the typed first response.
+- `retry`: `null` or one object with `response` and measured `latency_ms`.
+- `hint_used` and `answer_revealed`: assistance facts. Grading requires `answer_revealed: true`.
+- `result`: `demonstrated`, `partial`, or `not-demonstrated`.
+- `confidence`: integer 1 through 5.
+- `open_notes`: whether notes were open during recall.
+
+Output schema: `virtuoso/review-attempt-result@0.1`. The attempt carries `administered: false`, measured latency, result, and item hash. The proposal carries the FSRS algorithm, version, and due time. Core code writes the attempt, proposal, and scheduler state in one SQLite transaction.
+
+Record a skip by sending a JSON object on stdin:
+
+```
+printf '%s' "$SKIP_JSON" | \
+  virtuoso --workspace PATH review skip --json
+```
+
+Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. The CLI appends the skip event and leaves scheduler state unchanged.
+
+Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
+
+JSON failures use `virtuoso/review-error@0.1` on stderr:
+
+```
+{"schema":"virtuoso/review-error@0.1","error":{"code":"stale-content","message":"...","recovery":"reload-item"}}
+```
+
+CLI error codes are `invalid-request`, `stale-content`, `record-failed`, `skip-failed`, `already-recorded`, `workspace-busy`, and `workspace-error`. Each code has one fixed recovery value: `check-contract`, `reload-item`, `retry-submit`, `advance-card`, or `check-settings`. Exit code 2 still signals the failure. The interface must keep the current card open until the learner takes the recovery action.
+
 ### `attempts`
 
 Show recorded evidence and scheduler proposals.
@@ -139,7 +199,7 @@ Show recorded evidence and scheduler proposals.
 virtuoso --workspace PATH attempts [--json]
 ```
 
-JSON output: `{"attempts": [...], "proposals": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`.
+JSON output: `{"attempts": [...], "proposals": [...], "skips": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`. Skips carry the item hash, timestamp, and source surface. A skip never changes scheduler state.
 
 ## Sources (read-only Markdown/Obsidian)
 
