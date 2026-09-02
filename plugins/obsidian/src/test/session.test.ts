@@ -32,6 +32,9 @@ class FakeClient implements ReviewClient {
 			{
 				item_id: "testing-effect",
 				content_hash: this.queueHash,
+				focus: "learning-science",
+				project_ids: ["context-project"],
+				selection_reason: "Selected a new item in deterministic item-id order.",
 				status: "new" as const,
 				due_at: null,
 			},
@@ -40,6 +43,9 @@ class FakeClient implements ReviewClient {
 			items.push({
 				item_id: "second-item",
 				content_hash: HASH,
+				focus: "learning-science",
+				project_ids: [],
+				selection_reason: "Selected a new item in deterministic item-id order.",
 				status: "new",
 				due_at: null,
 			});
@@ -165,6 +171,11 @@ describe("ReviewSessionController", () => {
 		await controller.start();
 		expect(controller.state.phase).toBe("prompt");
 		expect(controller.state.item?.answer).toBe("Retrieval changes memory.");
+		expect(controller.state.context).toEqual({
+			focus: "learning-science",
+			projectIds: ["context-project"],
+			selectionReason: "Selected a new item in deterministic item-id order.",
+		});
 		controller.setOpenNotes(true);
 		controller.submitInitial("Retrieval strengthens later access paths.");
 		expect(controller.state.phase).toBe("support");
@@ -355,6 +366,39 @@ describe("ReviewSessionController", () => {
 		expect(controller.state.position).toBe(2);
 		expect(controller.state.phase).toBe("prompt");
 		expect(controller.state.error).toBeNull();
+	});
+
+	it("keeps next-card recovery retryable after another load failure", async () => {
+		const client = new FakeClient();
+		client.includeSecond = true;
+		client.nextLoadFailures = 2;
+		const ids = [
+			"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			"ffffffffffffffffffffffffffffffff",
+		];
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+				"2026-09-02T12:00:03.000Z",
+			]),
+			newSubmissionId: () => ids.shift() ?? "",
+		});
+		await controller.start();
+		controller.submitInitial("A measured response.");
+		controller.reveal();
+
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(await controller.retryAdvance()).toBe(false);
+		expect(controller.state.error?.recovery).toBe("retry-next-card");
+		expect(controller.state.position).toBe(1);
+		expect(client.recorded).toHaveLength(1);
+
+		expect(await controller.retryAdvance()).toBe(true);
+		expect(controller.state.item?.item_id).toBe("second-item");
+		expect(controller.state.position).toBe(2);
+		expect(client.recorded).toHaveLength(1);
 	});
 
 	it("retries next-card loading after a recorded skip without another write", async () => {

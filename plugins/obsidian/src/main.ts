@@ -1,6 +1,7 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Vault } from "obsidian";
 import { VirtuosoCliClient } from "./cli-client";
 import {
+	cardContextRows,
 	fmKey,
 	frontmatter,
 	isLearningItemFrontmatter,
@@ -143,6 +144,24 @@ class ReviewSessionModal extends Modal {
 		if (item === null) return;
 		if (state.error !== null) return;
 		this.bodyEl.createEl("h3", { text: item.title });
+		const contextRows = cardContextRows({
+			focus: state.context?.focus,
+			linkedProjectIds: state.context?.projectIds,
+			whyNow: state.context?.selectionReason,
+		});
+		if (contextRows.length > 0) {
+			const contextEl = this.bodyEl.createDiv({ cls: "virtuoso-review-context" });
+			contextEl.style.color = "var(--text-muted)";
+			contextEl.style.marginBottom = "1em";
+			for (const row of contextRows) {
+				const line = contextEl.createEl("p");
+				line.style.margin = "0.25em 0";
+				line.style.whiteSpace = "pre-wrap";
+				line.style.overflowWrap = "anywhere";
+				line.createEl("strong", { text: `${row.label}:` });
+				line.createEl("span", { text: ` ${row.text}` });
+			}
+		}
 		this.bodyEl.createEl("p", { text: item.prompt });
 
 		if (state.phase === "prompt") this.renderPrompt();

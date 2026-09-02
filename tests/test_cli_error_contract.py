@@ -14,6 +14,7 @@ from virtuoso.cli import main
 from virtuoso.modules import ModuleError
 from virtuoso.practice import PracticeError
 from virtuoso.queries import QueryError
+from virtuoso.review import ReviewError
 from virtuoso.search import SearchError
 from virtuoso.workspace import WorkspaceError, WorkspaceService
 
@@ -56,6 +57,7 @@ class CliErrorContractTests(unittest.TestCase):
             ModuleError,
             SearchError,
             QueryError,
+            ReviewError,
         ):
             with self.subTest(error_type=error_type.__name__):
                 self.assertTrue(issubclass(error_type, VirtuosoError))

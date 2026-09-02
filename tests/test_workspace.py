@@ -142,6 +142,50 @@ class WorkspaceServiceTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(migration, (12,))
 
+    def test_v11_to_v12_migration_preserves_items_and_adds_skip_ledger(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="migration-twelve",
+            title="Migration twelve",
+            focus="migration",
+            prompt="What must migration twelve preserve?",
+            answer="Every existing item.",
+        )
+        with sqlite3.connect(service.db_path) as db:
+            before = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            db.execute("DROP TRIGGER IF EXISTS review_skips_reject_update")
+            db.execute("DROP TRIGGER IF EXISTS review_skips_reject_delete")
+            db.execute("DROP TABLE IF EXISTS review_skips")
+            db.execute("DELETE FROM schema_migrations WHERE version = 12")
+
+        reopened = WorkspaceService.open(self.root)
+
+        with sqlite3.connect(reopened.db_path) as db:
+            after = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+            review_table = db.execute(
+                "SELECT type FROM sqlite_master WHERE name = 'review_skips'"
+            ).fetchone()
+            review_triggers = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                    " AND name LIKE 'review_skips_reject_%'"
+                ).fetchall()
+            }
+        self.assertEqual(after, before)
+        self.assertEqual(versions, list(range(1, 13)))
+        self.assertEqual(review_table, ("table",))
+        self.assertEqual(
+            review_triggers,
+            {"review_skips_reject_update", "review_skips_reject_delete"},
+        )
+
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
         with self.assertRaisesRegex(WorkspaceError, "already exists"):
@@ -695,9 +739,6 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ).fetchall()
             ]:
                 db.execute(f'DROP TRIGGER "{trigger}"')
-            db.execute("DROP TRIGGER review_skips_reject_update")
-            db.execute("DROP TRIGGER review_skips_reject_delete")
-            db.execute("DROP TABLE review_skips")
             db.execute("DROP TABLE attempt_timings")
             db.execute("DROP TABLE scheduler_proposals")
             db.execute("DROP TABLE scheduler_state")

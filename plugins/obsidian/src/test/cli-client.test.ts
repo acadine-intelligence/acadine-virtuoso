@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ReviewAttemptRequest, ReviewSkipRequest } from "../contracts";
 import {
+	ProcessRunnerError,
+	SpawnProcessRunner,
 	VirtuosoCliClient,
 	type ProcessInvocation,
 	type ProcessResult,
@@ -12,9 +14,11 @@ const HASH = "a".repeat(64);
 class FakeRunner implements ProcessRunner {
 	calls: ProcessInvocation[] = [];
 	results: ProcessResult[] = [];
+	error: Error | null = null;
 
 	async run(invocation: ProcessInvocation): Promise<ProcessResult> {
 		this.calls.push(invocation);
+		if (this.error !== null) throw this.error;
 		const result = this.results.shift();
 		if (!result) throw new Error("runner result exhausted");
 		return result;
@@ -59,6 +63,9 @@ describe("VirtuosoCliClient", () => {
 						{
 							item_id: "testing-effect",
 							content_hash: HASH,
+							focus: "learning-science",
+							project_ids: ["context-project"],
+							selection_reason: "Selected a new item in deterministic item-id order.",
 							status: "new",
 							due_at: null,
 						},
@@ -163,5 +170,86 @@ describe("VirtuosoCliClient", () => {
 				stdin: JSON.stringify(skipRequest),
 			},
 		]);
+	});
+
+	it("reports a CLI timeout separately", async () => {
+		const runner = new SpawnProcessRunner(20);
+
+		await expect(
+			runner.run({
+				executable: process.execPath,
+				args: ["-e", "setTimeout(() => undefined, 1000)"],
+				stdin: null,
+			}),
+		).rejects.toMatchObject({
+			kind: "timeout",
+			message: "Virtuoso CLI timed out after 20 ms",
+		});
+	});
+
+	it("reports a CLI spawn failure separately", async () => {
+		const runner = new SpawnProcessRunner(1000);
+
+		await expect(
+			runner.run({
+				executable: "/path/that-does-not-exist/virtuoso",
+				args: [],
+				stdin: null,
+			}),
+		).rejects.toMatchObject({
+			kind: "spawn",
+		});
+	});
+
+	it("maps a runner timeout to a typed review error", async () => {
+		const runner = new FakeRunner();
+		runner.error = new ProcessRunnerError("Virtuoso CLI timed out after 20 ms", "timeout");
+		const client = new VirtuosoCliClient(
+			"/usr/local/bin/virtuoso",
+			"/tmp/virtuoso-workspace",
+			runner,
+		);
+
+		await expect(client.record(attemptRequest)).rejects.toMatchObject({
+			code: "process-timeout",
+			message: "Virtuoso CLI timed out after 20 ms",
+			recovery: "retry-submit",
+		});
+	});
+
+	it("maps a runner spawn failure to a typed review error", async () => {
+		const runner = new FakeRunner();
+		runner.error = new ProcessRunnerError("Virtuoso CLI could not start: ENOENT", "spawn");
+		const client = new VirtuosoCliClient(
+			"/usr/local/bin/virtuoso",
+			"/tmp/virtuoso-workspace",
+			runner,
+		);
+
+		await expect(client.due()).rejects.toMatchObject({
+			code: "process-spawn-failed",
+			message: "Virtuoso CLI could not start: ENOENT",
+			recovery: "check-settings",
+		});
+	});
+
+	it("preserves stderr from an untyped nonzero CLI exit", async () => {
+		const runner = new FakeRunner();
+		runner.results.push({
+			exitCode: 9,
+			stdout: "",
+			stderr: "workspace database is locked",
+		});
+		const client = new VirtuosoCliClient(
+			"/usr/local/bin/virtuoso",
+			"/tmp/virtuoso-workspace",
+			runner,
+		);
+
+		await expect(client.record(attemptRequest)).rejects.toMatchObject({
+			code: "process-exit",
+			message: "workspace database is locked",
+			recovery: "retry-submit",
+		});
 	});
 });

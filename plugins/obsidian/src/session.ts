@@ -44,9 +44,16 @@ export interface ReviewSessionError {
 	recovery: ReviewRecovery | "retry-next-card";
 }
 
+export interface ReviewCardContext {
+	focus: string;
+	projectIds: string[];
+	selectionReason: string;
+}
+
 export interface ReviewSessionState {
 	phase: ReviewPhase;
 	item: ReviewItemSnapshot | null;
+	context: ReviewCardContext | null;
 	position: number;
 	total: number;
 	initialResponse: string;
@@ -67,6 +74,7 @@ export class ReviewSessionController {
 	readonly state: ReviewSessionState = {
 		phase: "idle",
 		item: null,
+		context: null,
 		position: 0,
 		total: 0,
 		initialResponse: "",
@@ -103,6 +111,7 @@ export class ReviewSessionController {
 	async start(): Promise<void> {
 		this.state.phase = "loading";
 		this.state.error = null;
+		this.state.context = null;
 		this.advancePending = false;
 		try {
 			const queue = await this.client.due();
@@ -412,6 +421,11 @@ export class ReviewSessionController {
 		}
 		this.index = index;
 		this.state.item = loaded.item;
+		this.state.context = {
+			focus: loaded.item.focus,
+			projectIds: [...expected.project_ids],
+			selectionReason: expected.selection_reason,
+		};
 		this.state.position = index + 1;
 		this.state.initialResponse = "";
 		this.state.retry = null;

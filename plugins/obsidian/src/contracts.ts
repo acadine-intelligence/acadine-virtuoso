@@ -11,6 +11,9 @@ export class ContractError extends Error {
 export interface ReviewQueueItem {
 	item_id: string;
 	content_hash: string;
+	focus: string;
+	project_ids: string[];
+	selection_reason: string;
 	status: "due" | "new";
 	due_at: string | null;
 }
@@ -134,6 +137,17 @@ function text(value: unknown, label: string): string {
 	return value;
 }
 
+function projectIds(value: unknown, label: string): string[] {
+	if (!Array.isArray(value)) throw new ContractError(`${label} must be an array`);
+	return value.map((entry, index) => {
+		const result = text(entry, `${label} ${index}`);
+		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(result)) {
+			throw new ContractError(`${label} ${index} must be a product id`);
+		}
+		return result;
+	});
+}
+
 function nullableText(value: unknown, label: string): string | null {
 	if (value === null) return null;
 	return text(value, label);
@@ -183,7 +197,15 @@ export function parseReviewQueue(value: unknown): ReviewQueuePayload {
 		const item = object(entry, `review queue item ${index}`);
 		exactFields(
 			item,
-			["item_id", "content_hash", "status", "due_at"],
+			[
+				"item_id",
+				"content_hash",
+				"focus",
+				"project_ids",
+				"selection_reason",
+				"status",
+				"due_at",
+			],
 			`review queue item ${index}`,
 		);
 		const status = item.status;
@@ -198,6 +220,15 @@ export function parseReviewQueue(value: unknown): ReviewQueuePayload {
 		return {
 			item_id: text(item.item_id, `review queue item ${index} item_id`),
 			content_hash: hash(item.content_hash, `review queue item ${index} content_hash`),
+			focus: text(item.focus, `review queue item ${index} focus`),
+			project_ids: projectIds(
+				item.project_ids,
+				`review queue item ${index} project_ids`,
+			),
+			selection_reason: text(
+				item.selection_reason,
+				`review queue item ${index} selection_reason`,
+			),
 			status,
 			due_at: dueAt,
 		};

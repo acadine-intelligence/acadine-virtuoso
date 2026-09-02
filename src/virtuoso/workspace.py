@@ -3734,7 +3734,7 @@ class WorkspaceService:
                     """,
                     tuple(payload.values()),
                 )
-        except sqlite3.IntegrityError as exc:
+        except sqlite3.Error as exc:
             raise WorkspaceError(f"review skip could not be appended: {exc}") from exc
         return payload
 

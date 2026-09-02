@@ -6,7 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+
+from virtuoso.review import ReviewError, ReviewService
+from virtuoso.workspace import WorkspaceService
 
 
 class ReviewCliJourneyTests(unittest.TestCase):
@@ -64,6 +68,14 @@ class ReviewCliJourneyTests(unittest.TestCase):
 
     def test_due_contract_lists_new_items_without_exposing_answers(self) -> None:
         self._init_with_item()
+        WorkspaceService.open(self.workspace).record_transfer(
+            item_id="testing-effect",
+            project_id="context-project",
+            use_case="Use retrieval practice in a real project.",
+            outcome="successful",
+            independence="independent",
+            occurred_at=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        )
 
         payload = json.loads(self._run("review", "due", "--json").stdout)
 
@@ -74,7 +86,10 @@ class ReviewCliJourneyTests(unittest.TestCase):
                 {
                     "content_hash": payload["items"][0]["content_hash"],
                     "due_at": None,
+                    "focus": "learning-science",
                     "item_id": "testing-effect",
+                    "project_ids": ["context-project"],
+                    "selection_reason": "Selected a new item in deterministic item-id order.",
                     "status": "new",
                 }
             ],
@@ -124,10 +139,19 @@ class ReviewCliJourneyTests(unittest.TestCase):
         )
 
         payload = json.loads(self._run("review", "due", "--json").stdout)
+        selected = json.loads(self._run("next", "--json").stdout)
 
         self.assertEqual(
             [(item["item_id"], item["status"]) for item in payload["items"]],
             [("testing-effect", "due"), ("new-item", "new")],
+        )
+        self.assertEqual(payload["items"][0]["focus"], selected["focus"])
+        self.assertEqual(
+            payload["items"][0]["selection_reason"], selected["rationale"]
+        )
+        self.assertEqual(
+            payload["items"][1]["selection_reason"],
+            "Selected a new item in deterministic item-id order.",
         )
         self.assertIsNotNone(payload["items"][0]["due_at"])
         self.assertIsNone(payload["items"][1]["due_at"])
@@ -623,6 +647,106 @@ class ReviewCliJourneyTests(unittest.TestCase):
                 "SELECT state_json, source_event_id FROM scheduler_state"
             ).fetchall()
         self.assertEqual(after_state, before_state)
+
+    def test_mid_transaction_failure_rolls_back_attempt_and_proposal(self) -> None:
+        self._init_with_item()
+        workspace = WorkspaceService.open(self.workspace)
+        snapshot = ReviewService(workspace).load("testing-effect")
+        request = {
+            "schema": "virtuoso/review-attempt@0.1",
+            "submission_id": "88888888888888888888888888888888",
+            "item_id": "testing-effect",
+            "item_content_hash": snapshot.content_hash,
+            "started_at": "2026-09-02T12:00:00+00:00",
+            "initial_answered_at": "2026-09-02T12:00:01+00:00",
+            "completed_at": "2026-09-02T12:00:02+00:00",
+            "initial_response": "A measured response.",
+            "retry": None,
+            "hint_used": False,
+            "answer_revealed": True,
+            "result": "partial",
+            "confidence": 3,
+            "open_notes": False,
+        }
+        original_connect = workspace._connect
+
+        def connect_with_failure() -> sqlite3.Connection:
+            db = original_connect()
+
+            def deny_scheduler_insert(
+                action: int,
+                table: str | None,
+                _column: str | None,
+                _database: str | None,
+                _source: str | None,
+            ) -> int:
+                if action == sqlite3.SQLITE_INSERT and table == "scheduler_proposals":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            db.set_authorizer(deny_scheduler_insert)
+            return db
+
+        workspace._connect = connect_with_failure  # type: ignore[method-assign]
+
+        with self.assertRaises(ReviewError) as raised:
+            ReviewService(workspace).record(json.dumps(request))
+
+        self.assertEqual(raised.exception.code, "record-failed")
+        self.assertEqual(raised.exception.recovery, "retry-submit")
+        with sqlite3.connect(workspace.db_path) as db:
+            counts = {
+                table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "attempts",
+                    "attempt_timings",
+                    "scheduler_proposals",
+                    "scheduler_state",
+                )
+            }
+        self.assertEqual(counts, {table: 0 for table in counts})
+
+    def test_skip_database_failure_returns_retry_recovery_without_evidence(self) -> None:
+        self._init_with_item()
+        workspace = WorkspaceService.open(self.workspace)
+        snapshot = ReviewService(workspace).load("testing-effect")
+        request = {
+            "schema": "virtuoso/review-skip@0.1",
+            "submission_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "item_id": "testing-effect",
+            "item_content_hash": snapshot.content_hash,
+            "occurred_at": "2026-09-02T12:01:00+00:00",
+            "surface": "obsidian-plugin",
+        }
+        original_connect = workspace._connect
+
+        def connect_with_failure() -> sqlite3.Connection:
+            db = original_connect()
+
+            def deny_skip_insert(
+                action: int,
+                table: str | None,
+                _column: str | None,
+                _database: str | None,
+                _source: str | None,
+            ) -> int:
+                if action == sqlite3.SQLITE_INSERT and table == "review_skips":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            db.set_authorizer(deny_skip_insert)
+            return db
+
+        workspace._connect = connect_with_failure  # type: ignore[method-assign]
+
+        with self.assertRaises(ReviewError) as raised:
+            ReviewService(workspace).skip(json.dumps(request))
+
+        self.assertEqual(raised.exception.code, "skip-failed")
+        self.assertEqual(raised.exception.recovery, "retry-submit")
+        with sqlite3.connect(workspace.db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM review_skips").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM scheduler_state").fetchone()[0], 0)
 
     def test_database_write_failure_returns_recovery_and_leaves_state_atomic(self) -> None:
         self._init_with_item()

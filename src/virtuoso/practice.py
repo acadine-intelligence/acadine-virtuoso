@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -535,7 +536,9 @@ class PracticeService:
                 },
                 state_json=proposal.proposed_state_json,
             )
-        except WorkspaceError as exc:
+        except sqlite3.IntegrityError:
+            raise
+        except (WorkspaceError, sqlite3.Error) as exc:
             raise PracticeError(str(exc)) from exc
 
     def _timed_answer(self, io: PracticeIO, prompt: str) -> tuple[str, int]:

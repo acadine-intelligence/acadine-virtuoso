@@ -141,7 +141,7 @@ List due and new items without answer content:
 virtuoso --workspace PATH review due --json
 ```
 
-Output schema: `virtuoso/review-queue@0.1`. Each item has `item_id`, `content_hash`, `status` (`due` or `new`), and `due_at`. New items use `null` for `due_at`. Future items stay outside the queue.
+Output schema: `virtuoso/review-queue@0.1`. Each item has `item_id`, `content_hash`, `focus`, `project_ids`, `selection_reason`, `status` (`due` or `new`), and `due_at`. The selection reason uses the same scheduler rule as `next`. Project IDs come from explicit transfer records. New items use `null` for `due_at`. Future items stay outside the queue.
 
 Load one content snapshot:
 

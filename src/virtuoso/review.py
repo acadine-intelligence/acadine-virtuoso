@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .errors import VirtuosoError
 from .practice import PracticeError, PracticeResult, PracticeService, SupportAction
 from .workspace import WorkspaceError, WorkspaceService
 
@@ -22,7 +23,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RESULTS = {"demonstrated", "partial", "not-demonstrated"}
 
 
-class ReviewError(RuntimeError):
+class ReviewError(VirtuosoError):
     def __init__(self, message: str, *, code: str, recovery: str) -> None:
         super().__init__(message)
         self.code = code
@@ -48,13 +49,19 @@ class ReviewContractError(ReviewError):
 class ReviewQueueItem:
     item_id: str
     content_hash: str
+    focus: str
+    project_ids: tuple[str, ...]
+    selection_reason: str
     status: str
     due_at: str | None
 
-    def to_dict(self) -> dict[str, str | None]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "item_id": self.item_id,
             "content_hash": self.content_hash,
+            "focus": self.focus,
+            "project_ids": list(self.project_ids),
+            "selection_reason": self.selection_reason,
             "status": self.status,
             "due_at": self.due_at,
         }
@@ -356,7 +363,7 @@ class ReviewService:
             db.row_factory = sqlite3.Row
             rows = db.execute(
                 """
-                SELECT i.item_id, i.content_hash, p.due_at
+                SELECT i.item_id, i.content_hash, i.focus, p.due_at
                 FROM items AS i
                 LEFT JOIN scheduler_state AS s
                   ON s.item_id = i.item_id
@@ -370,6 +377,12 @@ class ReviewService:
                 (algorithm, context),
             ).fetchall()
 
+        projects_by_item: dict[str, list[str]] = {}
+        for event in self.workspace.list_transfer_events():
+            projects = projects_by_item.setdefault(event.item_id, [])
+            if event.project_id not in projects:
+                projects.append(event.project_id)
+
         due: list[tuple[datetime, ReviewQueueItem]] = []
         new: list[ReviewQueueItem] = []
         for row in rows:
@@ -378,6 +391,11 @@ class ReviewService:
                     ReviewQueueItem(
                         item_id=row["item_id"],
                         content_hash=row["content_hash"],
+                        focus=row["focus"],
+                        project_ids=tuple(projects_by_item.get(row["item_id"], [])),
+                        selection_reason=(
+                            "Selected a new item in deterministic item-id order."
+                        ),
                         status="new",
                         due_at=None,
                     )
@@ -401,6 +419,13 @@ class ReviewService:
                         ReviewQueueItem(
                             item_id=row["item_id"],
                             content_hash=row["content_hash"],
+                            focus=row["focus"],
+                            project_ids=tuple(
+                                projects_by_item.get(row["item_id"], [])
+                            ),
+                            selection_reason=(
+                                "Selected the earliest due item; ties use item id."
+                            ),
                             status="due",
                             due_at=due_at.isoformat(),
                         ),

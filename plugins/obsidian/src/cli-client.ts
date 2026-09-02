@@ -34,27 +34,48 @@ export interface ProcessRunner {
 
 const MAX_OUTPUT_BYTES = 1_000_000;
 
+export type ProcessRunnerFailureKind = "spawn" | "timeout" | "output-limit";
+
+export class ProcessRunnerError extends Error {
+	constructor(
+		message: string,
+		readonly kind: ProcessRunnerFailureKind,
+	) {
+		super(message);
+		this.name = "ProcessRunnerError";
+	}
+}
+
 export class SpawnProcessRunner implements ProcessRunner {
+	constructor(private readonly timeoutMs = 15_000) {}
+
 	run(invocation: ProcessInvocation): Promise<ProcessResult> {
 		return new Promise((resolve, reject) => {
 			const processHandle = spawn(invocation.executable, invocation.args, {
 				shell: false,
-				timeout: 15_000,
 				windowsHide: true,
 			});
 			let stdout = "";
 			let stderr = "";
 			let settled = false;
+			let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+			const clearDeadline = () => {
+				if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+			};
 			const fail = (error: Error) => {
 				if (settled) return;
 				settled = true;
+				clearDeadline();
 				reject(error);
 			};
 			const append = (current: string, chunk: unknown): string => {
 				const next = current + String(chunk);
 				if (Buffer.byteLength(next, "utf8") > MAX_OUTPUT_BYTES) {
 					processHandle.kill();
-					throw new Error("Virtuoso CLI output exceeded the one-megabyte limit");
+					throw new ProcessRunnerError(
+						"Virtuoso CLI output exceeded the one-megabyte limit",
+						"output-limit",
+					);
 				}
 				return next;
 			};
@@ -72,12 +93,30 @@ export class SpawnProcessRunner implements ProcessRunner {
 					fail(error instanceof Error ? error : new Error(String(error)));
 				}
 			});
-			processHandle.on("error", fail);
+			processHandle.on("error", (error: Error) => {
+				fail(
+					new ProcessRunnerError(
+						`Virtuoso CLI could not start: ${error.message}`,
+						"spawn",
+					),
+				);
+			});
 			processHandle.on("close", (code: number | null) => {
 				if (settled) return;
 				settled = true;
+				clearDeadline();
 				resolve({ exitCode: code ?? -1, stdout, stderr });
 			});
+			timeoutHandle = setTimeout(() => {
+				if (settled) return;
+				processHandle.kill();
+				fail(
+					new ProcessRunnerError(
+						`Virtuoso CLI timed out after ${this.timeoutMs} ms`,
+						"timeout",
+					),
+				);
+			}, this.timeoutMs);
 			if (invocation.stdin === null) processHandle.stdin.end();
 			else processHandle.stdin.end(invocation.stdin, "utf8");
 		});
@@ -160,9 +199,17 @@ export class VirtuosoCliClient implements ReviewClient {
 				stdin,
 			});
 		} catch (error) {
+			const code =
+				error instanceof ProcessRunnerError
+					? error.kind === "timeout"
+						? "process-timeout"
+						: error.kind === "spawn"
+							? "process-spawn-failed"
+							: "process-output-limit"
+					: "process-failure";
 			throw new ReviewClientError(
 				error instanceof Error ? error.message : String(error),
-				"process-failure",
+				code,
 				processRecovery,
 			);
 		}
@@ -178,7 +225,7 @@ export class VirtuosoCliClient implements ReviewClient {
 				if (error instanceof ReviewClientError) throw error;
 				throw new ReviewClientError(
 					result.stderr.trim() || `Virtuoso CLI exited with code ${result.exitCode}`,
-					"process-failure",
+					"process-exit",
 					processRecovery,
 				);
 			}

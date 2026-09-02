@@ -18,12 +18,20 @@ describe("review CLI contract validation", () => {
 				{
 					item_id: "testing-effect",
 					content_hash: HASH,
+					focus: "learning-science",
+					project_ids: ["context-project"],
+					selection_reason: "Selected a new item in deterministic item-id order.",
 					status: "new",
 					due_at: null,
 				},
 			],
 		});
 		expect(queue.items[0].item_id).toBe("testing-effect");
+		expect(queue.items[0].focus).toBe("learning-science");
+		expect(queue.items[0].project_ids).toEqual(["context-project"]);
+		expect(queue.items[0].selection_reason).toBe(
+			"Selected a new item in deterministic item-id order.",
+		);
 
 		const item = parseReviewItem({
 			schema: "virtuoso/review-item@0.1",
