@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -14,12 +14,24 @@ from .workspace import SourceDocument, WorkspaceError, WorkspaceService
 CandidateKind = Literal["atomic-note", "link", "practice"]
 SourceStatus = Literal["current", "changed", "missing", "unsafe"]
 
-GENERATOR_ID = "structural-candidate-queue"
-GENERATOR_VERSION = "0.1"
+STRUCTURAL_GENERATOR_ID = "structural-candidate-queue"
+STRUCTURAL_GENERATOR_VERSION = "0.1"
+CURRICULUM_GENERATOR_ID = "curriculum-markdown-import"
+CURRICULUM_GENERATOR_VERSION = "0.1"
+
+# Backward-compatible names for the original structural generator.
+GENERATOR_ID = STRUCTURAL_GENERATOR_ID
+GENERATOR_VERSION = STRUCTURAL_GENERATOR_VERSION
+
+_ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_FRONTMATTER_FIELD = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
+_PRACTICE_BLOCK = re.compile(
+    r"(?ms)^```virtuoso-practice[ \t]*\n(.*?)[ \t]*\n```[ \t]*$"
+)
 
 
 class CandidateError(WorkspaceError):
-    """A structural candidate could not be generated without losing provenance."""
+    """A candidate operation could not preserve its validation or provenance."""
 
 
 @dataclass(frozen=True)
@@ -64,9 +76,11 @@ class ReviewCandidate:
     authority: str = "proposal"
     review_state: str = "proposed"
     claims_mastery: bool = False
+    decision: str | None = None
+    materialized_item_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": "virtuoso/review-candidate@0.1",
             "candidate_id": self.candidate_id,
             "run_id": self.run_id,
@@ -82,6 +96,11 @@ class ReviewCandidate:
             "proposal": self.proposal,
             "source_status": self.source_status,
         }
+        if self.decision is not None:
+            payload["decision"] = self.decision
+        if self.materialized_item_id is not None:
+            payload["materialized_item_id"] = self.materialized_item_id
+        return payload
 
 
 @dataclass(frozen=True)
@@ -98,6 +117,7 @@ class CandidateRun:
     truncated: bool
     created_at: str
     candidates: tuple[ReviewCandidate, ...]
+    persisted_new: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +155,18 @@ def _normalize(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().casefold()
 
 
+def _validated_source_path(relative_path: str) -> PurePosixPath:
+    path = PurePosixPath(relative_path)
+    if (
+        not relative_path
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() != relative_path
+    ):
+        raise CandidateError("candidate source path must stay inside its source root")
+    return path
+
+
 def _document_snapshot(document: SourceDocument) -> dict[str, object]:
     return {
         "source_id": document.source_id,
@@ -165,11 +197,293 @@ def _snapshot_sha256(catalog: tuple[SourceDocument, ...]) -> str:
     )
 
 
+def _content_snapshot_sha256(document: SourceDocument) -> str:
+    return _sha256_json(
+        {
+            "schema": "virtuoso/source-content-snapshot@0.1",
+            "source_ref": asdict(_indexed_ref(document)),
+        }
+    )
+
+
+def _frontmatter(text: str) -> tuple[dict[str, str], str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise CandidateError("curriculum note must start with YAML frontmatter")
+    fields: dict[str, str] = {}
+    closing_index: int | None = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            closing_index = index
+            break
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _FRONTMATTER_FIELD.fullmatch(line)
+        if match is None:
+            raise CandidateError("curriculum frontmatter must contain scalar fields only")
+        key, raw_value = match.groups()
+        if key in fields:
+            raise CandidateError(f"curriculum frontmatter repeats field: {key}")
+        value = raw_value.strip()
+        if value.startswith('"'):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise CandidateError(
+                    f"curriculum frontmatter field {key} has invalid JSON quoting"
+                ) from exc
+            if not isinstance(decoded, str):
+                raise CandidateError(f"curriculum frontmatter field {key} must be text")
+            value = decoded
+        elif len(value) >= 2 and value[0] == value[-1] == "'":
+            value = value[1:-1]
+        fields[key] = value
+    if closing_index is None:
+        raise CandidateError("curriculum frontmatter is not closed")
+    return fields, "\n".join(lines[closing_index + 1 :])
+
+
+def _practice_item(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise CandidateError("virtuoso-practice block must contain one JSON object")
+    expected_fields = {
+        "schema",
+        "id",
+        "title",
+        "focus",
+        "prompt",
+        "answer",
+        "hint",
+        "follow_up",
+        "state",
+        "historical_due_at",
+    }
+    if set(value) != expected_fields:
+        raise CandidateError("virtuoso-practice fields are malformed")
+    if value["schema"] != "virtuoso/practice-item@0.1":
+        raise CandidateError("unsupported virtuoso-practice schema")
+    item_id = value["id"]
+    if not isinstance(item_id, str) or _ITEM_ID.fullmatch(item_id) is None:
+        raise CandidateError(
+            "practice item id must be lowercase words or numbers separated by single dashes"
+        )
+    if value["state"] != "active":
+        raise CandidateError("unsupported practice item state; expected active")
+    for field, maximum in (
+        ("title", 256),
+        ("focus", 256),
+        ("prompt", 20_000),
+        ("answer", 20_000),
+    ):
+        field_text = value[field]
+        if (
+            not isinstance(field_text, str)
+            or not field_text.strip()
+            or len(field_text) > maximum
+        ):
+            raise CandidateError(
+                f"practice item {field} must contain 1-{maximum} characters"
+            )
+        if any(
+            ord(character) < 32 and character not in {"\n", "\t"}
+            for character in field_text
+        ):
+            raise CandidateError(
+                f"practice item {field} contains unsafe control characters"
+            )
+        if re.search(r"(?m)^# ", field_text):
+            raise CandidateError(
+                f"practice item {field} must not contain a top-level Markdown heading"
+            )
+    for field in ("hint", "follow_up"):
+        field_text = value[field]
+        if field_text is not None and (
+            not isinstance(field_text, str)
+            or not field_text.strip()
+            or len(field_text) > 20_000
+            or re.search(r"(?m)^# ", field_text)
+        ):
+            raise CandidateError(
+                f"practice item {field} must be null or contain 1-20000 safe characters"
+            )
+        if isinstance(field_text, str) and any(
+            ord(character) < 32 and character not in {"\n", "\t"}
+            for character in field_text
+        ):
+            raise CandidateError(
+                f"practice item {field} contains unsafe control characters"
+            )
+    historical_due_at = value["historical_due_at"]
+    if historical_due_at is not None and (
+        not isinstance(historical_due_at, str)
+        or not historical_due_at.strip()
+        or len(historical_due_at) > 128
+    ):
+        raise CandidateError(
+            "practice item historical_due_at must be null or a non-empty string"
+        )
+    return {
+        "schema": "virtuoso/item-draft@0.1",
+        "item_id": item_id,
+        "title": cast(str, value["title"]).strip(),
+        "focus": cast(str, value["focus"]).strip(),
+        "prompt": cast(str, value["prompt"]).strip(),
+        "answer": cast(str, value["answer"]).strip(),
+        "hint": (
+            cast(str, value["hint"]).strip()
+            if value["hint"] is not None
+            else None
+        ),
+        "follow_up": (
+            cast(str, value["follow_up"]).strip()
+            if value["follow_up"] is not None
+            else None
+        ),
+        "learning_context": "atomic-recall",
+        "historical_due_at": historical_due_at,
+    }
+
+
+def _reject_nonfinite(token: str) -> None:
+    raise ValueError(token)
+
+
+def generate_curriculum_candidates(
+    origin: SourceDocument,
+    raw: bytes,
+    *,
+    limit: int = 20,
+) -> CandidateBatch:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+        raise CandidateError("candidate limit must be an integer between 1 and 50")
+    if hashlib.sha256(raw).hexdigest() != origin.content_hash:
+        raise CandidateError(
+            "curriculum note hash does not match the indexed source; rescan it"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CandidateError("curriculum note must be valid UTF-8") from exc
+    fields, body = _frontmatter(text)
+    schema = fields.get("schema")
+    if schema == "virtuoso/curriculum@0.1":
+        blocks = _PRACTICE_BLOCK.findall(body)
+        block_openings = len(
+            re.findall(r"(?m)^```virtuoso-practice[ \t]*$", body)
+        )
+        if block_openings == 0:
+            raise CandidateError(
+                "curriculum note must declare at least one virtuoso-practice block"
+            )
+        if len(blocks) != block_openings:
+            raise CandidateError("curriculum note has an incomplete practice block")
+        items: list[dict[str, object]] = []
+        for block in blocks:
+            try:
+                value = json.loads(block, parse_constant=_reject_nonfinite)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise CandidateError(
+                    "virtuoso-practice block is not finite valid JSON"
+                ) from exc
+            items.append(_practice_item(value))
+    elif schema == "virtuoso/item@0.1":
+        expected_frontmatter = {
+            "schema",
+            "id",
+            "title",
+            "focus",
+            "practice-format",
+            "learning-context",
+        }
+        if set(fields) != expected_frontmatter:
+            raise CandidateError("source item frontmatter fields are malformed")
+        if (
+            fields["practice-format"] != "active-recall"
+            or fields["learning-context"] != "atomic-recall"
+        ):
+            raise CandidateError("source item uses an unsupported practice format or context")
+        items = [
+            _practice_item(
+                {
+                    "schema": "virtuoso/practice-item@0.1",
+                    "id": fields["id"],
+                    "title": fields["title"],
+                    "focus": fields["focus"],
+                    "prompt": WorkspaceService._section(
+                        body, "Prompt", required=True
+                    ),
+                    "answer": WorkspaceService._section(
+                        body, "Answer", required=True
+                    ),
+                    "hint": WorkspaceService._section(body, "Hint", required=False),
+                    "follow_up": WorkspaceService._section(
+                        body, "Follow-up challenge", required=False
+                    ),
+                    "state": "active",
+                    "historical_due_at": None,
+                }
+            )
+        ]
+    else:
+        raise CandidateError("unsupported curriculum note schema")
+    item_ids = [cast(str, item["item_id"]) for item in items]
+    duplicate_ids = sorted(
+        item_id for item_id in set(item_ids) if item_ids.count(item_id) > 1
+    )
+    if duplicate_ids:
+        raise CandidateError(
+            "curriculum note repeats practice item ids: " + ", ".join(duplicate_ids)
+        )
+    items.sort(key=lambda item: cast(str, item["item_id"]))
+    origin_ref = _indexed_ref(origin)
+    drafts = [
+        CandidateDraft(
+            kind="practice",
+            title=cast(str, item["title"]),
+            reason_code="curriculum-practice-import",
+            rationale=(
+                "The explicitly selected curriculum note declares this versioned "
+                "practice item for human review before import."
+            ),
+            uncertainty=(
+                "The source due value is historical metadata and will not create "
+                "scheduler state."
+                if item["historical_due_at"] is not None
+                else None
+            ),
+            proposal={
+                "schema": "virtuoso/practice-import-candidate@0.1",
+                "mode": "import",
+                "adapter_id": CURRICULUM_GENERATOR_ID,
+                "adapter_version": CURRICULUM_GENERATOR_VERSION,
+                "item": item,
+                "requires_human_decision": True,
+                "creates_learning_item": True,
+                "creates_scheduler_state": False,
+                "creates_evidence_event": False,
+            },
+            source_refs=(origin_ref,),
+        )
+        for item in items
+    ]
+    omitted_count = max(0, len(drafts) - limit)
+    return CandidateBatch(
+        drafts=tuple(drafts[:limit]),
+        snapshot_sha256=_content_snapshot_sha256(origin),
+        omitted_count=omitted_count,
+        truncated=omitted_count > 0,
+    )
+
+
 def _draft_sort_key(draft: CandidateDraft) -> tuple[int, str, str]:
     if draft.reason_code == "resolved-link-practice" and draft.title.startswith(
         "Connection practice: "
     ):
         target = draft.title.removeprefix("Connection practice: ")
+    elif draft.reason_code == "curriculum-practice-import" and isinstance(
+        draft.proposal.get("item"), dict
+    ):
+        target = str(cast(dict[str, object], draft.proposal["item"]).get("item_id", ""))
     else:
         target = str(draft.proposal.get("observed_target", ""))
     return (
@@ -307,6 +621,65 @@ def _validate_draft(
             raise CandidateError("link candidate options do not match exact source refs")
         return
 
+    if proposal.get("schema") == "virtuoso/practice-import-candidate@0.1":
+        expected_fields = {
+            "schema",
+            "mode",
+            "adapter_id",
+            "adapter_version",
+            "item",
+            "requires_human_decision",
+            "creates_learning_item",
+            "creates_scheduler_state",
+            "creates_evidence_event",
+        }
+        item = proposal.get("item")
+        expected_item_fields = {
+            "schema",
+            "item_id",
+            "title",
+            "focus",
+            "prompt",
+            "answer",
+            "hint",
+            "follow_up",
+            "learning_context",
+            "historical_due_at",
+        }
+        if (
+            set(proposal) != expected_fields
+            or draft.reason_code != "curriculum-practice-import"
+            or draft.kind != "practice"
+            or proposal["mode"] != "import"
+            or proposal["adapter_id"] != CURRICULUM_GENERATOR_ID
+            or proposal["adapter_version"] != CURRICULUM_GENERATOR_VERSION
+            or proposal["requires_human_decision"] is not True
+            or proposal["creates_learning_item"] is not True
+            or proposal["creates_scheduler_state"] is not False
+            or proposal["creates_evidence_event"] is not False
+            or not isinstance(item, dict)
+            or set(item) != expected_item_fields
+            or item.get("schema") != "virtuoso/item-draft@0.1"
+            or item.get("learning_context") != "atomic-recall"
+            or len(draft.source_refs) != 1
+        ):
+            raise CandidateError("practice import candidate proposal is malformed")
+        source_shape = {
+            "schema": "virtuoso/practice-item@0.1",
+            "id": item["item_id"],
+            "title": item["title"],
+            "focus": item["focus"],
+            "prompt": item["prompt"],
+            "answer": item["answer"],
+            "hint": item["hint"],
+            "follow_up": item["follow_up"],
+            "state": "active",
+            "historical_due_at": item["historical_due_at"],
+        }
+        if _practice_item(source_shape) != item:
+            raise CandidateError("practice import candidate item is malformed")
+        return
+
     expected_fields = {
         "schema",
         "mode",
@@ -342,6 +715,7 @@ def _validate_batch(
     origin: SourceDocument,
     catalog: tuple[SourceDocument, ...],
     limit: int,
+    expected_snapshot_sha256: str | None = None,
 ) -> None:
     if not isinstance(batch, CandidateBatch):
         raise CandidateError("candidate generator returned a malformed batch")
@@ -355,7 +729,8 @@ def _validate_batch(
         or batch.truncated != (batch.omitted_count > 0)
     ):
         raise CandidateError("candidate generator returned malformed truncation metadata")
-    if batch.snapshot_sha256 != _snapshot_sha256(catalog):
+    expected_snapshot = expected_snapshot_sha256 or _snapshot_sha256(catalog)
+    if batch.snapshot_sha256 != expected_snapshot:
         raise CandidateError("candidate snapshot hash does not match indexed source provenance")
     catalog_refs = {
         (document.source_id, document.relative_path): _indexed_ref(document)
@@ -546,10 +921,10 @@ class CandidateService:
         source_id: str,
         relative_path: str,
         limit: int = 20,
+        adapter: str = "structural",
+        persist: bool = True,
     ) -> CandidateRun:
-        path = PurePosixPath(relative_path)
-        if not relative_path or path.is_absolute() or ".." in path.parts:
-            raise CandidateError("candidate source path must stay inside its source root")
+        path = _validated_source_path(relative_path)
         normalized_path = path.as_posix()
         catalog = tuple(self.workspace.list_source_documents(source_id))
         origin = next(
@@ -564,12 +939,36 @@ class CandidateService:
             raise CandidateError(
                 f"source note is not indexed: {source_id}/{normalized_path}; scan it first"
             )
-        batch = generate_structural_candidates(origin, catalog, limit=limit)
+        if adapter == "structural":
+            generator_id = STRUCTURAL_GENERATOR_ID
+            generator_version = STRUCTURAL_GENERATOR_VERSION
+            batch = generate_structural_candidates(origin, catalog, limit=limit)
+            expected_snapshot = _snapshot_sha256(catalog)
+        elif adapter == "curriculum":
+            generator_id = CURRICULUM_GENERATOR_ID
+            generator_version = CURRICULUM_GENERATOR_VERSION
+            source = self.workspace._source(source_id)
+            try:
+                raw = self.workspace._read_source_document_bytes(
+                    source.root,
+                    normalized_path,
+                    max_bytes=origin.byte_size,
+                )
+            except WorkspaceError as exc:
+                raise CandidateError(
+                    "curriculum note changed or became unsafe; rescan the source: "
+                    f"{exc}"
+                ) from exc
+            batch = generate_curriculum_candidates(origin, raw, limit=limit)
+            expected_snapshot = _content_snapshot_sha256(origin)
+        else:
+            raise CandidateError("candidate adapter must be structural or curriculum")
         _validate_batch(
             batch,
             origin=origin,
             catalog=catalog,
             limit=limit,
+            expected_snapshot_sha256=expected_snapshot,
         )
         referenced_notes = tuple(
             dict.fromkeys(
@@ -585,8 +984,8 @@ class CandidateService:
             )
         run_digest = _sha256_json(
             {
-                "generator_id": GENERATOR_ID,
-                "generator_version": GENERATOR_VERSION,
+                "generator_id": generator_id,
+                "generator_version": generator_version,
                 "source_id": source_id,
                 "scope_relative_path": normalized_path,
                 "snapshot_sha256": batch.snapshot_sha256,
@@ -600,8 +999,8 @@ class CandidateService:
         for ordinal, draft in enumerate(batch.drafts):
             candidate_digest = _sha256_json(
                 {
-                    "generator_id": GENERATOR_ID,
-                    "generator_version": GENERATOR_VERSION,
+                    "generator_id": generator_id,
+                    "generator_version": generator_version,
                     "snapshot_sha256": batch.snapshot_sha256,
                     "source_id": source_id,
                     "scope_relative_path": normalized_path,
@@ -660,8 +1059,8 @@ class CandidateService:
             )
         run_record = {
             "run_id": run_id,
-            "generator_id": GENERATOR_ID,
-            "generator_version": GENERATOR_VERSION,
+            "generator_id": generator_id,
+            "generator_version": generator_version,
             "source_id": source_id,
             "scope_relative_path": normalized_path,
             "snapshot_sha256": batch.snapshot_sha256,
@@ -671,15 +1070,80 @@ class CandidateService:
             "truncated": batch.truncated,
             "created_at": created_at,
         }
-        stored_created_at = self.workspace.persist_candidate_run(
-            run=run_record,
-            candidates=storage_candidates,
-        )
-        run_record["created_at"] = stored_created_at
+        persisted_new = False
+        if persist:
+            stored_created_at, persisted_new = self.workspace.persist_candidate_run(
+                run=run_record,
+                candidates=storage_candidates,
+            )
+            run_record["created_at"] = stored_created_at
         return CandidateRun(
             **run_record,
             candidates=tuple(candidates),
+            persisted_new=persisted_new,
         )
+
+    def delta(
+        self,
+        *,
+        source_id: str,
+        relative_path: str,
+        limit: int = 20,
+    ) -> CandidateRun | None:
+        """Persist a curriculum run only when its exact source snapshot is new."""
+        path = _validated_source_path(relative_path)
+        source = self.workspace._source(source_id)
+        try:
+            raw = self.workspace._read_source_document_bytes(
+                source.root,
+                relative_path,
+                max_bytes=2_000_000,
+            )
+        except WorkspaceError as exc:
+            raise CandidateError(f"curriculum note cannot be scanned safely: {exc}") from exc
+        current_hash = hashlib.sha256(raw).hexdigest()
+        indexed = next(
+            (
+                document
+                for document in self.workspace.list_source_documents(source_id)
+                if document.relative_path == relative_path
+            ),
+            None,
+        )
+        if indexed is None or indexed.content_hash != current_hash:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise CandidateError("curriculum note must be valid UTF-8") from exc
+            current_document = SourceDocument(
+                source_id=source_id,
+                relative_path=relative_path,
+                title=WorkspaceService._source_title(text, path.stem),
+                content_hash=current_hash,
+                wikilinks=WorkspaceService._wikilinks(text),
+                modified_ns=0,
+                byte_size=len(raw),
+            )
+            # Validate the complete proposal before the source index changes.
+            generate_curriculum_candidates(current_document, raw, limit=limit)
+            self.workspace.scan_source(source_id)
+        preview = self.generate(
+            source_id=source_id,
+            relative_path=relative_path,
+            limit=limit,
+            adapter="curriculum",
+            persist=False,
+        )
+        if self.workspace.candidate_run_exists(preview.run_id):
+            return None
+        persisted = self.generate(
+            source_id=source_id,
+            relative_path=relative_path,
+            limit=limit,
+            adapter="curriculum",
+            persist=True,
+        )
+        return persisted if persisted.persisted_new else None
 
     def list(
         self,
@@ -719,17 +1183,72 @@ class CandidateService:
         candidate_id: str,
         decision: str,
         note: str | None,
+        edits: dict[str, object] | None = None,
     ) -> ReviewCandidate:
-        """Record a human accept/reject decision on a proposed candidate.
-
-        The decision is append-only evidence. It never mutates the vault,
-        the item pool, scheduler state, or the proposal itself.
-        """
-        if decision not in {"accept", "reject"}:
-            raise CandidateError("candidate decision must be accept or reject")
+        """Record one human decision and import an accepted curriculum item."""
+        if decision not in {"accept", "edit", "skip", "reject"}:
+            raise CandidateError(
+                "candidate decision must be accept, edit, skip, or reject"
+            )
         if note is not None and not (1 <= len(note) <= 2000):
             raise CandidateError("candidate decision note must be 1-2000 characters")
         candidate = self.get(candidate_id)
+        if candidate.decision is not None:
+            raise CandidateError(
+                f"a decision for candidate {candidate.candidate_id} already exists"
+            )
+        is_import = (
+            candidate.proposal.get("schema")
+            == "virtuoso/practice-import-candidate@0.1"
+        )
+        materialized_item: dict[str, Any] | None = None
+        if decision in {"accept", "edit"} and is_import:
+            if candidate.source_status != "current":
+                raise CandidateError(
+                    f"candidate source snapshot is {candidate.source_status}; "
+                    "generate a new candidate before importing"
+                )
+            proposed = candidate.proposal.get("item")
+            if not isinstance(proposed, dict):
+                raise CandidateError("import candidate item is malformed")
+            materialized_item = {
+                key: proposed[key]
+                for key in (
+                    "item_id",
+                    "title",
+                    "focus",
+                    "prompt",
+                    "answer",
+                    "hint",
+                    "follow_up",
+                )
+            }
+            if decision == "accept":
+                if edits:
+                    raise CandidateError("accept does not allow item edits; use edit")
+            else:
+                allowed_edits = {
+                    "item_id",
+                    "title",
+                    "focus",
+                    "prompt",
+                    "answer",
+                    "hint",
+                    "follow_up",
+                }
+                if not edits:
+                    raise CandidateError("edit requires at least one item field")
+                unknown = sorted(set(edits) - allowed_edits)
+                if unknown:
+                    raise CandidateError(
+                        "unknown candidate edit fields: " + ", ".join(unknown)
+                    )
+                materialized_item.update(edits)
+        elif decision == "edit":
+            raise CandidateError("only curriculum import candidates support edit")
+        elif edits:
+            raise CandidateError(f"{decision} does not allow item edits")
+
         decided_at = datetime.now(timezone.utc).isoformat()
         decision_id = "decision-" + hashlib.sha256(
             json.dumps(
@@ -742,20 +1261,19 @@ class CandidateService:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        try:
-            with self.workspace._connect() as db:
-                db.execute(
-                    """
-                    INSERT INTO candidate_decisions(
-                        decision_id, candidate_id, decision, note, decided_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (decision_id, candidate.candidate_id, decision, note, decided_at),
-                )
-        except sqlite3.IntegrityError as exc:
-            raise CandidateError(
-                f"a decision for candidate {candidate.candidate_id} already exists"
-            ) from exc
+        self.workspace.record_candidate_decision(
+            decision_id=decision_id,
+            candidate_id=candidate.candidate_id,
+            action=decision,
+            note=note,
+            decided_at=decided_at,
+            item=materialized_item,
+            source_refs=(
+                [asdict(source_ref) for source_ref in candidate.source_refs]
+                if materialized_item is not None
+                else []
+            ),
+        )
         return self.get(candidate_id)
 
     @staticmethod
@@ -768,11 +1286,17 @@ class CandidateService:
         )
 
     def _candidate_from_record(self, record: dict[str, Any]) -> ReviewCandidate:
+        supported_generator = (
+            record.get("generator_id"),
+            record.get("generator_version"),
+        ) in {
+            (STRUCTURAL_GENERATOR_ID, STRUCTURAL_GENERATOR_VERSION),
+            (CURRICULUM_GENERATOR_ID, CURRICULUM_GENERATOR_VERSION),
+        }
         if (
             not self._has_derived_id(record.get("run_id"), prefix="candidate-run-")
             or not self._has_derived_id(record.get("candidate_id"), prefix="candidate-")
-            or record.get("generator_id") != GENERATOR_ID
-            or record.get("generator_version") != GENERATOR_VERSION
+            or not supported_generator
             or record.get("kind") not in {"atomic-note", "link", "practice"}
             or record.get("authority") != "proposal"
             or record.get("review_state") != "proposed"
@@ -922,6 +1446,8 @@ class CandidateService:
             source_refs=draft.source_refs,
             source_status=self._source_status(draft.source_refs),
             review_state=record.get("effective_review_state") or "proposed",
+            decision=record.get("decision_action"),
+            materialized_item_id=record.get("materialized_item_id"),
         )
 
     def _source_status(self, refs: tuple[IndexedNoteRef, ...]) -> SourceStatus:

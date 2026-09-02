@@ -58,7 +58,15 @@ Scheduling is explainable: each attempt produces a scheduler proposal carrying t
 
 ### Read-only sources
 
-Connect any Markdown folder or Obsidian vault as a source. Virtuoso indexes paths, titles, hashes and wikilinks; it never writes to your notes and never copies their prose into its database.
+Connect any Markdown folder or Obsidian vault as a source. A normal source scan stores paths, titles, hashes and wikilinks. It does not copy note prose into SQLite or write to the source.
+
+### Reviewed practice import
+
+A selected note can declare complete practice items with the public `virtuoso/curriculum@0.1` format. Run `candidate generate --adapter curriculum` to place those items in the review queue. Use `--dry-run` to inspect the exact proposals without a database write. Each proposal keeps the adapter version and exact source hash.
+
+`candidate decide --decision accept` creates the proposed Markdown item and its source link. `edit` creates the reviewed version. `skip` records the choice without creating an item. Historical due values stay in the proposal as context; they never seed FSRS state or create attempt evidence.
+
+For scheduled checks, `candidate delta` writes a new run only when the selected note changes. An unchanged run exits successfully with no output, so cron does not send empty notifications. The source remains byte-for-byte unchanged throughout the import.
 
 ### Project transfer evidence
 
@@ -84,7 +92,7 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 
 - Virtuoso has no XP, streaks, leaderboards or moral scoring.
 - Virtuoso uses no cloud service, account or telemetry.
-- Virtuoso does not generate content automatically. You author the items. A review-candidate pipeline can propose structural practice from indexed notes, and a human decides whether to accept it.
+- Virtuoso does not invent practice content automatically. Structural candidates contain no drafted answer. Curriculum import accepts only complete items that the selected source note declares, then waits for a human decision.
 - A single event never creates a mastery claim.
 - The CLI runs without Obsidian, an agent or a model.
 

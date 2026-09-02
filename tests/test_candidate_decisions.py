@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from conftest import downgrade_candidate_decisions_to_v10
 from virtuoso.workspace import WorkspaceService, WorkspaceError
 
 
@@ -105,6 +106,48 @@ class CandidateDecisionTests(unittest.TestCase):
         )
         listed = self.service.list(source_id="vault")
         self.assertEqual(listed[0].review_state, "accepted")
+
+    def test_v10_decision_migrates_without_inventing_materialized_item(self) -> None:
+        with sqlite3.connect(self.workspace.db_path) as db:
+            downgrade_candidate_decisions_to_v10(db)
+            db.execute("DELETE FROM schema_migrations WHERE version = 11")
+            db.execute(
+                """INSERT INTO candidate_decisions(
+                       decision_id, candidate_id, decision, note, decided_at
+                   ) VALUES (?, ?, 'accept', 'legacy decision', ?)""",
+                (
+                    "decision-legacy",
+                    self.candidate_id,
+                    "2026-08-20T10:00:00+00:00",
+                ),
+            )
+
+        reopened = WorkspaceService.open(self.workspace.root)
+        module = importlib.import_module("virtuoso.candidates")
+        candidate = module.CandidateService(reopened).get(self.candidate_id)
+
+        self.assertEqual(candidate.review_state, "accepted")
+        self.assertEqual(candidate.decision, "accept")
+        self.assertIsNone(candidate.materialized_item_id)
+        with sqlite3.connect(reopened.db_path) as db:
+            version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+            row = db.execute(
+                """SELECT action, item_json, materialized_item_id
+                   FROM candidate_decisions WHERE candidate_id = ?""",
+                (self.candidate_id,),
+            ).fetchone()
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "inconsistent"):
+                db.execute(
+                    """INSERT INTO candidate_decisions(
+                           decision_id, candidate_id, decision, note, decided_at,
+                           action, item_json, materialized_item_id
+                       ) VALUES (
+                           'decision-invalid', 'candidate-missing', 'accept', NULL,
+                           '2026-08-20T10:01:00+00:00', 'edit', NULL, NULL
+                       )"""
+                )
+        self.assertEqual(version, 11)
+        self.assertEqual(row, (None, None, None))
 
 
 if __name__ == "__main__":

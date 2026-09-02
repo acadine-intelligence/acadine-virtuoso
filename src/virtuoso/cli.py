@@ -198,7 +198,7 @@ def _parser() -> argparse.ArgumentParser:
     source_notes.add_argument("--json", action="store_true")
 
     candidate = commands.add_parser(
-        "candidate", help="surface metadata-only structural review candidates"
+        "candidate", help="generate and decide source-backed review candidates"
     )
     candidate_commands = candidate.add_subparsers(
         dest="candidate_command", required=True
@@ -208,10 +208,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     candidate_generate.add_argument("--source", required=True)
     candidate_generate.add_argument("--path", required=True)
+    candidate_generate.add_argument(
+        "--adapter",
+        choices=("structural", "curriculum"),
+        default="structural",
+        help="select metadata-only structural or explicit curriculum import proposals",
+    )
     candidate_generate.add_argument("--limit", type=int, default=20)
+    candidate_generate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and report candidates without writing the workspace database",
+    )
     candidate_generate.add_argument("--json", action="store_true")
+    candidate_delta = candidate_commands.add_parser(
+        "delta",
+        help="scan one curriculum note and write candidates only when it changed",
+    )
+    candidate_delta.add_argument("--source", required=True)
+    candidate_delta.add_argument("--path", required=True)
+    candidate_delta.add_argument("--limit", type=int, default=20)
+    candidate_delta.add_argument("--json", action="store_true")
     candidate_list = candidate_commands.add_parser(
-        "list", help="list proposed structural candidates"
+        "list", help="list review candidates"
     )
     candidate_list.add_argument("--source")
     candidate_list.add_argument(
@@ -227,12 +246,21 @@ def _parser() -> argparse.ArgumentParser:
     candidate_show.add_argument("--json", action="store_true")
 
     candidate_decide = candidate_commands.add_parser(
-        "decide", help="record a human accept/reject decision"
+        "decide", help="record a human review decision"
     )
     candidate_decide.add_argument("--id", required=True)
     candidate_decide.add_argument(
-        "--decision", required=True, choices=["accept", "reject"]
+        "--decision",
+        required=True,
+        choices=["accept", "edit", "skip", "reject"],
     )
+    candidate_decide.add_argument("--item-id")
+    candidate_decide.add_argument("--title")
+    candidate_decide.add_argument("--focus")
+    candidate_decide.add_argument("--prompt")
+    candidate_decide.add_argument("--answer")
+    candidate_decide.add_argument("--hint")
+    candidate_decide.add_argument("--follow-up")
     candidate_decide.add_argument("--note")
     candidate_decide.add_argument("--json", action="store_true")
 
@@ -570,8 +598,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source_id=args.source,
                     relative_path=args.path,
                     limit=args.limit,
+                    adapter=args.adapter,
+                    persist=not args.dry_run,
                 )
                 _emit(run.to_dict(), as_json=args.json)
+                return 0
+            if args.candidate_command == "delta":
+                run = service.delta(
+                    source_id=args.source,
+                    relative_path=args.path,
+                    limit=args.limit,
+                )
+                if run is not None:
+                    _emit(run.to_dict(), as_json=args.json)
                 return 0
             if args.candidate_command == "list":
                 candidates = service.list(
@@ -592,10 +631,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _emit(service.get(args.id).to_dict(), as_json=args.json)
                 return 0
             if args.candidate_command == "decide":
+                edit_values = {
+                    "item_id": args.item_id,
+                    "title": args.title,
+                    "focus": args.focus,
+                    "prompt": args.prompt,
+                    "answer": args.answer,
+                    "hint": args.hint,
+                    "follow_up": args.follow_up,
+                }
+                edits = {
+                    field: value
+                    for field, value in edit_values.items()
+                    if value is not None
+                }
                 result = service.decide(
                     candidate_id=args.id,
                     decision=args.decision,
                     note=args.note,
+                    edits=edits or None,
                 )
                 _emit(result.to_dict(), as_json=args.json)
                 return 0
