@@ -30,7 +30,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 10
+_CURRENT_MIGRATION_VERSION = 11
 
 
 class WorkspaceError(RuntimeError):
@@ -911,6 +911,83 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'administered attempts record no measured timing');
                 END""",
+            """ALTER TABLE candidate_decisions ADD COLUMN action TEXT
+                CHECK(
+                    action IS NULL
+                    OR action IN ('accept','edit','skip','reject')
+                )""",
+            """ALTER TABLE candidate_decisions ADD COLUMN item_json TEXT
+                CHECK(item_json IS NULL OR json_valid(item_json))""",
+            """ALTER TABLE candidate_decisions ADD COLUMN materialized_item_id TEXT
+                REFERENCES items(item_id) ON UPDATE RESTRICT ON DELETE RESTRICT""",
+            """CREATE TRIGGER candidate_decisions_validate_action
+                BEFORE INSERT ON candidate_decisions
+                WHEN
+                    NEW.action IS NULL
+                    OR NEW.decision <> CASE
+                        WHEN NEW.action IN ('accept','edit') THEN 'accept'
+                        ELSE 'reject'
+                    END
+                    OR (NEW.item_json IS NULL) <> (NEW.materialized_item_id IS NULL)
+                    OR (
+                        NEW.item_json IS NOT NULL
+                        AND (
+                            json_type(NEW.item_json, '$.item_id') <> 'text'
+                            OR json_extract(NEW.item_json, '$.item_id')
+                                IS NOT NEW.materialized_item_id
+                        )
+                    )
+                    OR (NEW.action = 'edit' AND NEW.item_json IS NULL)
+                    OR (
+                        NEW.action IN ('accept','edit')
+                        AND COALESCE(
+                            (
+                                SELECT json_extract(
+                                    proposal_json,
+                                    '$.creates_learning_item'
+                                )
+                                FROM review_candidates
+                                WHERE candidate_id = NEW.candidate_id
+                            ),
+                            0
+                        ) = 1
+                        AND NEW.item_json IS NULL
+                    )
+                    OR (
+                        NEW.item_json IS NOT NULL
+                        AND COALESCE(
+                            (
+                                SELECT json_extract(
+                                    proposal_json,
+                                    '$.creates_learning_item'
+                                )
+                                FROM review_candidates
+                                WHERE candidate_id = NEW.candidate_id
+                            ),
+                            0
+                        ) = 0
+                    )
+                    OR (
+                        NEW.action = 'edit'
+                        AND COALESCE(
+                            (
+                                SELECT json_extract(
+                                    proposal_json,
+                                    '$.creates_learning_item'
+                                )
+                                FROM review_candidates
+                                WHERE candidate_id = NEW.candidate_id
+                            ),
+                            0
+                        ) = 0
+                    )
+                    OR (
+                        NEW.action IN ('skip','reject')
+                        AND NEW.item_json IS NOT NULL
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate decision action is inconsistent');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -982,7 +1059,8 @@ class WorkspaceService:
                 7: statements[24:27],
                 8: statements[27:28],
                 9: statements[28:31],
-                10: statements[31:],
+                10: statements[31:48],
+                11: statements[48:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -1454,13 +1532,293 @@ class WorkspaceService:
             "relative_path": normalized_path,
         }
 
+    def record_candidate_decision(
+        self,
+        *,
+        decision_id: str,
+        candidate_id: str,
+        action: str,
+        note: str | None,
+        decided_at: str,
+        item: dict[str, Any] | None,
+        source_refs: list[dict[str, str]],
+    ) -> None:
+        """Record a review decision and atomically create an accepted import item."""
+        self._validate_owned_paths(require_database=True)
+        if action not in {"accept", "edit", "skip", "reject"}:
+            raise WorkspaceError("candidate decision action is invalid")
+        if item is None and source_refs:
+            raise WorkspaceError("candidate decision source refs require an item")
+        normalized_item: dict[str, Any] | None = None
+        if item is not None:
+            self._require_exact_fields(
+                item,
+                {"item_id", "title", "focus", "prompt", "answer", "hint", "follow_up"},
+                "candidate item",
+            )
+            item_id = item["item_id"]
+            if not isinstance(item_id, str) or not _ITEM_ID.fullmatch(item_id):
+                raise WorkspaceError(
+                    "item id must be lowercase words or numbers separated by single dashes"
+                )
+            for field, maximum in (
+                ("title", 256),
+                ("focus", 256),
+                ("prompt", 20_000),
+                ("answer", 20_000),
+            ):
+                value = item[field]
+                if (
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or len(value) > maximum
+                ):
+                    raise WorkspaceError(
+                        f"candidate item {field} must contain 1-{maximum} characters"
+                    )
+                if any(
+                    ord(character) < 32 and character not in {"\n", "\t"}
+                    for character in value
+                ):
+                    raise WorkspaceError(
+                        f"candidate item {field} contains unsafe control characters"
+                    )
+            for field in ("hint", "follow_up"):
+                value = item[field]
+                if value is not None and (
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or len(value) > 20_000
+                ):
+                    raise WorkspaceError(
+                        f"candidate item {field} must be null or contain 1-20000 characters"
+                    )
+                if isinstance(value, str) and any(
+                    ord(character) < 32 and character not in {"\n", "\t"}
+                    for character in value
+                ):
+                    raise WorkspaceError(
+                        f"candidate item {field} contains unsafe control characters"
+                    )
+            authored = [
+                str(item["title"]),
+                str(item["focus"]),
+                str(item["prompt"]),
+                str(item["answer"]),
+                str(item["hint"] or ""),
+                str(item["follow_up"] or ""),
+            ]
+            if any(re.search(r"(?m)^# ", value) for value in authored):
+                raise WorkspaceError(
+                    "item fields must not contain top-level Markdown headings; use ## or plain text"
+                )
+            if not source_refs:
+                raise WorkspaceError("an imported candidate item must keep a source reference")
+            normalized_item = {
+                "item_id": item_id,
+                "title": str(item["title"]).strip(),
+                "focus": str(item["focus"]).strip(),
+                "prompt": str(item["prompt"]).strip(),
+                "answer": str(item["answer"]).strip(),
+                "hint": (
+                    str(item["hint"]).strip() if item["hint"] is not None else None
+                ),
+                "follow_up": (
+                    str(item["follow_up"]).strip()
+                    if item["follow_up"] is not None
+                    else None
+                ),
+            }
+            path = self.items_dir / f"{item_id}.md"
+            text = self._render_item(**normalized_item)
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            item_json = json.dumps(
+                normalized_item,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        else:
+            item_id = None
+            path = None
+            text = None
+            content_hash = None
+            item_json = None
+
+        expected_refs: list[tuple[int, str, str, str, str]] = []
+        for ordinal, source_ref in enumerate(source_refs):
+            if set(source_ref) != {
+                "source_id",
+                "relative_path",
+                "title",
+                "content_hash",
+            }:
+                raise WorkspaceError("candidate decision source ref is malformed")
+            relative = Path(source_ref["relative_path"])
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or relative.as_posix() != source_ref["relative_path"]
+            ):
+                raise WorkspaceError("candidate decision source ref path is unsafe")
+            expected_refs.append(
+                (
+                    ordinal,
+                    source_ref["source_id"],
+                    source_ref["relative_path"],
+                    source_ref["title"],
+                    source_ref["content_hash"],
+                )
+            )
+
+        file_identity: tuple[int, int] | None = None
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                candidate = db.execute(
+                    "SELECT candidate_id FROM review_candidates WHERE candidate_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+                if candidate is None:
+                    raise WorkspaceError(f"no review candidate with id: {candidate_id}")
+                existing_decision = db.execute(
+                    "SELECT decision_id FROM candidate_decisions WHERE candidate_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+                if existing_decision is not None:
+                    raise WorkspaceError(
+                        f"a decision for candidate {candidate_id} already exists"
+                    )
+                stored_refs = [
+                    tuple(row)
+                    for row in db.execute(
+                        """SELECT ordinal, source_id, relative_path, title, content_hash
+                           FROM candidate_source_refs
+                           WHERE candidate_id = ? ORDER BY ordinal""",
+                        (candidate_id,),
+                    ).fetchall()
+                ]
+                if item is not None and stored_refs != expected_refs:
+                    raise WorkspaceError(
+                        "candidate decision source refs do not match the stored proposal"
+                    )
+                if item is not None:
+                    assert item_id is not None
+                    assert path is not None
+                    assert text is not None
+                    assert content_hash is not None
+                    assert normalized_item is not None
+                    if db.execute(
+                        "SELECT item_id FROM items WHERE item_id = ?", (item_id,)
+                    ).fetchone() is not None:
+                        raise WorkspaceError(f"item already exists: {item_id}")
+                    if path.is_symlink():
+                        raise WorkspaceError(f"item path must not be a symlink: {item_id}")
+                    if path.exists():
+                        raise WorkspaceError(f"item already exists: {item_id}")
+                    for source_ref in source_refs:
+                        indexed = db.execute(
+                            """SELECT d.content_hash, d.byte_size, s.root_path
+                               FROM source_documents AS d
+                               JOIN sources AS s ON s.source_id = d.source_id
+                               WHERE d.source_id = ? AND d.relative_path = ?""",
+                            (source_ref["source_id"], source_ref["relative_path"]),
+                        ).fetchone()
+                        if (
+                            indexed is None
+                            or indexed["content_hash"] != source_ref["content_hash"]
+                        ):
+                            raise WorkspaceError(
+                                "candidate source hash is stale; run source scan and generate a new candidate"
+                            )
+                        raw = self._read_source_document_bytes(
+                            Path(indexed["root_path"]),
+                            source_ref["relative_path"],
+                            max_bytes=indexed["byte_size"],
+                        )
+                        if hashlib.sha256(raw).hexdigest() != source_ref["content_hash"]:
+                            raise WorkspaceError(
+                                "candidate source changed after indexing; run source scan and generate a new candidate"
+                            )
+                    file_identity = self._write_private_text_exclusive(
+                        path, text, label="learning item"
+                    )
+                    db.execute(
+                        """INSERT INTO items(
+                               item_id, title, focus, relative_path, content_hash
+                           ) VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            item_id,
+                            normalized_item["title"],
+                            normalized_item["focus"],
+                            f"items/{path.name}",
+                            content_hash,
+                        ),
+                    )
+                    for source_ref in source_refs:
+                        db.execute(
+                            """INSERT INTO item_source_links(
+                                   item_id, source_id, source_relative_path,
+                                   source_content_hash, linked_at
+                               ) VALUES (?, ?, ?, ?, ?)""",
+                            (
+                                item_id,
+                                source_ref["source_id"],
+                                source_ref["relative_path"],
+                                source_ref["content_hash"],
+                                decided_at,
+                            ),
+                        )
+                coarse_decision = (
+                    "accept" if action in {"accept", "edit"} else "reject"
+                )
+                db.execute(
+                    """INSERT INTO candidate_decisions(
+                           decision_id, candidate_id, decision, note, decided_at,
+                           action, item_json, materialized_item_id
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        decision_id,
+                        candidate_id,
+                        coarse_decision,
+                        note,
+                        decided_at,
+                        action,
+                        item_json,
+                        item_id,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            if file_identity is not None and path is not None:
+                self._unlink_if_identity(path, file_identity)
+            raise WorkspaceError(f"candidate decision could not be recorded: {exc}") from exc
+        except sqlite3.Error as exc:
+            if file_identity is not None and path is not None:
+                self._unlink_if_identity(path, file_identity)
+            raise WorkspaceError(f"workspace database write failed: {exc}") from exc
+        except WorkspaceError:
+            if file_identity is not None and path is not None:
+                self._unlink_if_identity(path, file_identity)
+            raise
+
+    def candidate_run_exists(self, run_id: str) -> bool:
+        with self._connect() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM candidate_runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                is not None
+            )
+
     def persist_candidate_run(
         self,
         *,
         run: dict[str, Any],
         candidates: list[dict[str, Any]],
-    ) -> str:
-        """Atomically persist one core-generated metadata-only candidate run."""
+    ) -> tuple[str, bool]:
+        """Atomically persist one validated core-generated candidate run."""
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
@@ -1556,7 +1914,7 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "immutable candidate run id collides with different stored data"
                     )
-                return str(existing["created_at"])
+                return str(existing["created_at"]), False
 
             db.execute(
                 """
@@ -1623,7 +1981,7 @@ class WorkspaceService:
                             source_ref["content_hash"],
                         ),
                     )
-        return str(run["created_at"])
+        return str(run["created_at"]), True
 
     def candidate_records(
         self,
@@ -1659,11 +2017,15 @@ class WorkspaceService:
                        r.source_id AS run_source_id,
                        r.scope_relative_path, r.snapshot_sha256,
                        r.max_candidates,
-                       CASE
-                           WHEN d.decision = 'accept' THEN 'accepted'
-                           WHEN d.decision = 'reject' THEN 'rejected'
+                       CASE COALESCE(d.action, d.decision)
+                           WHEN 'accept' THEN 'accepted'
+                           WHEN 'edit' THEN 'accepted'
+                           WHEN 'skip' THEN 'skipped'
+                           WHEN 'reject' THEN 'rejected'
                            ELSE c.review_state
-                       END AS effective_review_state
+                       END AS effective_review_state,
+                       COALESCE(d.action, d.decision) AS decision_action,
+                       d.materialized_item_id
                 FROM review_candidates AS c
                 JOIN candidate_runs AS r ON r.run_id = c.run_id
                 LEFT JOIN candidate_decisions AS d

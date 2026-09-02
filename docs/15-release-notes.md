@@ -2,6 +2,18 @@
 
 Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased: reviewed source import
+
+Date: 2026-09-02
+
+The public candidate queue now handles structural suggestions and declared practice imports through one review flow. `candidate generate --adapter curriculum` reads one explicitly selected `virtuoso/curriculum@0.1` or `virtuoso/item@0.1` note. `--dry-run` validates and reports proposals without candidate writes.
+
+`candidate decide` now records `accept`, `edit`, `skip`, or `reject`. Accept and edit create the workspace Markdown item and exact source link through one protected write path. Skip and reject create no item. Historical due metadata stays in the proposal and does not seed scheduler state or create learning evidence.
+
+`candidate delta` is suitable for scheduled checks. It returns no output and makes no database write when the source snapshot is unchanged. Concurrent checks of the same new hash store and report one run. A changed source creates a new candidate run while prior proposals and decisions remain available. The tracked public vault fixture covers the complete path and confirms that source notes stay byte-identical.
+
+Migration 11 adds the decision action, reviewed item payload and materialized item reference. Existing accept and reject decisions migrate without a fabricated item reference.
+
 ## Unreleased public baseline, 2026-09-02
 
 Commit `3f5ae658b20d43ec7dc8df4fc874fa41dd54042f` combines the current public CLI and documentation.

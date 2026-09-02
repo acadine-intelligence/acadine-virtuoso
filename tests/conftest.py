@@ -58,11 +58,68 @@ V9_ATTEMPT_TIMINGS = """CREATE TABLE attempt_timings (
                 completed_at TEXT NOT NULL
             )"""
 
+V10_CANDIDATE_DECISIONS = """CREATE TABLE candidate_decisions (
+                decision_id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL
+                    REFERENCES review_candidates(candidate_id) ON DELETE RESTRICT,
+                decision TEXT NOT NULL CHECK(decision IN ('accept','reject')),
+                note TEXT CHECK(note IS NULL OR length(note) BETWEEN 1 AND 2000),
+                decided_at TEXT NOT NULL,
+                UNIQUE(candidate_id)
+            )"""
+
+V10_CANDIDATE_DECISIONS_REJECT_UPDATE = """CREATE TRIGGER candidate_decisions_reject_update
+                BEFORE UPDATE ON candidate_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate_decisions is append-only');
+                END"""
+
+V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_reject_delete
+                BEFORE DELETE ON candidate_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate_decisions is append-only');
+                END"""
+
+
+def downgrade_candidate_decisions_to_v10(db: sqlite3.Connection) -> None:
+    """Restore the candidate decision table to its pre-migration-11 shape."""
+    exists = (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table'"
+            " AND name = 'candidate_decisions'"
+        ).fetchone()
+        is not None
+    )
+    if not exists:
+        return
+    for trigger in (
+        "candidate_decisions_validate_action",
+        "candidate_decisions_reject_update",
+        "candidate_decisions_reject_delete",
+    ):
+        db.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+    db.execute("PRAGMA legacy_alter_table = ON")
+    db.execute(
+        "ALTER TABLE candidate_decisions RENAME TO candidate_decisions_v11_fixture"
+    )
+    db.execute(V10_CANDIDATE_DECISIONS)
+    db.execute(
+        """INSERT INTO candidate_decisions(
+               decision_id, candidate_id, decision, note, decided_at)
+           SELECT decision_id, candidate_id, decision, note, decided_at
+           FROM candidate_decisions_v11_fixture"""
+    )
+    db.execute("DROP TABLE candidate_decisions_v11_fixture")
+    db.execute(V10_CANDIDATE_DECISIONS_REJECT_UPDATE)
+    db.execute(V10_CANDIDATE_DECISIONS_REJECT_DELETE)
+    db.execute("PRAGMA legacy_alter_table = OFF")
+
 
 def downgrade_attempt_chain_to_v9(db: sqlite3.Connection) -> None:
     """Rebuild the attempt evidence chain in its pre-migration-10 shape,
     preserving every row. Interactive rows only: administered rows cannot
     exist in a database being rewound below version 10."""
+    downgrade_candidate_decisions_to_v10(db)
     db.execute("DROP TRIGGER IF EXISTS attempt_timings_reject_administered")
     has_timings = (
         db.execute(

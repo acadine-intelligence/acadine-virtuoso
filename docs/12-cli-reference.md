@@ -188,27 +188,48 @@ virtuoso --workspace PATH source unlink --id ID --path PATH --item ITEM [--json]
 
 Removes one item-source link when its note moved away or was deleted — the recovery path after a vault rename, where `relink` cannot help because the old path no longer exists to rebind. Fails closed if no such link exists. The item, its Markdown, and any recorded evidence are untouched; only the link row goes. Pair it with `source link` at the new path to carry provenance across a rename.
 
-## Candidates (metadata-only structural proposals)
+## Candidates and reviewed import
 
-Candidates are proposal-only records derived from source metadata: unresolved wikilinks, ambiguous links, and practice opportunities. There is no apply path: `candidate decide` records a human accept/reject decision as append-only evidence, and acting on an accepted proposal (drafting the note, answering the practice item) remains human work outside Virtuoso.
+The candidate queue has two adapters. The default `structural` adapter uses indexed metadata to propose unresolved links, ambiguous links and answer-free practice. The `curriculum` adapter reads one explicitly selected note and proposes complete practice items. Both adapters bind each proposal to the exact source hash.
 
 ### `candidate generate`
 
 ```
-virtuoso --workspace PATH candidate generate --source SOURCE --path RELATIVE_PATH [--limit N] [--json]
+virtuoso --workspace PATH candidate generate --source SOURCE --path RELATIVE_PATH \
+  [--adapter structural|curriculum] [--limit N] [--dry-run] [--json]
 ```
 
-Generates candidates for one indexed note (default limit 20). Output is a run record (`virtuoso/review-candidate-run@0.1`) containing the created candidates. Generation is deterministic and idempotent for an unchanged snapshot; every candidate carries `claims_mastery: false`.
+Generation is deterministic for the same adapter, source snapshot and limit. `--dry-run` validates and reports the exact candidate set without writing candidate rows. Normal generation is idempotent and reuses the existing run for an unchanged snapshot.
 
-### `candidate list` / `candidate show` / `candidate decide`
+The curriculum adapter accepts either a complete `virtuoso/item@0.1` note or a `virtuoso/curriculum@0.1` note containing one or more fenced `virtuoso-practice` JSON objects. Each object uses `virtuoso/practice-item@0.1` and declares `id`, `title`, `focus`, `prompt`, `answer`, nullable `hint`, nullable `follow_up`, `state: active`, and nullable `historical_due_at`. Unknown fields, duplicate ids, unsupported schemas and unsupported states fail before candidate rows are written.
+
+The explicit `--adapter curriculum` flag authorizes Virtuoso to read the selected note body for that run. The source index remains metadata-only. Candidate rows retain the declared item fields because a human must review them. Virtuoso does not send the content anywhere.
+
+### `candidate delta`
+
+```
+virtuoso --workspace PATH candidate delta --source SOURCE --path RELATIVE_PATH \
+  [--limit N] [--json]
+```
+
+`delta` checks one curriculum note. It validates changed content before refreshing the source index. It writes a candidate run only for a new source hash. An unchanged source exits 0 with empty stdout and stderr. Concurrent checks of the same new hash store and report one run. Changed content creates a new run; older proposals and their decisions stay in history and report a changed source status.
+
+### `candidate list`, `candidate show`, and `candidate decide`
 
 ```
 virtuoso --workspace PATH candidate list [--source S] [--kind atomic-note|link|practice] [--run RUN] [--current-only] [--json]
 virtuoso --workspace PATH candidate show --id CANDIDATE_ID [--json]
-virtuoso --workspace PATH candidate decide --id CANDIDATE_ID --decision accept|reject [--note TEXT] [--json]
+virtuoso --workspace PATH candidate decide --id CANDIDATE_ID \
+  --decision accept|edit|skip|reject \
+  [--item-id ID] [--title TEXT] [--focus TEXT] [--prompt TEXT] \
+  [--answer TEXT] [--hint TEXT] [--follow-up TEXT] [--note TEXT] [--json]
 ```
 
-`list` filters candidates; `--current-only` excludes candidates superseded by newer runs. `show` prints one candidate's full proposal payload. `decide` records a human accept or reject as append-only evidence: the proposal row stays immutable, one decision per candidate, and nothing is auto-applied — accepted proposals still need human drafting (every proposal carries `requires_human_drafting` or `requires_human_answer`). After deciding, `review_state` reads `accepted` or `rejected` in list/show output.
+`list` filters candidates. `--current-only` omits proposals whose source hash no longer matches. `show` prints one proposal and its decision state.
+
+For a curriculum import candidate, `accept` creates the proposed Markdown item and source link in one transaction. `edit` applies the supplied item-field changes and creates that reviewed item. `skip` records the choice without creating an item. `reject` records a hard rejection. Accepted and edited imports create no attempt, transfer event, scheduler state or scheduler proposal. A historical due value stays in the immutable proposal and does not become a live due date.
+
+Structural candidates keep their original proposal-only behavior. Accepting one records the decision without drafting an answer or creating an item.
 
 ## Transfer evidence (project application)
 

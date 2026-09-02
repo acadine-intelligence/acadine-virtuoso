@@ -552,7 +552,7 @@ class StructuralCandidateTests(unittest.TestCase):
                 ).fetchall()
             }
             sources_after = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
         self.assertTrue(
             {"candidate_runs", "review_candidates", "candidate_source_refs"}.issubset(tables)
         )
@@ -719,7 +719,7 @@ class StructuralCandidateTests(unittest.TestCase):
         before = self._vault_snapshot()
 
         help_text = self._run_cli("candidate", "--help").stdout.lower()
-        for command in ("generate", "list", "show", "decide"):
+        for command in ("generate", "delta", "list", "show", "decide"):
             self.assertIn(command, help_text)
         for forbidden in (
             "apply",

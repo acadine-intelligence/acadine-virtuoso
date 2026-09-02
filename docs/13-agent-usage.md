@@ -7,7 +7,7 @@ How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Vi
 1. **Always pass `--json`.** Human output is `key: value` lines; JSON output is the stable machine contract. Parse stdout, never scrape the human format.
 2. **Check the exit code.** 0 means success; 2 means a domain error. On 2, read stderr (`Error: ...`), which is written to be actionable, and either fix the input or surface it to the human. Never retry the same failing input unchanged.
 3. **Never fabricate evidence.** Attempts, transfer events and check completions are append-only records of what a real learner did. An agent may administer a session and transcribe the learner's answers; it may not invent results, and `--agent-help` / `--assistance` must honestly reflect any help the agent gave. When an agent runs a smoke test itself, record it as `substantial`, not `none`.
-4. **Respect the boundaries.** Candidates are proposal-only; `candidate decide` records the human accept/reject decision as append-only evidence, and there is no apply command — acting on an accepted proposal stays outside Virtuoso. Sources are read-only. Scheduling and selection changes come from recorded evidence, never from an agent editing the database.
+4. **Respect the boundaries.** Structural candidates remain proposal-only. Curriculum import candidates may create an item only after a human chooses `accept` or `edit`. `skip` and `reject` create no item. Sources stay read-only. A historical due value never becomes scheduler state, and an import never creates attempt or transfer evidence.
 5. **Never edit the SQLite database directly.** All state changes go through the CLI (or the Python services behind it). The schema is fail-closed: tampering is detected on next open and the workspace refuses to start.
 
 ## Natural language to command mapping
@@ -29,6 +29,9 @@ Translate learner intent into commands like this:
 | "What notes do you see?" | `source notes --id ... --json` |
 | "Link this item to that note" | `source link --id ... --path ... --item ... --json` |
 | "What does this note suggest working on?" | `candidate generate --source ... --path ... --json` then `candidate list --current-only --json` |
+| "Import the practice items declared in this note" | `candidate generate --source ... --path ... --adapter curriculum --dry-run --json`; show the proposals before a decision |
+| "Accept, edit, or skip this import" | `candidate decide --id ... --decision accept|edit|skip ... --json`; use edit flags only after the human supplies the changed fields |
+| "Check that curriculum note for changes" | `candidate delta --source ... --path ... --json`; empty output means no change and needs no notification |
 | "Show me the proposals" | `candidate list --json` (optionally `--kind atomic-note|link|practice`) |
 | "I used this in a real project" | `transfer record --item ... --project ... --use-case ... --outcome ... --independence ... --json` |
 | "What's due for a transfer check?" | `transfer check due --json` |
@@ -74,7 +77,7 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 
 **Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/`; items are human-owned prose.
 
-**Connect knowledge.** `source scan --id ... --json` after vault changes; `candidate generate` on notes under active study; present candidates as suggestions for the human to accept, modify or reject outside the tool.
+**Connect knowledge.** Run `source scan --id ... --json` after source changes. Use the default `candidate generate` for metadata-only suggestions. Use `--adapter curriculum --dry-run` when the human selects a note that declares complete practice items. Present every proposal. Record the human's `accept`, `edit`, `skip`, or `reject` decision through `candidate decide`. A scheduled `candidate delta` run should send nothing when stdout is empty.
 
 **Record application.** After real project work using a practiced concept: `transfer record` with honest `--independence`. When the delayed check comes due: `begin` (prediction first), the human attempts the challenge, then `complete` with honest `--assistance`.
 
