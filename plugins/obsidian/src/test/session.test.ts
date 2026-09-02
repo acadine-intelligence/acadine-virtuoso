@@ -23,30 +23,53 @@ class FakeClient implements ReviewClient {
 	recordWait: Promise<void> | null = null;
 	queueHash = HASH;
 	itemHash = HASH;
+	includeSecond = false;
+	nextLoadFailures = 0;
 
 	async due(): Promise<ReviewQueuePayload> {
+		const items = [
+			{
+				item_id: "testing-effect",
+				content_hash: this.queueHash,
+				status: "new" as const,
+				due_at: null,
+			},
+		];
+		if (this.includeSecond) {
+			items.push({
+				item_id: "second-item",
+				content_hash: HASH,
+				status: "new",
+				due_at: null,
+			});
+		}
 		return {
 			schema: "virtuoso/review-queue@0.1",
-			items: [
-				{
-					item_id: "testing-effect",
-					content_hash: this.queueHash,
-					status: "new",
-					due_at: null,
-				},
-			],
+			items,
 		};
 	}
 
-	async load(): Promise<ReviewItemPayload> {
+	async load(itemId: string): Promise<ReviewItemPayload> {
+		if (itemId === "second-item" && this.nextLoadFailures > 0) {
+			this.nextLoadFailures -= 1;
+			throw new ReviewClientError(
+				"The CLI process exited while loading the next card.",
+				"process-failure",
+				"retry-submit",
+			);
+		}
 		return {
 			schema: "virtuoso/review-item@0.1",
 			item: {
-				item_id: "testing-effect",
-				title: "Explain the testing effect",
+				item_id: itemId,
+				title:
+					itemId === "second-item" ? "Explain spaced practice" : "Explain the testing effect",
 				focus: "learning-science",
-				content_hash: this.itemHash,
-				prompt: "Why does retrieval improve recall?",
+				content_hash: itemId === "second-item" ? HASH : this.itemHash,
+				prompt:
+					itemId === "second-item"
+						? "Why does spacing improve recall?"
+						: "Why does retrieval improve recall?",
 				answer: "Retrieval changes memory.",
 				hint: "Compare retrieval with rereading.",
 				follow_up: null,
@@ -257,6 +280,79 @@ describe("ReviewSessionController", () => {
 		expect(controller.state.phase).toBe("prompt");
 		expect(controller.state.item?.content_hash).toBe("b".repeat(64));
 		expect(controller.state.initialResponse).toBe("");
+		expect(controller.state.error).toBeNull();
+	});
+
+	it("retries next-card loading after a recorded grade without another write", async () => {
+		const client = new FakeClient();
+		client.includeSecond = true;
+		client.nextLoadFailures = 1;
+		const ids = [
+			"99999999999999999999999999999999",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		];
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+				"2026-09-02T12:00:03.000Z",
+			]),
+			newSubmissionId: () => ids.shift() ?? "",
+		});
+		await controller.start();
+		controller.submitInitial("A measured response.");
+		controller.reveal();
+
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(client.recorded).toHaveLength(1);
+		expect(controller.state.item?.item_id).toBe("testing-effect");
+		expect(controller.state.position).toBe(1);
+		expect(controller.state.error?.recovery).toBe("retry-next-card");
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(await controller.skip()).toBe(false);
+
+		expect(await controller.retryAdvance()).toBe(true);
+		expect(client.recorded).toHaveLength(1);
+		expect(client.skipped).toHaveLength(0);
+		expect(controller.state.item?.item_id).toBe("second-item");
+		expect(controller.state.position).toBe(2);
+		expect(controller.state.phase).toBe("prompt");
+		expect(controller.state.error).toBeNull();
+	});
+
+	it("retries next-card loading after a recorded skip without another write", async () => {
+		const client = new FakeClient();
+		client.includeSecond = true;
+		client.nextLoadFailures = 1;
+		const ids = [
+			"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"cccccccccccccccccccccccccccccccc",
+		];
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+				"2026-09-02T12:00:03.000Z",
+			]),
+			newSubmissionId: () => ids.shift() ?? "",
+		});
+		await controller.start();
+
+		expect(await controller.skip()).toBe(false);
+		expect(client.skipped).toHaveLength(1);
+		expect(controller.state.item?.item_id).toBe("testing-effect");
+		expect(controller.state.position).toBe(1);
+		expect(controller.state.error?.recovery).toBe("retry-next-card");
+		expect(await controller.skip()).toBe(false);
+
+		expect(await controller.retryAdvance()).toBe(true);
+		expect(client.skipped).toHaveLength(1);
+		expect(client.recorded).toHaveLength(0);
+		expect(controller.state.item?.item_id).toBe("second-item");
+		expect(controller.state.position).toBe(2);
+		expect(controller.state.phase).toBe("prompt");
 		expect(controller.state.error).toBeNull();
 	});
 

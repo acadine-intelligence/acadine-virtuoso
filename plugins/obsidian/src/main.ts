@@ -142,6 +142,7 @@ class ReviewSessionModal extends Modal {
 		);
 		const item = state.item;
 		if (item === null) return;
+		if (state.error?.recovery === "retry-next-card") return;
 		this.bodyEl.createEl("h3", { text: item.title });
 		this.bodyEl.createEl("p", { text: item.prompt });
 
@@ -163,7 +164,9 @@ class ReviewSessionModal extends Modal {
 					? "Retry submission"
 					: error.recovery === "advance-card"
 						? "Continue to next card"
-						: "Open settings";
+						: error.recovery === "retry-next-card"
+							? "Retry next card"
+							: "Open settings";
 		const button = panel.createEl("button", { text: label });
 		button.disabled = this.controller.state.inFlight;
 		button.addEventListener("click", () => {
@@ -183,6 +186,10 @@ class ReviewSessionModal extends Modal {
 			}
 			if (error.recovery === "advance-card") {
 				this.perform(() => this.controller.acknowledgeRecorded());
+				return;
+			}
+			if (error.recovery === "retry-next-card") {
+				this.perform(() => this.controller.retryAdvance());
 				return;
 			}
 			this.openSettings();

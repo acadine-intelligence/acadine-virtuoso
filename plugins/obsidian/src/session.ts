@@ -41,7 +41,7 @@ export type ReviewPhase =
 export interface ReviewSessionError {
 	message: string;
 	code: string;
-	recovery: ReviewRecovery;
+	recovery: ReviewRecovery | "retry-next-card";
 }
 
 export interface ReviewSessionState {
@@ -88,6 +88,7 @@ export class ReviewSessionController {
 	private submissionId = "";
 	private pendingAttempt: ReviewAttemptRequest | null = null;
 	private pendingSkip: ReviewSkipRequest | null = null;
+	private advancePending = false;
 
 	constructor(
 		private readonly client: ReviewClient,
@@ -102,6 +103,7 @@ export class ReviewSessionController {
 	async start(): Promise<void> {
 		this.state.phase = "loading";
 		this.state.error = null;
+		this.advancePending = false;
 		try {
 			const queue = await this.client.due();
 			this.queue = queue.items;
@@ -181,7 +183,7 @@ export class ReviewSessionController {
 	}
 
 	async reloadCurrent(): Promise<boolean> {
-		if (this.state.inFlight) return false;
+		if (this.state.inFlight || this.advancePending) return false;
 		const currentId = this.state.item?.item_id ?? this.queue[this.index]?.item_id;
 		if (!currentId) return false;
 		this.state.inFlight = true;
@@ -196,9 +198,8 @@ export class ReviewSessionController {
 				);
 			}
 			this.queue = queue.items;
-			this.index = index;
 			this.state.total = this.queue.length;
-			await this.loadCurrent();
+			await this.loadAt(index);
 			return true;
 		} catch (error) {
 			this.fail(error);
@@ -220,11 +221,12 @@ export class ReviewSessionController {
 		this.state.error = null;
 		this.pendingAttempt = null;
 		this.pendingSkip = null;
+		this.advancePending = true;
 		try {
 			await this.advance();
 			return true;
 		} catch (error) {
-			this.fail(error);
+			this.failAdvance(error);
 			return false;
 		} finally {
 			this.state.inFlight = false;
@@ -239,6 +241,7 @@ export class ReviewSessionController {
 			this.state.phase === "loading" ||
 			this.state.phase === "empty" ||
 			this.state.phase === "complete" ||
+			this.advancePending ||
 			this.pendingAttempt !== null
 		) {
 			return false;
@@ -258,8 +261,14 @@ export class ReviewSessionController {
 		try {
 			this.state.lastResult = await this.client.skip(this.pendingSkip);
 			this.pendingSkip = null;
-			await this.advance();
-			return true;
+			this.advancePending = true;
+			try {
+				await this.advance();
+				return true;
+			} catch (error) {
+				this.failAdvance(error);
+				return false;
+			}
 		} catch (error) {
 			this.fail(error);
 			return false;
@@ -278,6 +287,7 @@ export class ReviewSessionController {
 			this.state.item === null ||
 			this.startedAt === null ||
 			this.initialAnsweredAt === null ||
+			this.advancePending ||
 			!Number.isInteger(confidence) ||
 			confidence < 1 ||
 			confidence > 5
@@ -308,8 +318,14 @@ export class ReviewSessionController {
 		try {
 			this.state.lastResult = await this.client.record(this.pendingAttempt);
 			this.pendingAttempt = null;
-			await this.advance();
-			return true;
+			this.advancePending = true;
+			try {
+				await this.advance();
+				return true;
+			} catch (error) {
+				this.failAdvance(error);
+				return false;
+			}
 		} catch (error) {
 			this.fail(error);
 			return false;
@@ -318,8 +334,29 @@ export class ReviewSessionController {
 		}
 	}
 
+	async retryAdvance(): Promise<boolean> {
+		if (this.state.inFlight || !this.advancePending || this.state.item === null) {
+			return false;
+		}
+		this.state.inFlight = true;
+		this.state.error = null;
+		try {
+			await this.advance();
+			return true;
+		} catch (error) {
+			this.failAdvance(error);
+			return false;
+		} finally {
+			this.state.inFlight = false;
+		}
+	}
+
 	private async loadCurrent(): Promise<void> {
-		const expected = this.queue[this.index];
+		await this.loadAt(this.index);
+	}
+
+	private async loadAt(index: number): Promise<void> {
+		const expected = this.queue[index];
 		const loaded = await this.client.load(expected.item_id);
 		if (loaded.item.content_hash !== expected.content_hash) {
 			throw new ReviewClientError(
@@ -328,8 +365,9 @@ export class ReviewSessionController {
 				"reload-item",
 			);
 		}
+		this.index = index;
 		this.state.item = loaded.item;
-		this.state.position = this.index + 1;
+		this.state.position = index + 1;
 		this.state.initialResponse = "";
 		this.state.retry = null;
 		this.state.hintUsed = false;
@@ -342,16 +380,27 @@ export class ReviewSessionController {
 		this.submissionId = this.newSubmissionId();
 		this.pendingAttempt = null;
 		this.pendingSkip = null;
+		this.advancePending = false;
 		this.state.phase = "prompt";
 	}
 
 	private async advance(): Promise<void> {
-		this.index += 1;
-		if (this.index >= this.queue.length) {
+		const nextIndex = this.index + 1;
+		if (nextIndex >= this.queue.length) {
+			this.advancePending = false;
 			this.state.phase = "complete";
 			return;
 		}
-		await this.loadCurrent();
+		await this.loadAt(nextIndex);
+	}
+
+	private failAdvance(error: unknown): void {
+		const detail = error instanceof Error ? error.message : String(error);
+		this.state.error = {
+			message: `The review was recorded, but the next card could not load. ${detail}`,
+			code: "next-card-load-failed",
+			recovery: "retry-next-card",
+		};
 	}
 
 	private fail(error: unknown): void {
