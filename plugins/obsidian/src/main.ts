@@ -487,6 +487,35 @@ class VirtuosoSettingTab extends PluginSettingTab {
 					}),
 			);
 		new Setting(containerEl)
+			.setName("Check local setup")
+			.setDesc(
+				"Runs the configured CLI version and workspace doctor checks without recording review evidence",
+			)
+			.addButton((button) =>
+				button.setButtonText("Check setup").onClick(async () => {
+					button.setDisabled(true);
+					try {
+						const status = await new VirtuosoCliClient(
+							this.plugin.settings.cliPath,
+							this.plugin.settings.workspacePath,
+						).checkSetup();
+						const workspaceStatus =
+							status.workspaceStatus === "healthy" ? "healthy" : "needs attention";
+						new Notice(
+							`Virtuoso ${status.version}. Workspace ${workspaceStatus}; database ${status.database}.`,
+							10000,
+						);
+					} catch (error) {
+						new Notice(
+							`Virtuoso setup check failed: ${error instanceof Error ? error.message : String(error)}`,
+							10000,
+						);
+					} finally {
+						button.setDisabled(false);
+					}
+				}),
+			);
+		new Setting(containerEl)
 			.setName("Proposal items directory")
 			.setDesc("Vault path for optional proposed-item review")
 			.addText((text) =>

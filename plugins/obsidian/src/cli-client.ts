@@ -28,6 +28,13 @@ export interface ProcessResult {
 	stderr: string;
 }
 
+export interface VirtuosoSetupStatus {
+	version: string;
+	workspaceStatus: "healthy" | "needs-attention";
+	workspaceSchema: "virtuoso/workspace@0.1";
+	database: string;
+}
+
 export interface ProcessRunner {
 	run(invocation: ProcessInvocation): Promise<ProcessResult>;
 }
@@ -129,6 +136,29 @@ function expandHome(value: string): string {
 	return value;
 }
 
+function parseSetupDoctor(value: unknown): Omit<VirtuosoSetupStatus, "version"> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new ContractError("doctor response must be an object");
+	}
+	const doctor = value as Record<string, unknown>;
+	if (doctor.status !== "healthy" && doctor.status !== "needs-attention") {
+		throw new ContractError("doctor response has an invalid status");
+	}
+	if (doctor.workspace_schema !== "virtuoso/workspace@0.1") {
+		throw new ContractError(
+			`unsupported workspace schema: ${String(doctor.workspace_schema)}`,
+		);
+	}
+	if (typeof doctor.database !== "string" || !doctor.database.trim()) {
+		throw new ContractError("doctor response database status must be non-empty text");
+	}
+	return {
+		workspaceStatus: doctor.status,
+		workspaceSchema: doctor.workspace_schema,
+		database: doctor.database,
+	};
+}
+
 export class VirtuosoCliClient implements ReviewClient {
 	private readonly executable: string;
 	private readonly workspace: string;
@@ -140,6 +170,28 @@ export class VirtuosoCliClient implements ReviewClient {
 	) {
 		this.executable = expandHome(executable.trim());
 		this.workspace = expandHome(workspace.trim());
+	}
+
+	async checkSetup(): Promise<VirtuosoSetupStatus> {
+		this.requireSettings();
+		const versionResult = await this.execute(["--version"], null, "check-settings");
+		const version = versionResult.stdout.trim();
+		if (!version || version.length > 128 || /\s/.test(version)) {
+			throw new ReviewClientError(
+				"Virtuoso CLI returned an invalid version string.",
+				"schema-failure",
+				"check-settings",
+			);
+		}
+		const doctorResult = await this.execute(
+			["--workspace", this.workspace, "doctor", "--json"],
+			null,
+			"check-settings",
+		);
+		return {
+			version,
+			...this.parseJson(doctorResult.stdout, parseSetupDoctor),
+		};
 	}
 
 	async due(): Promise<ReviewQueuePayload> {
@@ -178,12 +230,7 @@ export class VirtuosoCliClient implements ReviewClient {
 		);
 	}
 
-	private async invoke<T>(
-		contractArgs: string[],
-		stdin: string | null,
-		parse: (value: unknown) => T,
-		processRecovery: ReviewRecovery,
-	): Promise<T> {
+	private requireSettings(): void {
 		if (!this.executable || !this.workspace) {
 			throw new ReviewClientError(
 				"Set both the Virtuoso executable and workspace path.",
@@ -191,13 +238,16 @@ export class VirtuosoCliClient implements ReviewClient {
 				"check-settings",
 			);
 		}
+	}
+
+	private async execute(
+		args: string[],
+		stdin: string | null,
+		processRecovery: ReviewRecovery,
+	): Promise<ProcessResult> {
 		let result: ProcessResult;
 		try {
-			result = await this.runner.run({
-				executable: this.executable,
-				args: ["--workspace", this.workspace, ...contractArgs],
-				stdin,
-			});
+			result = await this.runner.run({ executable: this.executable, args, stdin });
 		} catch (error) {
 			const code =
 				error instanceof ProcessRunnerError
@@ -230,8 +280,12 @@ export class VirtuosoCliClient implements ReviewClient {
 				);
 			}
 		}
+		return result;
+	}
+
+	private parseJson<T>(stdout: string, parse: (value: unknown) => T): T {
 		try {
-			return parse(JSON.parse(result.stdout));
+			return parse(JSON.parse(stdout));
 		} catch (error) {
 			if (error instanceof ContractError || error instanceof SyntaxError) {
 				throw new ReviewClientError(
@@ -242,5 +296,20 @@ export class VirtuosoCliClient implements ReviewClient {
 			}
 			throw error;
 		}
+	}
+
+	private async invoke<T>(
+		contractArgs: string[],
+		stdin: string | null,
+		parse: (value: unknown) => T,
+		processRecovery: ReviewRecovery,
+	): Promise<T> {
+		this.requireSettings();
+		const result = await this.execute(
+			["--workspace", this.workspace, ...contractArgs],
+			stdin,
+			processRecovery,
+		);
+		return this.parseJson(result.stdout, parse);
 	}
 }

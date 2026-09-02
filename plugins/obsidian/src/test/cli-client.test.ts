@@ -172,6 +172,77 @@ describe("VirtuosoCliClient", () => {
 		]);
 	});
 
+	it("checks the installed CLI version and workspace doctor status", async () => {
+		const runner = new FakeRunner();
+		runner.results.push(
+			{
+				exitCode: 0,
+				stdout: "0.1.0.dev0\n",
+				stderr: "",
+			},
+			{
+				exitCode: 0,
+				stdout: JSON.stringify({
+					status: "healthy",
+					workspace_schema: "virtuoso/workspace@0.1",
+					database: "ok",
+					items: 2,
+				}),
+				stderr: "",
+			},
+		);
+		const client = new VirtuosoCliClient(
+			"/usr/local/bin/virtuoso",
+			"/tmp/virtuoso-workspace",
+			runner,
+		);
+
+		await expect(client.checkSetup()).resolves.toEqual({
+			version: "0.1.0.dev0",
+			workspaceStatus: "healthy",
+			workspaceSchema: "virtuoso/workspace@0.1",
+			database: "ok",
+		});
+		expect(runner.calls).toEqual([
+			{
+				executable: "/usr/local/bin/virtuoso",
+				args: ["--version"],
+				stdin: null,
+			},
+			{
+				executable: "/usr/local/bin/virtuoso",
+				args: ["--workspace", "/tmp/virtuoso-workspace", "doctor", "--json"],
+				stdin: null,
+			},
+		]);
+	});
+
+	it("fails the setup check on an unsupported workspace schema", async () => {
+		const runner = new FakeRunner();
+		runner.results.push(
+			{ exitCode: 0, stdout: "0.1.0.dev0\n", stderr: "" },
+			{
+				exitCode: 0,
+				stdout: JSON.stringify({
+					status: "healthy",
+					workspace_schema: "virtuoso/workspace@9.9",
+					database: "ok",
+				}),
+				stderr: "",
+			},
+		);
+		const client = new VirtuosoCliClient(
+			"/usr/local/bin/virtuoso",
+			"/tmp/virtuoso-workspace",
+			runner,
+		);
+
+		await expect(client.checkSetup()).rejects.toMatchObject({
+			code: "schema-failure",
+			recovery: "check-settings",
+		});
+	});
+
 	it("reports a CLI timeout separately", async () => {
 		const runner = new SpawnProcessRunner(20);
 

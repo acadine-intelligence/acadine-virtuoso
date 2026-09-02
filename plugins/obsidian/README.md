@@ -38,6 +38,8 @@ Enable Virtuoso under Community plugins in Obsidian. Open the Virtuoso settings 
 - Virtuoso executable: the absolute path to `.venv/bin/virtuoso`
 - Virtuoso workspace: the absolute path to the workspace created by `virtuoso init`
 
+Select **Check setup** after saving both paths. The check runs `virtuoso --version` and `virtuoso --workspace PATH doctor --json`, then reports the CLI version and workspace health. It does not record review evidence.
+
 The plugin stores these local paths in its ignored `data.json` file.
 
 ## Run a review
