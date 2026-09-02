@@ -1,6 +1,6 @@
 # Acadine Virtuoso
 
-Virtuoso is a local-first CLI-based agentic personal self-learning system, designed to be used with coding agents or agent frameworks like Hermes. It's designed to be used in combination with learning techniques such as: spaced repetition, active recall, exercise and project-based learning, and the [testing effect]([url](https://en.wikipedia.org/wiki/Testing_effect)).
+Virtuoso is a local-first CLI-based agentic personal self-learning system, designed to be used with coding agents or agent frameworks like Hermes. It's designed to be used in combination with learning techniques such as: spaced repetition, active recall, exercise and project-based learning, and the testing effect.
 
 If you've ever you used flashcards, you know how powerful spaced repetition can be. But managing the system and schedule of practise can now be done by your preferred agent.
 
