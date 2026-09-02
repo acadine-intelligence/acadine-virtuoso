@@ -219,7 +219,7 @@ class ReviewSessionModal extends Modal {
 		if (state.hintUsed && state.item?.hint) {
 			this.bodyEl.createEl("p", { text: `Hint: ${state.item.hint}` });
 		}
-		if (state.retry === null) {
+		if (state.retry === null && !state.hintUsed) {
 			const retry = this.bodyEl.createEl("button", { text: "Retry unaided" });
 			retry.disabled = state.inFlight;
 			retry.addEventListener("click", () => {

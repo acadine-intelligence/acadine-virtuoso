@@ -171,6 +171,26 @@ describe("ReviewSessionController", () => {
 		expect(client.skipped).toEqual([]);
 	});
 
+	it("rejects an unaided retry after the hint is shown", async () => {
+		const client = new FakeClient();
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+			]),
+			newSubmissionId: () => "88888888888888888888888888888888",
+		});
+		await controller.start();
+		controller.submitInitial("A measured response.");
+
+		expect(controller.useHint()).toBe(true);
+		expect(controller.beginRetry()).toBe(false);
+		expect(controller.state.phase).toBe("support");
+		expect(controller.state.retry).toBeNull();
+		expect(controller.submitRetry("A response written after the hint.")).toBe(false);
+	});
+
 	it("keeps the card open after a CLI failure and retries the exact request", async () => {
 		const client = new FakeClient();
 		client.recordFailures = 1;

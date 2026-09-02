@@ -133,6 +133,7 @@ export class ReviewSessionController {
 		if (
 			this.state.phase !== "support" ||
 			this.state.retry !== null ||
+			this.state.hintUsed ||
 			this.state.inFlight
 		) {
 			return false;
