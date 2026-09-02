@@ -19,6 +19,7 @@ class FakeClient implements ReviewClient {
 	recorded: ReviewAttemptRequest[] = [];
 	skipped: ReviewSkipRequest[] = [];
 	recordFailures = 0;
+	skipFailures = 0;
 	recordError: ReviewClientError | null = null;
 	recordWait: Promise<void> | null = null;
 	queueHash = HASH;
@@ -117,6 +118,14 @@ class FakeClient implements ReviewClient {
 
 	async skip(request: ReviewSkipRequest): Promise<ReviewSkipResultPayload> {
 		this.skipped.push(request);
+		if (this.skipFailures > 0) {
+			this.skipFailures -= 1;
+			throw new ReviewClientError(
+				"The CLI process exited before confirming the skip.",
+				"process-failure",
+				"retry-submit",
+			);
+		}
 		return {
 			schema: "virtuoso/review-skip-result@0.1",
 			skip: {
@@ -239,7 +248,9 @@ describe("ReviewSessionController", () => {
 			recovery: "retry-submit",
 		});
 
-		expect(await controller.grade("partial", 3)).toBe(true);
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(await controller.skip()).toBe(false);
+		expect(await controller.retrySubmission()).toBe(true);
 		expect(controller.state.phase).toBe("complete");
 		expect(client.recorded).toHaveLength(2);
 		expect(client.recorded[1]).toEqual(client.recorded[0]);
@@ -272,6 +283,8 @@ describe("ReviewSessionController", () => {
 		expect(controller.state.phase).toBe("grade");
 		expect(controller.state.item?.content_hash).toBe(HASH);
 		expect(controller.state.error?.recovery).toBe("reload-item");
+		expect(await controller.grade("partial", 2)).toBe(false);
+		expect(await controller.skip()).toBe(false);
 
 		client.queueHash = "b".repeat(64);
 		client.itemHash = "b".repeat(64);
@@ -281,6 +294,29 @@ describe("ReviewSessionController", () => {
 		expect(controller.state.item?.content_hash).toBe("b".repeat(64));
 		expect(controller.state.initialResponse).toBe("");
 		expect(controller.state.error).toBeNull();
+	});
+
+	it("retries the exact skip request through the recovery action", async () => {
+		const client = new FakeClient();
+		client.skipFailures = 1;
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+			]),
+			newSubmissionId: () => "dddddddddddddddddddddddddddddddd",
+		});
+		await controller.start();
+
+		expect(await controller.skip()).toBe(false);
+		expect(controller.state.error?.recovery).toBe("retry-submit");
+		expect(controller.submitInitial("A response outside recovery.")).toBe(false);
+		expect(await controller.skip()).toBe(false);
+		expect(await controller.retrySubmission()).toBe(true);
+
+		expect(controller.state.phase).toBe("complete");
+		expect(client.skipped).toHaveLength(2);
+		expect(client.skipped[1]).toEqual(client.skipped[0]);
 	});
 
 	it("retries next-card loading after a recorded grade without another write", async () => {
@@ -452,6 +488,9 @@ describe("ReviewSessionController", () => {
 		expect(await controller.grade("partial", 3)).toBe(false);
 		expect(controller.state.phase).toBe("grade");
 		expect(controller.state.error?.recovery).toBe("advance-card");
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(await controller.skip()).toBe(false);
+		expect(client.recorded).toHaveLength(1);
 
 		expect(await controller.acknowledgeRecorded()).toBe(true);
 		expect(controller.state.phase).toBe("complete");

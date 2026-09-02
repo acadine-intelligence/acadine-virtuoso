@@ -89,7 +89,6 @@ class ReviewSessionModal extends Modal {
 	private selectedResult: "demonstrated" | "partial" | "not-demonstrated" =
 		"partial";
 	private selectedConfidence = 3;
-	private lastWrite: "grade" | "skip" | null = null;
 
 	constructor(
 		app: App,
@@ -142,7 +141,7 @@ class ReviewSessionModal extends Modal {
 		);
 		const item = state.item;
 		if (item === null) return;
-		if (state.error?.recovery === "retry-next-card") return;
+		if (state.error !== null) return;
 		this.bodyEl.createEl("h3", { text: item.title });
 		this.bodyEl.createEl("p", { text: item.prompt });
 
@@ -175,13 +174,7 @@ class ReviewSessionModal extends Modal {
 				return;
 			}
 			if (error.recovery === "retry-submit") {
-				if (this.lastWrite === "grade") {
-					this.perform(() =>
-						this.controller.grade(this.selectedResult, this.selectedConfidence),
-					);
-				} else if (this.lastWrite === "skip") {
-					this.perform(() => this.controller.skip());
-				}
+				this.perform(() => this.controller.retrySubmission());
 				return;
 			}
 			if (error.recovery === "advance-card") {
@@ -304,7 +297,6 @@ class ReviewSessionModal extends Modal {
 		grade.addEventListener("click", () => {
 			this.selectedResult = result.value as typeof this.selectedResult;
 			this.selectedConfidence = Number(confidence.value);
-			this.lastWrite = "grade";
 			this.perform(() =>
 				this.controller.grade(this.selectedResult, this.selectedConfidence),
 			);
@@ -316,7 +308,6 @@ class ReviewSessionModal extends Modal {
 		const skip = this.bodyEl.createEl("button", { text: "Skip" });
 		skip.disabled = this.controller.state.inFlight;
 		skip.addEventListener("click", () => {
-			this.lastWrite = "skip";
 			this.perform(() => this.controller.skip());
 		});
 	}

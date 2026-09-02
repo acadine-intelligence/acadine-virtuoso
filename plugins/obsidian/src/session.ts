@@ -120,11 +120,15 @@ export class ReviewSessionController {
 	}
 
 	setOpenNotes(open: boolean): void {
-		if (this.state.item !== null && !this.state.inFlight) this.state.openNotes = open;
+		if (this.state.item !== null && !this.state.inFlight && this.state.error === null) {
+			this.state.openNotes = open;
+		}
 	}
 
 	submitInitial(response: string): boolean {
-		if (this.state.phase !== "prompt" || this.state.inFlight) return false;
+		if (this.state.phase !== "prompt" || this.state.inFlight || this.state.error !== null) {
+			return false;
+		}
 		this.state.initialResponse = response;
 		this.initialAnsweredAt = this.now();
 		this.state.phase = "support";
@@ -136,6 +140,7 @@ export class ReviewSessionController {
 			this.state.phase !== "support" ||
 			this.state.retry !== null ||
 			this.state.hintUsed ||
+			this.state.error !== null ||
 			this.state.inFlight
 		) {
 			return false;
@@ -149,6 +154,7 @@ export class ReviewSessionController {
 		if (
 			this.state.phase !== "retry" ||
 			this.retryStartedAt === null ||
+			this.state.error !== null ||
 			this.state.inFlight
 		) {
 			return false;
@@ -168,6 +174,7 @@ export class ReviewSessionController {
 			this.state.phase !== "support" ||
 			this.state.item?.hint === null ||
 			this.state.hintUsed ||
+			this.state.error !== null ||
 			this.state.inFlight
 		) {
 			return false;
@@ -177,7 +184,9 @@ export class ReviewSessionController {
 	}
 
 	reveal(): boolean {
-		if (this.state.phase !== "support" || this.state.inFlight) return false;
+		if (this.state.phase !== "support" || this.state.inFlight || this.state.error !== null) {
+			return false;
+		}
 		this.state.phase = "grade";
 		return true;
 	}
@@ -241,6 +250,7 @@ export class ReviewSessionController {
 			this.state.phase === "loading" ||
 			this.state.phase === "empty" ||
 			this.state.phase === "complete" ||
+			this.state.error !== null ||
 			this.advancePending ||
 			this.pendingAttempt !== null
 		) {
@@ -287,6 +297,7 @@ export class ReviewSessionController {
 			this.state.item === null ||
 			this.startedAt === null ||
 			this.initialAnsweredAt === null ||
+			this.state.error !== null ||
 			this.advancePending ||
 			!Number.isInteger(confidence) ||
 			confidence < 1 ||
@@ -318,6 +329,40 @@ export class ReviewSessionController {
 		try {
 			this.state.lastResult = await this.client.record(this.pendingAttempt);
 			this.pendingAttempt = null;
+			this.advancePending = true;
+			try {
+				await this.advance();
+				return true;
+			} catch (error) {
+				this.failAdvance(error);
+				return false;
+			}
+		} catch (error) {
+			this.fail(error);
+			return false;
+		} finally {
+			this.state.inFlight = false;
+		}
+	}
+
+	async retrySubmission(): Promise<boolean> {
+		if (
+			this.state.inFlight ||
+			this.state.error?.recovery !== "retry-submit" ||
+			(this.pendingAttempt === null) === (this.pendingSkip === null)
+		) {
+			return false;
+		}
+		this.state.inFlight = true;
+		this.state.error = null;
+		try {
+			if (this.pendingAttempt !== null) {
+				this.state.lastResult = await this.client.record(this.pendingAttempt);
+				this.pendingAttempt = null;
+			} else if (this.pendingSkip !== null) {
+				this.state.lastResult = await this.client.skip(this.pendingSkip);
+				this.pendingSkip = null;
+			}
 			this.advancePending = true;
 			try {
 				await this.advance();
