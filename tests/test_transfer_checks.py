@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from conftest import downgrade_attempt_chain_to_v9
 from virtuoso.workspace import TransferEvidence, WorkspaceError, WorkspaceService
 
 
@@ -69,6 +70,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v5 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -119,7 +122,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
 
         reopened = WorkspaceService.open(self.root)
 
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         with sqlite3.connect(reopened.db_path) as db:
             tables = {
                 row[0]
@@ -250,8 +253,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
             ).fetchone()[0]
         self.assertEqual(after, before)
-        self.assertEqual(trigger_count, 10)
-        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(trigger_count, 11)
+        self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     def test_v5_open_rejects_missing_historical_table_before_v6_creation(
         self,
@@ -288,7 +291,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self._downgrade_fixture_to_v4(service)
         with sqlite3.connect(service.db_path) as db:
             db.execute(
@@ -322,7 +325,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         service, _event = self._workspace_with_transfer()
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         with sqlite3.connect(service.db_path) as db:
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE transfer_check_completions")
@@ -415,6 +418,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v7 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -474,7 +479,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                    WHERE type = 'trigger' AND name = 'transfer_checks_reject_delete'"""
             ).fetchone()[0]
         self.assertIn("altered trigger", sql)
-        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(self._versions(service), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
 
 class DelayedTransferCheckCreationTests(unittest.TestCase):

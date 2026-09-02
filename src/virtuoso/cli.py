@@ -76,8 +76,31 @@ def _parser() -> argparse.ArgumentParser:
     practice.add_argument(
         "--agent-help",
         choices=("none", "light", "substantial", "unknown"),
-        default="none",
+        default=None,
     )
+    practice.add_argument(
+        "--administer",
+        action="store_true",
+        help=(
+            "record an agent-administered attempt non-interactively: the "
+            "learner answered outside this terminal, an agent transcribes "
+            "the response and grade, and latency is stored as unknown"
+        ),
+    )
+    practice.add_argument(
+        "--response", help="transcribed learner answer (requires --administer)"
+    )
+    practice.add_argument(
+        "--result",
+        choices=("demonstrated", "partial", "not-demonstrated"),
+        help="graded outcome (requires --administer)",
+    )
+    practice.add_argument(
+        "--confidence",
+        type=int,
+        help="learner confidence 1-5 (requires --administer)",
+    )
+    practice.add_argument("--json", action="store_true")
 
     attempts = commands.add_parser("attempts", help="show evidence and proposals")
     attempts.add_argument("--json", action="store_true")
@@ -305,10 +328,61 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "practice":
+            administered_only = {
+                "--response": args.response,
+                "--result": args.result,
+                "--confidence": args.confidence,
+            }
+            if args.administer:
+                missing = [
+                    flag
+                    for flag, value in administered_only.items()
+                    if value is None
+                ]
+                if missing:
+                    raise WorkspaceError(
+                        "practice --administer requires "
+                        + ", ".join(sorted(administered_only))
+                        + "; missing: "
+                        + ", ".join(missing)
+                    )
+                result = PracticeService(workspace).run_administered(
+                    item_id=args.item,
+                    response=args.response,
+                    result=args.result,
+                    confidence=args.confidence,
+                    agent_help=args.agent_help or "substantial",
+                )
+                _emit(
+                    {
+                        "event_id": result.attempt.event_id,
+                        "item_id": result.attempt.item_id,
+                        "result": result.attempt.result,
+                        "confidence": result.attempt.confidence,
+                        "agent_help": result.attempt.agent_help,
+                        "administered": result.attempt.administered,
+                        "initial_latency_ms": result.attempt.initial_latency_ms,
+                        "occurred_at": result.attempt.occurred_at.isoformat(),
+                        "proposal_due_at": result.proposal.due_at.isoformat(),
+                        "proposal_algorithm": result.proposal.algorithm,
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            supplied = [
+                flag
+                for flag, value in administered_only.items()
+                if value is not None
+            ]
+            if supplied:
+                raise WorkspaceError(
+                    ", ".join(supplied)
+                    + " only apply to agent-administered practice; add --administer"
+                )
             PracticeService(workspace).run(
                 item_id=args.item,
                 io=ConsoleIO(),
-                agent_help=args.agent_help,
+                agent_help=args.agent_help or "none",
             )
             return 0
         if args.command == "attempts":

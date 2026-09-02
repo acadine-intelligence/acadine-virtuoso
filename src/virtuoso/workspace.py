@@ -30,7 +30,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 9
+_CURRENT_MIGRATION_VERSION = 10
 
 
 class WorkspaceError(RuntimeError):
@@ -200,6 +200,15 @@ class WorkspaceService:
         service._validate_owned_paths()
         if service.config_path.exists():
             raise WorkspaceError(f"workspace already exists at {service.root}")
+        legacy = service._legacy_file_findings()
+        if legacy:
+            names = ", ".join(finding["path"] for finding in legacy)
+            raise WorkspaceError(
+                f"legacy Virtuoso files present in {service.root}: {names}; "
+                "move or remove them (an earlier layout left them behind; "
+                "the live state database lives under .virtuoso/) before "
+                "running init"
+            )
         if service.root.exists() and any(service.root.iterdir()):
             raise WorkspaceError(
                 f"directory is not empty and is not a Virtuoso workspace: {service.root}"
@@ -808,10 +817,110 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'candidate_decisions is append-only');
                 END""",
+            """CREATE TABLE IF NOT EXISTS attempts_with_administered (
+                event_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                item_content_hash TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                initial_response TEXT NOT NULL,
+                initial_latency_ms INTEGER CHECK(initial_latency_ms IS NULL OR initial_latency_ms >= 0),
+                result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
+                confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
+                open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
+                agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
+                support_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                administered INTEGER NOT NULL DEFAULT 0 CHECK(administered IN (0,1)),
+                CHECK(
+                    (administered = 0 AND initial_latency_ms IS NOT NULL)
+                    OR (administered = 1 AND initial_latency_ms IS NULL)
+                )
+            )""",
+            """INSERT INTO attempts_with_administered(
+                event_id, item_id, item_content_hash, occurred_at,
+                initial_response, initial_latency_ms, result, confidence,
+                open_notes, agent_help, support_json, created_at, administered)
+                SELECT event_id, item_id, item_content_hash, occurred_at,
+                       initial_response, initial_latency_ms, result, confidence,
+                       open_notes, agent_help, support_json, created_at, 0
+                FROM attempts""",
+            """CREATE TABLE IF NOT EXISTS scheduler_state_with_administered (
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                algorithm TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                learning_context TEXT NOT NULL,
+                configuration_json TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL REFERENCES attempts_with_administered(event_id),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, algorithm, learning_context)
+            )""",
+            """INSERT INTO scheduler_state_with_administered(
+                item_id, algorithm, algorithm_version, learning_context,
+                configuration_json, state_json, source_event_id, updated_at)
+                SELECT item_id, algorithm, algorithm_version, learning_context,
+                       configuration_json, state_json, source_event_id, updated_at
+                FROM scheduler_state""",
+            """CREATE TABLE IF NOT EXISTS scheduler_proposals_with_administered (
+                proposal_id TEXT PRIMARY KEY,
+                source_event_id TEXT NOT NULL UNIQUE REFERENCES attempts_with_administered(event_id),
+                item_id TEXT NOT NULL REFERENCES items(item_id),
+                algorithm TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                learning_context TEXT NOT NULL,
+                configuration_json TEXT NOT NULL,
+                previous_state_json TEXT,
+                proposed_state_json TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
+            """INSERT INTO scheduler_proposals_with_administered(
+                proposal_id, source_event_id, item_id, algorithm,
+                algorithm_version, learning_context, configuration_json,
+                previous_state_json, proposed_state_json, due_at,
+                rationale, created_at)
+                SELECT proposal_id, source_event_id, item_id, algorithm,
+                       algorithm_version, learning_context, configuration_json,
+                       previous_state_json, proposed_state_json, due_at,
+                       rationale, created_at
+                FROM scheduler_proposals""",
+            """CREATE TABLE IF NOT EXISTS attempt_timings_with_administered (
+                event_id TEXT PRIMARY KEY REFERENCES attempts_with_administered(event_id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL
+            )""",
+            """INSERT INTO attempt_timings_with_administered(
+                event_id, started_at, completed_at)
+                SELECT event_id, started_at, completed_at
+                FROM attempt_timings""",
+            "DROP TABLE attempt_timings",
+            "DROP TABLE scheduler_proposals",
+            "DROP TABLE scheduler_state",
+            "DROP TABLE attempts",
+            "ALTER TABLE attempts_with_administered RENAME TO attempts",
+            "ALTER TABLE scheduler_state_with_administered RENAME TO scheduler_state",
+            "ALTER TABLE scheduler_proposals_with_administered RENAME TO scheduler_proposals",
+            "ALTER TABLE attempt_timings_with_administered RENAME TO attempt_timings",
+            """CREATE TRIGGER attempt_timings_reject_administered
+                BEFORE INSERT ON attempt_timings
+                WHEN (
+                    SELECT administered FROM attempts
+                    WHERE event_id = NEW.event_id
+                ) = 1
+                BEGIN
+                    SELECT RAISE(ABORT, 'administered attempts record no measured timing');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
         # databases build identical CREATE TABLE text for validation.
+        # Migration 10 rebuilds the attempt evidence chain so administered
+        # (agent-mediated) attempts can record latency as NULL/unknown while
+        # measured interactive attempts keep requiring a real latency. The
+        # rebuild copies rows verbatim, backfills administered = 0 for all
+        # pre-existing evidence, and renames tables in place so fresh and
+        # migrated databases produce identical schema text.
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             objects = {
@@ -872,7 +981,8 @@ class WorkspaceService:
                 6: statements[16:24],
                 7: statements[24:27],
                 8: statements[27:28],
-                9: statements[28:],
+                9: statements[28:31],
+                10: statements[31:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -2917,6 +3027,7 @@ class WorkspaceService:
                 "open_notes",
                 "agent_help",
                 "support_actions",
+                "administered",
             },
             "attempt",
         )
@@ -2949,26 +3060,43 @@ class WorkspaceService:
         occurred_at = self._parse_aware_datetime(
             attempt["occurred_at"], label="attempt occurred timestamp"
         )
-        started_at = self._parse_aware_datetime(
-            attempt["started_at"], label="attempt started timestamp"
-        )
-        completed_at = self._parse_aware_datetime(
-            attempt["completed_at"], label="attempt completed timestamp"
-        )
-        if completed_at < started_at:
-            raise WorkspaceError("attempt completed timestamp precedes its start")
-        if occurred_at != completed_at:
-            raise WorkspaceError(
-                "attempt occurred timestamp must identify the completed attempt"
-            )
+        administered = attempt["administered"]
+        if not isinstance(administered, bool):
+            raise WorkspaceError("attempt administered marker must be true or false")
         latency = attempt["initial_latency_ms"]
-        if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
-            raise WorkspaceError("attempt initial latency must be a non-negative integer")
-        elapsed_ms = round((completed_at - started_at).total_seconds() * 1000)
-        if latency > elapsed_ms:
-            raise WorkspaceError(
-                "attempt initial latency exceeds the complete attempt duration"
+        if administered:
+            # Agent-administered attempts happen outside this process's prompt
+            # loop, so no latency was measured. Honest attribution stores the
+            # absence of measurement, never a fabricated number.
+            if latency is not None:
+                raise WorkspaceError(
+                    "administered attempts must record latency as unknown (None)"
+                )
+            if attempt["started_at"] is not None or attempt["completed_at"] is not None:
+                raise WorkspaceError(
+                    "administered attempts must not fabricate measured start or "
+                    "completion timestamps"
+                )
+        else:
+            started_at = self._parse_aware_datetime(
+                attempt["started_at"], label="attempt started timestamp"
             )
+            completed_at = self._parse_aware_datetime(
+                attempt["completed_at"], label="attempt completed timestamp"
+            )
+            if completed_at < started_at:
+                raise WorkspaceError("attempt completed timestamp precedes its start")
+            if occurred_at != completed_at:
+                raise WorkspaceError(
+                    "attempt occurred timestamp must identify the completed attempt"
+                )
+            if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
+                raise WorkspaceError("attempt initial latency must be a non-negative integer")
+            elapsed_ms = round((completed_at - started_at).total_seconds() * 1000)
+            if latency > elapsed_ms:
+                raise WorkspaceError(
+                    "attempt initial latency exceeds the complete attempt duration"
+                )
         due_at = self._parse_aware_datetime(
             proposal["due_at"], label="scheduler due timestamp"
         )
@@ -3066,8 +3194,8 @@ class WorkspaceService:
                 INSERT INTO attempts(
                     event_id, item_id, item_content_hash, occurred_at,
                     initial_response, initial_latency_ms, result, confidence,
-                    open_notes, agent_help, support_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    open_notes, agent_help, support_json, administered
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt["event_id"],
@@ -3081,19 +3209,21 @@ class WorkspaceService:
                     int(attempt["open_notes"]),
                     attempt["agent_help"],
                     support_json,
+                    int(administered),
                 ),
             )
-            db.execute(
-                """
-                INSERT INTO attempt_timings(event_id, started_at, completed_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    attempt["event_id"],
-                    attempt["started_at"],
-                    attempt["completed_at"],
-                ),
-            )
+            if not administered:
+                db.execute(
+                    """
+                    INSERT INTO attempt_timings(event_id, started_at, completed_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        attempt["event_id"],
+                        attempt["started_at"],
+                        attempt["completed_at"],
+                    ),
+                )
             db.execute(
                 """
                 INSERT INTO scheduler_proposals(
@@ -3155,6 +3285,7 @@ class WorkspaceService:
         for row in rows:
             attempt = dict(row)
             attempt["open_notes"] = bool(attempt["open_notes"])
+            attempt["administered"] = bool(attempt["administered"])
             try:
                 support_actions = self._load_json(
                     attempt["support_json"], label="attempt support JSON"
@@ -3452,8 +3583,24 @@ class WorkspaceService:
             "new_items": max(total_items - scheduled_total, 0),
         }
 
+    _LEGACY_FILES = {
+        # Issue #8: leftovers from earlier workspace layouts that have
+        # misdirected discovery. Named here so doctor flags them and init
+        # refuses silent coexistence.
+        "state.db": "legacy-state-db",
+        "virtuoso.db": "legacy-state-db",
+    }
+
+    def _legacy_file_findings(self) -> list[dict[str, str]]:
+        findings: list[dict[str, str]] = []
+        for name, reason in self._LEGACY_FILES.items():
+            if (self.root / name).exists():
+                findings.append({"path": name, "reason": reason})
+        return findings
+
     def doctor(self) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
+        legacy_files = self._legacy_file_findings()
         config = self.configuration()
         stale_items: list[str] = []
         stale_source_links: list[dict[str, str]] = []
@@ -3533,7 +3680,12 @@ class WorkspaceService:
                         "relative_path": row["source_relative_path"],
                     }
                 )
-        healthy = database == "ok" and not stale_items and not stale_source_links
+        healthy = (
+            database == "ok"
+            and not stale_items
+            and not stale_source_links
+            and not legacy_files
+        )
         workload = self._workload_counts(datetime.now(timezone.utc))
         return {
             "status": "healthy" if healthy else "needs-attention",
@@ -3545,6 +3697,7 @@ class WorkspaceService:
             "transfer_events": transfer_count,
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
+            "legacy_files": legacy_files,
             "workload": workload,
         }
 
