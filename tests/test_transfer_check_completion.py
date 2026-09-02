@@ -349,6 +349,7 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "occurred_at": "2026-08-25T09:00:00+00:00",
                 "initial_response": "Synthetic independent response.",
                 "initial_latency_ms": 10,
+                "administered": False,
                 "result": "partial",
                 "confidence": 3,
                 "open_notes": False,

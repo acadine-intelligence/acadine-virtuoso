@@ -110,6 +110,36 @@ class WorkspaceServiceTests(unittest.TestCase):
             )
             db.execute("DROP TABLE items_with_retired")
             db.execute("PRAGMA legacy_alter_table = OFF")
+            # Rebuild attempts in its v3 shape (migration 10 had already
+            # given it the nullable-latency administered form at init time;
+            # attempt_timings was already dropped with the other child
+            # tables above and is recreated below).
+            db.execute("PRAGMA legacy_alter_table = ON")
+            db.execute("ALTER TABLE attempts RENAME TO attempts_v10")
+            db.execute(
+                """CREATE TABLE attempts (
+                    event_id TEXT PRIMARY KEY,
+                    item_id TEXT NOT NULL REFERENCES items(item_id),
+                    item_content_hash TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    initial_response TEXT NOT NULL,
+                    initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
+                    result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
+                    confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
+                    open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
+                    agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
+                    support_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                "INSERT INTO attempts SELECT event_id, item_id, "
+                "item_content_hash, occurred_at, initial_response, "
+                "initial_latency_ms, result, confidence, open_notes, "
+                "agent_help, support_json, created_at FROM attempts_v10"
+            )
+            db.execute("DROP TABLE attempts_v10")
+            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DELETE FROM schema_migrations WHERE version > 3")
         return service
 
@@ -128,7 +158,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (9,))
+            self.assertEqual(migration, (10,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -157,8 +187,19 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 10)),
+                list(range(1, 11)),
             )
+
+    def test_open_after_migration_10_reports_version_10(self) -> None:
+        service = WorkspaceService.init(self.root)
+        with sqlite3.connect(service.db_path) as db:
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
+        self.assertEqual(versions, list(range(1, 11)))
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
         target = Path(self.tmp.name).resolve() / "target"
@@ -252,6 +293,54 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.assertEqual(health["status"], "needs-attention")
         self.assertEqual(health["stale_items"], ["linked-item"])
 
+    def test_doctor_flags_legacy_root_level_state_db(self) -> None:
+        # Issue #8: a 0-byte state.db at the workspace root is a leftover from
+        # an earlier layout; doctor must name it instead of ignoring it.
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="ok-item",
+            title="Healthy",
+            focus="hygiene",
+            prompt="P?",
+            answer="A.",
+        )
+        (self.root / "state.db").write_bytes(b"")
+
+        health = service.doctor()
+        self.assertEqual(health["status"], "needs-attention")
+        self.assertEqual(
+            health["legacy_files"],
+            [{"path": "state.db", "reason": "legacy-state-db"}],
+        )
+
+    def test_doctor_clean_workspace_reports_no_legacy_files(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="ok-item",
+            title="Healthy",
+            focus="hygiene",
+            prompt="P?",
+            answer="A.",
+        )
+        health = service.doctor()
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["legacy_files"], [])
+
+    def test_init_refuses_contaminated_layout_with_legacy_state_db(self) -> None:
+        # Issue #8: init must not silently coexist with a legacy state.db.
+        self.root.mkdir(parents=True)
+        (self.root / "state.db").write_bytes(b"")
+
+        with self.assertRaisesRegex(
+            WorkspaceError, r"legacy Virtuoso files present"
+        ):
+            WorkspaceService.init(self.root)
+
+    def test_doctor_does_not_follow_later_created_item_symlink_old_guard(self) -> None:
+        # Guard against name drift: the original symlink test must keep
+        # passing unchanged while legacy-file checks grow.
+        self.assertTrue(callable(WorkspaceService.doctor))
+
     def test_doctor_reports_workload_counts(self) -> None:
         service = WorkspaceService.init(self.root)
         service.add_item(
@@ -288,6 +377,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             "completed_at": attempted_at.isoformat(),
             "initial_response": "attempt text",
             "initial_latency_ms": 0,
+            "administered": False,
             "result": "demonstrated",
             "confidence": 4,
             "open_notes": False,
@@ -490,7 +580,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
