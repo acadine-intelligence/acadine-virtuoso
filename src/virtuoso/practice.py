@@ -9,6 +9,7 @@ from typing import Protocol
 
 from fsrs import Card, Rating, Scheduler
 
+from .errors import VirtuosoError
 from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
 
@@ -16,7 +17,7 @@ _RESULTS = {"demonstrated", "partial", "not-demonstrated"}
 _AGENT_HELP = {"none", "light", "substantial", "unknown"}
 
 
-class PracticeError(RuntimeError):
+class PracticeError(VirtuosoError):
     """A practice session cannot proceed without corrupting its evidence."""
 
 

@@ -28,13 +28,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .errors import VirtuosoError
 from .workspace import WorkspaceService
 
 _FTS_TABLE = "item_fts"
 _EMBED_TABLE = "item_embeddings"
 
 
-class SearchError(RuntimeError):
+class SearchError(VirtuosoError):
     """A retrieval request cannot be served against this workspace."""
 
 
@@ -120,6 +121,12 @@ def _fresh_index(service: WorkspaceService) -> sqlite3.Connection:
     return db
 
 
+def _plain_fts_query(query: str) -> str:
+    return " ".join(
+        '"' + token.replace('"', '""') + '"' for token in query.split()
+    )
+
+
 def lexical_search(
     service: WorkspaceService, query: str, *, limit: int = 10
 ) -> list[SearchHit]:
@@ -129,18 +136,19 @@ def lexical_search(
         raise SearchError("lexical query must be non-empty")
     if not 1 <= limit <= 100:
         raise SearchError("limit must be between 1 and 100")
+    plain_query = _plain_fts_query(query)
     db = _fresh_index(service)
     try:
         rows = db.execute(
             f"""
             SELECT item_id, bm25({_FTS_TABLE}) AS rank,
-                   snippet({_FTS_TABLE}, 2, '', '…', ' ', 12) AS snip
+                   snippet({_FTS_TABLE}, -1, '', '…', ' ', 12) AS snip
             FROM {_FTS_TABLE}
             WHERE {_FTS_TABLE} MATCH ?
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            (plain_query, limit),
         ).fetchall()
     except sqlite3.OperationalError as exc:
         raise SearchError(f"invalid lexical query {query!r}: {exc}") from exc
@@ -153,7 +161,10 @@ def lexical_search(
 
 
 def _unit(vector: list[float]) -> list[float]:
-    values = [float(v) for v in vector]
+    try:
+        values = [float(v) for v in vector]
+    except (TypeError, ValueError) as exc:
+        raise SearchError("embedding vector must contain only numbers") from exc
     if not values or any(math.isnan(v) or math.isinf(v) for v in values):
         raise SearchError("embedding vector must be finite and non-empty")
     norm = math.sqrt(sum(v * v for v in values))
