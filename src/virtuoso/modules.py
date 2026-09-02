@@ -68,6 +68,7 @@ _SHELL_EXECUTABLES = {
     "cmd",
     "cmd.exe",
     "csh",
+    "dash",
     "fish",
     "powershell",
     "pwsh",

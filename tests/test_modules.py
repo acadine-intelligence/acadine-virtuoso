@@ -260,6 +260,11 @@ print(json.dumps({
             f"#!{shell_alias}\nprintf '%s\\n' {json.dumps(result_json)}\n",
         )
         script_alias.chmod(0o700)
+        dash_named = self._script(
+            "dash",
+            f"#!{sys.executable}\nprint({result_json!r})\n",
+        )
+        dash_named.chmod(0o700)
 
         cases = (
             (
@@ -271,6 +276,7 @@ print(json.dumps({
                 ],
             ),
             ("resolved interpreter ancestry", [str(script_alias)]),
+            ("common POSIX shell name", [str(dash_named)]),
         )
         for label, argv in cases:
             with self.subTest(label=label):

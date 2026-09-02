@@ -30,6 +30,12 @@ Checks run from a clean worktree:
 
 A synthetic CLI journey also completed workspace initialization, item creation, next-item selection, lexical retrieval, read-only workload analytics, and a healthy `doctor` check.
 
+## CI portability finding, 2026-09-02
+
+The first Linux run of PR #16 found that Ubuntu resolves `/bin/sh` to an executable named `dash`. The module boundary checked the resolved basename, and its shell denylist did not include `dash`. Two security subtests failed because the alias could execute.
+
+A platform-independent regression case now creates a reviewed executable named `dash` and proves that manifest loading rejects it. The production denylist includes `dash`. The focused regression test and the full 190-test Python suite pass locally. The pull request must receive a green Linux run before merge.
+
 ## Historical issue checks
 
 PR #11 closed issues #2, #4, #8, and #9. Their issue bodies record the public symptom, resolved behavior, test scope, and merge commit. Private workspace names and learner content are excluded.
