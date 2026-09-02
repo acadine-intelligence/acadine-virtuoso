@@ -8,7 +8,19 @@
  * - virtuoso-learning-item frontmatter (snake_case keys, canonical)
  */
 import { describe, expect, it } from "vitest";
-import { deckChapterCards, fmKey, frontmatter, parseDueOutput } from "../parsing";
+import {
+	cardContextRows,
+	deckChapterCards,
+	fmKey,
+	frontmatter,
+	isLearningItemFrontmatter,
+	learningItemId,
+	parseDueOutput,
+	parseNextRationale,
+	parsePracticeRationales,
+	parseSchedulerRationales,
+	parseTransferProjects,
+} from "../parsing";
 
 // ---------- deckChapterCards ----------
 
@@ -193,5 +205,193 @@ item-id: legacy-id
 		const fm = frontmatter('---\ntitle: "Quoted Title"\nnote: \'single\'\n---');
 		expect(fm["title"]).toBe("Quoted Title");
 		expect(fm["note"]).toBe("single");
+	});
+});
+
+describe("parseSchedulerRationales", () => {
+	it("uses the latest supplied scheduler rationale for each item", () => {
+		expect(
+			parseSchedulerRationales(
+				JSON.stringify({
+					proposals: [
+						{ item_id: "item-a", rationale: "Earlier scheduling evidence." },
+						{ item_id: "item-b", rationale: "Only scheduling evidence." },
+						{ item_id: "item-a", rationale: "Latest scheduling evidence." },
+						{
+							item_id: "item-a",
+							learning_context: "project-transfer",
+							rationale: "Unrelated scheduling evidence.",
+						},
+					],
+				}),
+			),
+		).toEqual({
+			"item-a": "Latest scheduling evidence.",
+			"item-b": "Only scheduling evidence.",
+		});
+	});
+
+	it("treats missing or malformed optional CLI output as no rationale", () => {
+		for (const stdout of ["", "{bad json", "{}", '{"proposals":null}']) {
+			expect(parseSchedulerRationales(stdout)).toEqual({});
+		}
+	});
+
+	it("rejects rationale records without safe product item ids", () => {
+		expect(
+			parseSchedulerRationales(
+				JSON.stringify({
+					proposals: [
+						{ item_id: "__proto__", rationale: "Unsafe." },
+						{ item_id: "/private/item", rationale: "Unsafe." },
+						{ item_id: "safe-item", rationale: "Explicit evidence." },
+					],
+				}),
+			),
+		).toEqual({ "safe-item": "Explicit evidence." });
+	});
+});
+
+describe("parseNextRationale", () => {
+	it("preserves the CLI selection reason for the selected item", () => {
+		expect(
+			parseNextRationale(
+				JSON.stringify({
+					item_id: "fresh-item",
+					focus: "agentic-engineering",
+					rationale: "Selected a new item in deterministic item-id order.",
+				}),
+			),
+		).toEqual({
+			"fresh-item": "Selected a new item in deterministic item-id order.",
+		});
+	});
+});
+
+describe("parsePracticeRationales", () => {
+	it("uses the exact selection reason with scheduler rationale as fallback", () => {
+		expect(
+			parsePracticeRationales(
+				JSON.stringify({
+					proposals: [
+						{ item_id: "selected-item", rationale: "Scheduler evidence." },
+						{ item_id: "other-item", rationale: "Other scheduler evidence." },
+					],
+				}),
+				JSON.stringify({
+					item_id: "selected-item",
+					rationale: "Selected because it is the earliest due item.",
+				}),
+			),
+		).toEqual({
+			"selected-item": "Selected because it is the earliest due item.",
+			"other-item": "Other scheduler evidence.",
+		});
+	});
+});
+
+describe("parseTransferProjects", () => {
+	it("collects only explicit product project ids from linked transfer events", () => {
+		expect(
+			parseTransferProjects(
+				JSON.stringify({
+					events: [
+						{ item_id: "item-a", project_id: "project-one" },
+						{ item_id: "item-a", project_id: "project-one" },
+						{ item_id: "item-a", project_id: "/Users/private/project" },
+						{ item_id: "item-a", project_id: "project-two" },
+						{ item_id: "item-b", project_id: "project-three" },
+					],
+				}),
+			),
+		).toEqual({
+			"item-a": ["project-one", "project-two"],
+			"item-b": ["project-three"],
+		});
+	});
+
+	it("treats unavailable transfer output as no project linkage", () => {
+		for (const stdout of ["", "{bad json", "{}", '{"events":null}']) {
+			expect(parseTransferProjects(stdout)).toEqual({});
+		}
+	});
+
+	it("rejects transfer records without safe product item ids", () => {
+		expect(
+			parseTransferProjects(
+				JSON.stringify({
+					events: [
+						{ item_id: "__proto__", project_id: "project-one" },
+						{ item_id: "/private/item", project_id: "project-one" },
+						{ item_id: "safe-item", project_id: "project-one" },
+					],
+				}),
+			),
+		).toEqual({ "safe-item": ["project-one"] });
+	});
+});
+
+describe("cardContextRows", () => {
+	it("keeps explicit focus, project linkage, and the full why-now text", () => {
+		const longRationale = `Latest scheduler evidence: ${"measured recall and retained support context. ".repeat(20)}`;
+		expect(
+			cardContextRows({
+				focus: "agentic-engineering",
+				projectId: "current-project",
+				linkedProjectIds: ["current-project", "/private/note", "earlier-project"],
+				whyNow: longRationale,
+			}),
+		).toEqual([
+			{ label: "Focus", text: "agentic-engineering" },
+			{ label: "Projects", text: "current-project, earlier-project" },
+			{ label: "Why now", text: longRationale },
+		]);
+
+		expect(cardContextRows({ focus: "learning-science" })).toEqual([
+			{ label: "Focus", text: "learning-science" },
+		]);
+	});
+});
+
+describe("core item context linkage", () => {
+	it("joins CLI context to the same item through the public item id field", () => {
+		const fm = frontmatter(`---
+schema: virtuoso/item@0.1
+id: "scheduler-boundary"
+title: "Explain the scheduler boundary"
+focus: "agentic-engineering"
+project_id: "current-project"
+---`);
+		const id = learningItemId(fm);
+		const rationales = parseSchedulerRationales(
+			JSON.stringify({
+				proposals: [{ item_id: id, rationale: "The latest proposal is due." }],
+			}),
+		);
+		const projects = parseTransferProjects(
+			JSON.stringify({
+				events: [{ item_id: id, project_id: "transfer-project" }],
+			}),
+		);
+
+		expect(id).toBe("scheduler-boundary");
+		expect(
+			cardContextRows({
+				focus: fmKey(fm, "focus"),
+				projectId: fmKey(fm, "project_id"),
+				linkedProjectIds: projects[id],
+				whyNow: rationales[id],
+			}),
+		).toEqual([
+			{ label: "Focus", text: "agentic-engineering" },
+			{ label: "Projects", text: "current-project, transfer-project" },
+			{ label: "Why now", text: "The latest proposal is due." },
+		]);
+	});
+
+	it("recognizes public core and legacy adapter learning-item schemas", () => {
+		expect(isLearningItemFrontmatter({ schema: "virtuoso/item@0.1" })).toBe(true);
+		expect(isLearningItemFrontmatter({ schema: "virtuoso-learning-item/0.1" })).toBe(true);
+		expect(isLearningItemFrontmatter({ schema: "unrelated/item@0.1" })).toBe(false);
 	});
 });

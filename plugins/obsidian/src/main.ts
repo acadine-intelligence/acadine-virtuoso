@@ -1,6 +1,16 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Vault } from "obsidian";
 import { spawn } from "child_process";
-import { deckChapterCards, fmKey, frontmatter, parseDueOutput } from "./parsing";
+import {
+	cardContextRows,
+	deckChapterCards,
+	fmKey,
+	frontmatter,
+	isLearningItemFrontmatter,
+	learningItemId,
+	parseDueOutput,
+	parsePracticeRationales,
+	parseTransferProjects,
+} from "./parsing";
 import { GradeGate } from "./grading";
 
 /**
@@ -40,6 +50,10 @@ interface DueCard {
 	title: string;
 	promptLines: string[];
 	detail?: string;
+	focus?: string;
+	projectId?: string;
+	linkedProjectIds?: string[];
+	whyNow?: string;
 }
 
 interface VirtuosoSettings {
@@ -179,6 +193,20 @@ class RepSessionModal extends Modal {
 				: "";
 		statusEl.setText(`Card ${this.index + 1} of ${this.cards.length}${gradedHint}${this.revealed ? "" : "  ·  recall first, then Space to reveal"}`);
 		bodyEl.createEl("h3", { text: card.title });
+		const contextRows = cardContextRows(card);
+		if (contextRows.length > 0) {
+			const contextEl = bodyEl.createDiv({ cls: "virtuoso-rep-context" });
+			contextEl.style.color = "var(--text-muted)";
+			contextEl.style.marginBottom = "1em";
+			for (const row of contextRows) {
+				const line = contextEl.createEl("p");
+				line.style.margin = "0.25em 0";
+				line.style.whiteSpace = "pre-wrap";
+				line.style.overflowWrap = "anywhere";
+				line.createEl("strong", { text: `${row.label}:` });
+				line.createEl("span", { text: ` ${row.text}` });
+			}
+		}
 		for (let i = 0; i < card.promptLines.length; i++) {
 			bodyEl.createEl("p", { text: card.promptLines[i] });
 			if (!this.revealed && i === 0 && card.promptLines.length > 1) break; // multi-part: reveal part by part
@@ -274,7 +302,7 @@ export default class VirtuosoPlugin extends Plugin {
 		return this.settings.cliPath.replace(/^~(?=\/|$)/, (process.env.HOME ?? ""));
 	}
 
-	/** Run a read-only CLI command and capture stdout. */
+	/** Run one CLI command and capture stdout. Context callers use read-only commands. */
 	private cliRun(args: string[]): Promise<{ ok: boolean; stdout: string }> {
 		return new Promise((resolve) => {
 			const proc = spawn("python3", [this.cli(), ...args], { timeout: 15000 });
@@ -295,12 +323,12 @@ export default class VirtuosoPlugin extends Plugin {
 			const raw = await vault.read(child);
 			const fm = frontmatter(raw);
 			if (
-				fm["schema"]?.startsWith("virtuoso-learning-item") &&
+				isLearningItemFrontmatter(fm) &&
 				fmKey(fm, "review_state") === "proposed"
 			) {
 				items.push({
 					file: child,
-					itemId: fmKey(fm, "item_id") || child.basename,
+					itemId: learningItemId(fm) || child.basename,
 					title: fmKey(fm, "title") || child.basename,
 					exerciseType: fmKey(fm, "exercise_type") || "?",
 					practiceMode: fmKey(fm, "practice_mode") || "?",
@@ -336,6 +364,20 @@ export default class VirtuosoPlugin extends Plugin {
 		// Deck chapters due, straight from the CLI verdict.
 		const due = await this.cliRun(["due"]);
 		const parsed = parseDueOutput(due.stdout);
+		let rationales: Record<string, string> = {};
+		let transferProjects: Record<string, string[]> = {};
+		if (parsed.itemsDue.length > 0) {
+			const [attempts, transfers, next] = await Promise.all([
+				this.cliRun(["attempts", "--json"]),
+				this.cliRun(["transfer", "list", "--json"]),
+				this.cliRun(["next", "--json"]),
+			]);
+			rationales = parsePracticeRationales(
+				attempts.ok ? attempts.stdout : "",
+				next.ok ? next.stdout : "",
+			);
+			if (transfers.ok) transferProjects = parseTransferProjects(transfers.stdout);
+		}
 		if (parsed.deckChaptersDue.length > 0) {
 			const deckIds = new Set(parsed.deckChaptersDue);
 			const deckFile = vault.getAbstractFileByPath(this.settings.deckPath);
@@ -369,8 +411,8 @@ export default class VirtuosoPlugin extends Plugin {
 					if (!(child instanceof TFile) || child.extension !== "md") continue;
 					const raw = await vault.read(child);
 					const fm = frontmatter(raw);
-					if (!fm["schema"]?.startsWith("virtuoso-learning-item")) continue;
-					const id = fmKey(fm, "item_id");
+					if (!isLearningItemFrontmatter(fm)) continue;
+					const id = learningItemId(fm);
 					if (id) {
 						const body = raw.slice(raw.indexOf("---", 4) + 4);
 						byItemId.set(id, { fm, body, basename: child.basename });
@@ -385,6 +427,10 @@ export default class VirtuosoPlugin extends Plugin {
 						id: itemId,
 						title: fmKey(hit.fm, "title") || hit.basename,
 						promptLines: lines,
+						focus: fmKey(hit.fm, "focus") || undefined,
+						projectId: fmKey(hit.fm, "project_id") || undefined,
+						linkedProjectIds: transferProjects[itemId],
+						whyNow: rationales[itemId],
 					});
 				}
 			}
