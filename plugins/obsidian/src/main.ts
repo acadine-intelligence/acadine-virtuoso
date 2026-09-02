@@ -231,21 +231,35 @@ export default class VirtuosoPlugin extends Plugin {
 	settings: VirtuosoSettings = DEFAULT_SETTINGS;
 
 	async onload() {
-		await this.loadSettings();
-		this.addRibbonIcon("list-checks", "Virtuoso review queue", () =>
-			void this.openReviewQueue(),
-		);
-		this.addCommand({
-			id: "virtuoso-review-queue",
-			name: "Open review queue",
-			callback: () => void this.openReviewQueue(),
-		});
-		this.addCommand({
-			id: "virtuoso-cycle-due",
-			name: "Cycle today's cards",
-			callback: () => void this.openRepSession(),
-		});
-		this.addSettingTab(new VirtuosoSettingTab(this.app, this));
+		try {
+			await this.loadSettings();
+			this.addRibbonIcon("list-checks", "Virtuoso review queue", () =>
+				void this.openReviewQueue(),
+			);
+			this.addCommand({
+				id: "virtuoso-review-queue",
+				name: "Open review queue",
+				callback: () => void this.openReviewQueue(),
+			});
+			this.addCommand({
+				id: "virtuoso-cycle-due",
+				name: "Cycle today's cards",
+				callback: () => void this.openRepSession(),
+			});
+			this.addSettingTab(new VirtuosoSettingTab(this.app, this));
+		} catch (err) {
+			// Issue #9: a plugin that fails to load disappears silently — Obsidian
+			// restricted mode or a corrupt data.json shows the user nothing. Surface
+			// the failure path we own; the console keeps the full stack.
+			console.error("Virtuoso plugin failed to load:", err);
+			new Notice(
+				`Virtuoso failed to load: ${err instanceof Error ? err.message : String(err)}. ` +
+					"If the plugin stays inactive, check restricted-mode (Community plugins " +
+					"toggle) and the plugin's data.json.",
+				10000,
+			);
+			throw err;
+		}
 	}
 
 	private async loadSettings() {
@@ -389,7 +403,15 @@ export default class VirtuosoPlugin extends Plugin {
 
 	/** Grade through the CLI only — the plugin never computes an interval. */
 	private async gradeCard(card: DueCard, rating: Rating | "skip"): Promise<string | null> {
-		if (rating === "skip") return null;
+		if (rating === "skip") {
+			// Issue #4: a skip must leave a trace. Record it in the CLI's
+			// evidence ledger (schedule untouched); a failure surfaces as a
+			// Notice rather than vanishing.
+			if (card.source !== "item") return null;
+			const res = await this.cliRun(["skip", card.id, "--surface", "obsidian-plugin"]);
+			if (!res.ok) new Notice(`Virtuoso skip record failed: ${res.stdout.trim()}`, 6000);
+			return null;
+		}
 		const args =
 			card.source === "deck" && card.chapter
 				? ["deck-rep", card.chapter, rating]
