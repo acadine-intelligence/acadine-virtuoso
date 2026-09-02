@@ -200,6 +200,15 @@ class WorkspaceService:
         service._validate_owned_paths()
         if service.config_path.exists():
             raise WorkspaceError(f"workspace already exists at {service.root}")
+        legacy = service._legacy_file_findings()
+        if legacy:
+            names = ", ".join(finding["path"] for finding in legacy)
+            raise WorkspaceError(
+                f"legacy Virtuoso files present in {service.root}: {names}; "
+                "move or remove them (an earlier layout left them behind; "
+                "the live state database lives under .virtuoso/) before "
+                "running init"
+            )
         if service.root.exists() and any(service.root.iterdir()):
             raise WorkspaceError(
                 f"directory is not empty and is not a Virtuoso workspace: {service.root}"
@@ -3574,8 +3583,24 @@ class WorkspaceService:
             "new_items": max(total_items - scheduled_total, 0),
         }
 
+    _LEGACY_FILES = {
+        # Issue #8: leftovers from earlier workspace layouts that have
+        # misdirected discovery. Named here so doctor flags them and init
+        # refuses silent coexistence.
+        "state.db": "legacy-state-db",
+        "virtuoso.db": "legacy-state-db",
+    }
+
+    def _legacy_file_findings(self) -> list[dict[str, str]]:
+        findings: list[dict[str, str]] = []
+        for name, reason in self._LEGACY_FILES.items():
+            if (self.root / name).exists():
+                findings.append({"path": name, "reason": reason})
+        return findings
+
     def doctor(self) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
+        legacy_files = self._legacy_file_findings()
         config = self.configuration()
         stale_items: list[str] = []
         stale_source_links: list[dict[str, str]] = []
@@ -3655,7 +3680,12 @@ class WorkspaceService:
                         "relative_path": row["source_relative_path"],
                     }
                 )
-        healthy = database == "ok" and not stale_items and not stale_source_links
+        healthy = (
+            database == "ok"
+            and not stale_items
+            and not stale_source_links
+            and not legacy_files
+        )
         workload = self._workload_counts(datetime.now(timezone.utc))
         return {
             "status": "healthy" if healthy else "needs-attention",
@@ -3667,6 +3697,7 @@ class WorkspaceService:
             "transfer_events": transfer_count,
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
+            "legacy_files": legacy_files,
             "workload": workload,
         }
 
