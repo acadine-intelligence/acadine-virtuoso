@@ -14,6 +14,14 @@ Human review queue for Virtuoso learning items, inside Obsidian.
   chapter grades at most once per session (first card's rating). Parsing
   lives in `src/parsing.ts`, session grading rules in `src/grading.ts`;
   both are pure modules covered by `npm run test` (vitest).
+- Before answer reveal, item cards show the explicit focus, any explicit
+  project identifiers, and the latest scheduler rationale when available.
+  Project identifiers come only from `project_id` frontmatter or linked
+  transfer events. The plugin never infers them from paths or note names.
+- The optional context lookup reads `next --json`, `attempts --json`, and
+  `transfer list --json`. The exact selection reason takes precedence for
+  the selected item; its latest scheduler rationale is the fallback. Missing
+  or malformed context does not block the practice session.
 
 That single frontmatter flip is the **entire write surface**. Scheduling,
 intervals, and evidence stay with the Virtuoso CLI; flashcards stay with the

@@ -40,6 +40,130 @@ export function fmKey(fm: Record<string, string>, canonical: string): string {
 	return fm[alias] ?? "";
 }
 
+/** Resolve the legacy adapter key and the public core learning-item key. */
+export function learningItemId(fm: Record<string, string>): string {
+	return fmKey(fm, "item_id") || fmKey(fm, "id");
+}
+
+/** Accept the public core schema and the legacy Obsidian adapter schema. */
+export function isLearningItemFrontmatter(fm: Record<string, string>): boolean {
+	const schema = fm["schema"] ?? "";
+	return schema.startsWith("virtuoso/item@") || schema.startsWith("virtuoso-learning-item/");
+}
+
+const PRODUCT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function productId(value: unknown): string | null {
+	return typeof value === "string" && PRODUCT_ID.test(value) ? value : null;
+}
+
+function jsonObject(stdout: string): Record<string, unknown> | null {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(stdout);
+	} catch {
+		return null;
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+	return payload as Record<string, unknown>;
+}
+
+function jsonArrayField(stdout: string, field: string): unknown[] {
+	const value = jsonObject(stdout)?.[field];
+	return Array.isArray(value) ? value : [];
+}
+
+/** Read each item's latest scheduler rationale from `attempts --json`. */
+export function parseSchedulerRationales(stdout: string): Record<string, string> {
+	const rationales: Record<string, string> = {};
+	for (const proposal of jsonArrayField(stdout, "proposals")) {
+		if (!proposal || typeof proposal !== "object") continue;
+		const { item_id: itemId, learning_context: learningContext, rationale } = proposal as {
+			item_id?: unknown;
+			learning_context?: unknown;
+			rationale?: unknown;
+		};
+		const safeItemId = productId(itemId);
+		if (!safeItemId) continue;
+		if (learningContext !== undefined && learningContext !== "atomic-recall") continue;
+		if (typeof rationale !== "string" || !rationale.trim()) continue;
+		rationales[safeItemId] = rationale.trim();
+	}
+	return rationales;
+}
+
+/** Read the selected item's exact reason from `next --json`. */
+export function parseNextRationale(stdout: string): Record<string, string> {
+	const payload = jsonObject(stdout);
+	const itemId = productId(payload?.["item_id"]);
+	const rationale = payload?.["rationale"];
+	if (!itemId || typeof rationale !== "string" || !rationale.trim()) return {};
+	return { [itemId]: rationale.trim() };
+}
+
+/** Prefer the current selection reason and retain proposal reasons for other cards. */
+export function parsePracticeRationales(
+	attemptsStdout: string,
+	nextStdout: string,
+): Record<string, string> {
+	return {
+		...parseSchedulerRationales(attemptsStdout),
+		...parseNextRationale(nextStdout),
+	};
+}
+
+/** Read explicit item-to-project links from `transfer list --json`. */
+export function parseTransferProjects(stdout: string): Record<string, string[]> {
+	const projects: Record<string, string[]> = {};
+	for (const event of jsonArrayField(stdout, "events")) {
+		if (!event || typeof event !== "object") continue;
+		const { item_id: itemId, project_id: projectId } = event as {
+			item_id?: unknown;
+			project_id?: unknown;
+		};
+		const safeItemId = productId(itemId);
+		const safeProjectId = productId(projectId);
+		if (!safeItemId || !safeProjectId) continue;
+		if (!Object.prototype.hasOwnProperty.call(projects, safeItemId)) projects[safeItemId] = [];
+		if (!projects[safeItemId].includes(safeProjectId)) projects[safeItemId].push(safeProjectId);
+	}
+	return projects;
+}
+
+export interface CardContext {
+	focus?: string;
+	projectId?: string;
+	linkedProjectIds?: readonly string[];
+	whyNow?: string;
+}
+
+export interface CardContextRow {
+	label: string;
+	text: string;
+}
+
+/** Build safe, explicit context rows for display before answer reveal. */
+export function cardContextRows(context: CardContext): CardContextRow[] {
+	const rows: CardContextRow[] = [];
+	if (context.focus?.trim()) rows.push({ label: "Focus", text: context.focus.trim() });
+
+	const projects: string[] = [];
+	for (const candidate of [context.projectId, ...(context.linkedProjectIds ?? [])]) {
+		const safeProjectId = productId(candidate);
+		if (!safeProjectId) continue;
+		if (!projects.includes(safeProjectId)) projects.push(safeProjectId);
+	}
+	if (projects.length > 0) {
+		rows.push({
+			label: projects.length === 1 ? "Project" : "Projects",
+			text: projects.join(", "),
+		});
+	}
+
+	if (context.whyNow?.trim()) rows.push({ label: "Why now", text: context.whyNow });
+	return rows;
+}
+
 export interface QA {
 	q: string;
 	a: string;
