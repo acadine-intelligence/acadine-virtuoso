@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -9,8 +10,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .candidates import CandidateService
-from .modules import ModuleError
-from .practice import PracticeError, PracticeIO, PracticeService
+from .errors import VirtuosoError
+from .practice import PracticeIO, PracticeService
 from .workspace import WorkspaceError, WorkspaceService
 
 
@@ -550,8 +551,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not isinstance(vector, list):
                         raise ValueError("vector must be a JSON array")
                 except ValueError as exc:
-                    _emit({"error": f"invalid vector JSON: {exc}"}, as_json=True)
-                    return 2
+                    raise search_module.SearchError(
+                        f"invalid vector JSON: {exc}"
+                    ) from exc
                 search_module.embed_upsert(
                     workspace,
                     item_id=args.item,
@@ -574,8 +576,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not isinstance(vector, list):
                         raise ValueError("vector must be a JSON array")
                 except ValueError as exc:
-                    _emit({"error": f"invalid vector JSON: {exc}"}, as_json=True)
-                    return 2
+                    raise search_module.SearchError(
+                        f"invalid vector JSON: {exc}"
+                    ) from exc
                 hits = search_module.semantic_search(
                     workspace, model=args.model, query_vector=vector, limit=args.limit
                 )
@@ -836,8 +839,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 0
-    except (WorkspaceError, PracticeError, ModuleError) as exc:
+    except VirtuosoError as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"Error: database unavailable: {exc}", file=sys.stderr)
         return 2
     return 2
 

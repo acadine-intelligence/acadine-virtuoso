@@ -122,6 +122,54 @@ class SearchTests(unittest.TestCase):
         hits = lexical_search(self.workspace, "tunneling")
         self.assertEqual([hit.item_id for hit in hits], ["fresh"])
 
+    def test_lexical_search_treats_ordinary_punctuation_as_plain_text(self) -> None:
+        self.workspace.add_item(
+            item_id="plain-syntax",
+            title="C++ and goroutine-channel",
+            focus="retrieval",
+            prompt="Why is it's ordinary text with an unbalanced quote and a leading minus?",
+            answer="NOT foo and item_id foo remain search terms.",
+        )
+
+        queries = (
+            "it's",
+            "C++",
+            "goroutine-channel",
+            '"unbalanced',
+            "NOT foo",
+            "-leading",
+            "item_id:foo",
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                self.assertIn(
+                    "plain-syntax",
+                    [hit.item_id for hit in lexical_search(self.workspace, query)],
+                )
+
+    def test_lexical_search_title_match_returns_title_snippet(self) -> None:
+        self.workspace.add_item(
+            item_id="title-only",
+            title="Chiaroscuro calibration marker",
+            focus="retrieval",
+            prompt="Name the visual calibration concept.",
+            answer="Use the unique title term.",
+        )
+
+        hits = lexical_search(self.workspace, "chiaroscuro")
+
+        self.assertEqual(hits[0].item_id, "title-only")
+        self.assertIn("chiaroscuro", hits[0].snippet.lower())
+
+    def test_embedding_vector_rejects_non_numeric_values_as_search_error(self) -> None:
+        with self.assertRaisesRegex(SearchError, "numbers"):
+            embed_upsert(
+                self.workspace,
+                item_id="broadcasting",
+                model="bad-values",
+                vector=["not-a-number"],  # type: ignore[list-item]
+            )
+
     def test_json_vector_roundtrip(self) -> None:
         vector = _unit([0.3, 0.4, 0.5])
         embed_upsert(self.workspace, item_id="broadcasting", model="rt", vector=vector)

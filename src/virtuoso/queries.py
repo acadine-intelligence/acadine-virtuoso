@@ -28,8 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .errors import VirtuosoError
 
-class QueryError(RuntimeError):
+
+class QueryError(VirtuosoError):
     """A read-only query cannot be answered against this workspace."""
 
 

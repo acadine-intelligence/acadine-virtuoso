@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .errors import VirtuosoError
+
 try:
     import resource
 except ImportError:  # pragma: no cover - non-POSIX platforms fail closed at runtime
@@ -227,7 +229,7 @@ def _reject_disallowed_executable(command: str, *, cwd: Path) -> None:
     raise ModuleError("module executable interpreter ancestry is too deep")
 
 
-class ModuleError(RuntimeError):
+class ModuleError(VirtuosoError):
     """A module invocation failed before Virtuoso accepted its proposal."""
 
 

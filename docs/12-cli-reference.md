@@ -10,16 +10,22 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 
 - `--workspace PATH` is required for every command except `--version`, and always comes before the command. It selects the learner workspace directory created by `init`.
 - `--version` prints the package version (`0.1.0.dev0`) and exits 0; no workspace needed.
-- Most commands accept `--json`. With `--json`, stdout is a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
+- Most commands accept `--json`. On success, `--json` makes stdout a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain error (`WorkspaceError`, `PracticeError`, `ModuleError`): stderr carries `Error: <plain actionable message>`; also returned for argparse usage errors and any command path that did not produce output |
+| 2 | Domain error in the `VirtuosoError` family (`WorkspaceError`, `PracticeError`, `ModuleError`, `SearchError`, or `QueryError`): stdout stays empty and stderr carries `Error: <plain actionable message>`. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and any command path that produced no result also return 2. |
 
 There are no silent partial failures: commands either complete and return 0 or fail closed with 2 and no state change.
+
+### Search input behavior
+
+`search lex --query` treats the query as plain text. Whitespace separates required terms, and every term is escaped before FTS5 receives it. Apostrophes, plus signs, hyphens, quotes, leading minus signs, column-like text, and words such as `NOT` have no FTS operator meaning. Porter stemming still applies. Snippets come from the column that matched, including titles.
+
+`search embed` and `search sem` require a JSON array containing finite numbers. Invalid JSON, a non-array value, a non-numeric value, a zero vector, or a dimension mismatch follows the same exit-2 stderr contract. Error output stays out of stdout even when `--json` is present.
 
 ## Workspace
 

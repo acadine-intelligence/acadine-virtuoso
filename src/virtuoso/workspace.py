@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .errors import VirtuosoError
+
 
 WORKSPACE_SCHEMA = "virtuoso/workspace@0.1"
 ITEM_SCHEMA = "virtuoso/item@0.1"
@@ -33,7 +35,7 @@ _PRIVATE_FILE_MODE = 0o600
 _CURRENT_MIGRATION_VERSION = 11
 
 
-class WorkspaceError(RuntimeError):
+class WorkspaceError(VirtuosoError):
     """A workspace operation could not be completed without losing truth."""
 
 
