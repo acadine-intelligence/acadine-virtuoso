@@ -231,7 +231,8 @@ export class ReviewSessionController {
 		if (
 			this.state.inFlight ||
 			this.state.item === null ||
-			this.state.error?.recovery !== "advance-card"
+			this.state.error?.code !== "already-recorded" ||
+			this.state.error.recovery !== "advance-card"
 		) {
 			return false;
 		}
@@ -278,7 +279,11 @@ export class ReviewSessionController {
 		this.state.inFlight = true;
 		this.state.error = null;
 		try {
-			this.state.lastResult = await this.client.skip(this.pendingSkip);
+			const request = this.pendingSkip;
+			if (request === null) return false;
+			const confirmation = await this.client.skip(request);
+			this.requireSkipConfirmation(request, confirmation);
+			this.state.lastResult = confirmation;
 			this.pendingSkip = null;
 			this.advancePending = true;
 			try {
@@ -296,6 +301,10 @@ export class ReviewSessionController {
 		}
 	}
 
+	canMarkDemonstrated(): boolean {
+		return Boolean(this.state.initialResponse.trim() || this.state.retry?.response.trim());
+	}
+
 	async grade(
 		result: "demonstrated" | "partial" | "not-demonstrated",
 		confidence: number,
@@ -308,6 +317,7 @@ export class ReviewSessionController {
 			this.initialAnsweredAt === null ||
 			this.state.error !== null ||
 			this.advancePending ||
+			(result === "demonstrated" && !this.canMarkDemonstrated()) ||
 			!Number.isInteger(confidence) ||
 			confidence < 1 ||
 			confidence > 5
@@ -336,7 +346,11 @@ export class ReviewSessionController {
 		this.state.inFlight = true;
 		this.state.error = null;
 		try {
-			this.state.lastResult = await this.client.record(this.pendingAttempt);
+			const request = this.pendingAttempt;
+			if (request === null) return false;
+			const confirmation = await this.client.record(request);
+			this.requireAttemptConfirmation(request, confirmation);
+			this.state.lastResult = confirmation;
 			this.pendingAttempt = null;
 			this.advancePending = true;
 			try {
@@ -366,10 +380,16 @@ export class ReviewSessionController {
 		this.state.error = null;
 		try {
 			if (this.pendingAttempt !== null) {
-				this.state.lastResult = await this.client.record(this.pendingAttempt);
+				const request = this.pendingAttempt;
+				const confirmation = await this.client.record(request);
+				this.requireAttemptConfirmation(request, confirmation);
+				this.state.lastResult = confirmation;
 				this.pendingAttempt = null;
 			} else if (this.pendingSkip !== null) {
-				this.state.lastResult = await this.client.skip(this.pendingSkip);
+				const request = this.pendingSkip;
+				const confirmation = await this.client.skip(request);
+				this.requireSkipConfirmation(request, confirmation);
+				this.state.lastResult = confirmation;
 				this.pendingSkip = null;
 			}
 			this.advancePending = true;
@@ -405,6 +425,53 @@ export class ReviewSessionController {
 		}
 	}
 
+	private requireAttemptConfirmation(
+		request: ReviewAttemptRequest,
+		confirmation: ReviewAttemptResultPayload,
+	): void {
+		const attempt = confirmation.attempt;
+		const expectedLatency = Math.max(
+			0,
+			Date.parse(request.initial_answered_at) - Date.parse(request.started_at),
+		);
+		if (
+			attempt.event_id !== `attempt-${request.submission_id}` ||
+			attempt.item_id !== request.item_id ||
+			attempt.item_content_hash !== request.item_content_hash ||
+			attempt.result !== request.result ||
+			attempt.confidence !== request.confidence ||
+			attempt.administered !== false ||
+			attempt.initial_latency_ms !== expectedLatency ||
+			Date.parse(attempt.occurred_at) !== Date.parse(request.completed_at)
+		) {
+			throw new ReviewClientError(
+				"The CLI response did not confirm this review attempt. Retry the same submission.",
+				"response-mismatch",
+				"retry-submit",
+			);
+		}
+	}
+
+	private requireSkipConfirmation(
+		request: ReviewSkipRequest,
+		confirmation: ReviewSkipResultPayload,
+	): void {
+		const skip = confirmation.skip;
+		if (
+			skip.event_id !== `skip-${request.submission_id}` ||
+			skip.item_id !== request.item_id ||
+			skip.item_content_hash !== request.item_content_hash ||
+			skip.surface !== request.surface ||
+			Date.parse(skip.occurred_at) !== Date.parse(request.occurred_at)
+		) {
+			throw new ReviewClientError(
+				"The CLI response did not confirm this review skip. Retry the same submission.",
+				"response-mismatch",
+				"retry-submit",
+			);
+		}
+	}
+
 	private async loadCurrent(): Promise<void> {
 		await this.loadAt(this.index);
 	}
@@ -412,6 +479,13 @@ export class ReviewSessionController {
 	private async loadAt(index: number): Promise<void> {
 		const expected = this.queue[index];
 		const loaded = await this.client.load(expected.item_id);
+		if (loaded.item.item_id !== expected.item_id || loaded.item.focus !== expected.focus) {
+			throw new ReviewClientError(
+				"The loaded item did not match the review queue. Reload the item.",
+				"response-mismatch",
+				"reload-item",
+			);
+		}
 		if (loaded.item.content_hash !== expected.content_hash) {
 			throw new ReviewClientError(
 				"The item changed while the review session loaded.",

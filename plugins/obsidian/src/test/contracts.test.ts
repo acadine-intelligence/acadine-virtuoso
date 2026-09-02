@@ -129,4 +129,30 @@ describe("review CLI contract validation", () => {
 			}),
 		).toThrow(/fields/);
 	});
+
+	it("rejects unknown review error codes", () => {
+		expect(() =>
+			parseReviewError({
+				schema: "virtuoso/review-error@0.1",
+				error: {
+					code: "unrelated-error",
+					message: "An unrelated operation failed.",
+					recovery: "advance-card",
+				},
+			}),
+		).toThrow(/unknown error code/);
+	});
+
+	it("rejects a recovery action that does not match its error code", () => {
+		expect(() =>
+			parseReviewError({
+				schema: "virtuoso/review-error@0.1",
+				error: {
+					code: "stale-content",
+					message: "The item changed.",
+					recovery: "advance-card",
+				},
+			}),
+		).toThrow(/recovery action/);
+	});
 });

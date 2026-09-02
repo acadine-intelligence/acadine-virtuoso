@@ -181,7 +181,7 @@ printf '%s' "$SKIP_JSON" | \
 
 Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. The CLI appends the skip event and leaves scheduler state unchanged.
 
-Both write commands validate the current item content hash. A changed item fails before the CLI writes an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
+Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
 
 JSON failures use `virtuoso/review-error@0.1` on stderr:
 
@@ -189,7 +189,7 @@ JSON failures use `virtuoso/review-error@0.1` on stderr:
 {"schema":"virtuoso/review-error@0.1","error":{"code":"stale-content","message":"...","recovery":"reload-item"}}
 ```
 
-Recovery values include `check-contract`, `reload-item`, `retry-submit`, `advance-card`, and `check-settings`. Exit code 2 still signals the failure. The interface must keep the current card open until the learner takes the recovery action.
+CLI error codes are `invalid-request`, `stale-content`, `record-failed`, `skip-failed`, `already-recorded`, `workspace-busy`, and `workspace-error`. Each code has one fixed recovery value: `check-contract`, `reload-item`, `retry-submit`, `advance-card`, or `check-settings`. Exit code 2 still signals the failure. The interface must keep the current card open until the learner takes the recovery action.
 
 ### `attempts`
 

@@ -97,6 +97,15 @@ export interface ReviewSkipResultPayload {
 	};
 }
 
+export type ReviewErrorCode =
+	| "invalid-request"
+	| "stale-content"
+	| "record-failed"
+	| "skip-failed"
+	| "already-recorded"
+	| "workspace-busy"
+	| "workspace-error";
+
 export type ReviewRecovery =
 	| "check-contract"
 	| "reload-item"
@@ -107,7 +116,7 @@ export type ReviewRecovery =
 export interface ReviewErrorPayload {
 	schema: "virtuoso/review-error@0.1";
 	error: {
-		code: string;
+		code: ReviewErrorCode;
 		message: string;
 		recovery: ReviewRecovery;
 	};
@@ -369,6 +378,16 @@ export function parseReviewSkipResult(value: unknown): ReviewSkipResultPayload {
 	};
 }
 
+const REVIEW_RECOVERY_BY_CODE: Record<ReviewErrorCode, ReviewRecovery> = {
+	"invalid-request": "check-contract",
+	"stale-content": "reload-item",
+	"record-failed": "retry-submit",
+	"skip-failed": "retry-submit",
+	"already-recorded": "advance-card",
+	"workspace-busy": "retry-submit",
+	"workspace-error": "check-settings",
+};
+
 export function parseReviewError(value: unknown): ReviewErrorPayload {
 	const root = object(value, "review error");
 	exactFields(root, ["schema", "error"], "review error");
@@ -377,22 +396,21 @@ export function parseReviewError(value: unknown): ReviewErrorPayload {
 	}
 	const error = object(root.error, "review error body");
 	exactFields(error, ["code", "message", "recovery"], "review error body");
-	const recovery = error.recovery;
-	if (
-		recovery !== "check-contract" &&
-		recovery !== "reload-item" &&
-		recovery !== "retry-submit" &&
-		recovery !== "advance-card" &&
-		recovery !== "check-settings"
-	) {
-		throw new ContractError("review error has an unknown recovery action");
+	const code = text(error.code, "review error code");
+	if (!Object.prototype.hasOwnProperty.call(REVIEW_RECOVERY_BY_CODE, code)) {
+		throw new ContractError(`review error has an unknown error code: ${code}`);
+	}
+	const typedCode = code as ReviewErrorCode;
+	const expectedRecovery = REVIEW_RECOVERY_BY_CODE[typedCode];
+	if (error.recovery !== expectedRecovery) {
+		throw new ContractError(`review error recovery action does not match code: ${typedCode}`);
 	}
 	return {
 		schema: "virtuoso/review-error@0.1",
 		error: {
-			code: text(error.code, "review error code"),
+			code: typedCode,
 			message: text(error.message, "review error message"),
-			recovery,
+			recovery: expectedRecovery,
 		},
 	};
 }

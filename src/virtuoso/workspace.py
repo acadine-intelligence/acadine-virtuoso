@@ -401,6 +401,36 @@ class WorkspaceService:
         except OSError as exc:
             raise WorkspaceError(f"item file is unavailable: {path}: {exc}") from exc
 
+    def _require_current_item_content_hash(
+        self,
+        *,
+        item_id: str,
+        relative_path: str,
+        expected_hash: str,
+        action: str,
+    ) -> None:
+        path = self.root / relative_path
+        try:
+            path.relative_to(self.items_dir)
+        except ValueError as exc:
+            raise WorkspaceError(f"item path escapes workspace: {item_id}") from exc
+        if path.is_symlink() or not path.is_file():
+            raise WorkspaceError(
+                f"stale item content; reload the review item before {action}"
+            )
+        try:
+            current_hash = hashlib.sha256(
+                self._read_item_bytes(path, item_id=item_id)
+            ).hexdigest()
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"stale item content; reload the review item before {action}"
+            ) from exc
+        if current_hash != expected_hash:
+            raise WorkspaceError(
+                f"stale item content; reload the review item before {action}"
+            )
+
     def configuration(self) -> dict[str, Any]:
         try:
             value = self._load_json(
@@ -3529,7 +3559,7 @@ class WorkspaceService:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             item_row = db.execute(
-                "SELECT content_hash FROM items WHERE item_id = ?",
+                "SELECT content_hash, relative_path FROM items WHERE item_id = ?",
                 (attempt["item_id"],),
             ).fetchone()
             if item_row is None:
@@ -3540,6 +3570,12 @@ class WorkspaceService:
                 raise WorkspaceError(
                     "attempt item content identity does not match the indexed learning item"
                 )
+            self._require_current_item_content_hash(
+                item_id=attempt["item_id"],
+                relative_path=item_row["relative_path"],
+                expected_hash=attempt["item_content_hash"],
+                action="recording",
+            )
             row = db.execute(
                 "SELECT source_event_id, state_json, algorithm_version, configuration_json "
                 "FROM scheduler_state "
@@ -3658,6 +3694,12 @@ class WorkspaceService:
                     proposal["created_at"],
                 ),
             )
+            self._require_current_item_content_hash(
+                item_id=attempt["item_id"],
+                relative_path=item_row["relative_path"],
+                expected_hash=attempt["item_content_hash"],
+                action="recording",
+            )
 
     def list_attempts(self) -> list[dict[str, Any]]:
         with self._connect() as db:
@@ -3718,7 +3760,8 @@ class WorkspaceService:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute(
-                    "SELECT content_hash FROM items WHERE item_id = ?", (item_id,)
+                    "SELECT content_hash, relative_path FROM items WHERE item_id = ?",
+                    (item_id,),
                 ).fetchone()
                 if row is None:
                     raise WorkspaceError(f"no learning item with id: {item_id}")
@@ -3726,6 +3769,12 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "stale item content; reload the review item before skipping"
                     )
+                self._require_current_item_content_hash(
+                    item_id=item_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=item_content_hash,
+                    action="skipping",
+                )
                 db.execute(
                     """
                     INSERT INTO review_skips(
@@ -3733,6 +3782,12 @@ class WorkspaceService:
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
                     tuple(payload.values()),
+                )
+                self._require_current_item_content_hash(
+                    item_id=item_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=item_content_hash,
+                    action="skipping",
                 )
         except sqlite3.Error as exc:
             raise WorkspaceError(f"review skip could not be appended: {exc}") from exc

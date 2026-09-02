@@ -283,6 +283,13 @@ class ReviewSessionModal extends Modal {
 		this.bodyEl.createEl("h4", { text: "Answer" });
 		this.bodyEl.createEl("p", { text: state.item?.answer ?? "" });
 
+		const canMarkDemonstrated = this.controller.canMarkDemonstrated();
+		if (!canMarkDemonstrated) {
+			this.bodyEl.createEl("p", {
+				text: "A blank recall cannot be marked Demonstrated. Choose Partial or Not demonstrated.",
+			});
+			if (this.selectedResult === "demonstrated") this.selectedResult = "partial";
+		}
 		const resultLabel = this.bodyEl.createEl("label", { text: "Result " });
 		const result = resultLabel.createEl("select");
 		for (const [value, label] of [
@@ -292,6 +299,7 @@ class ReviewSessionModal extends Modal {
 		] as const) {
 			const option = result.createEl("option", { text: label });
 			option.value = value;
+			option.disabled = value === "demonstrated" && !canMarkDemonstrated;
 		}
 		result.value = this.selectedResult;
 		result.disabled = state.inFlight;

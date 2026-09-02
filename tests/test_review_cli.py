@@ -578,6 +578,98 @@ class ReviewCliJourneyTests(unittest.TestCase):
             }
         self.assertEqual(counts, {table: 0 for table in counts})
 
+    def test_record_revalidates_markdown_at_the_write_boundary(self) -> None:
+        self._init_with_item()
+        workspace = WorkspaceService.open(self.workspace)
+        service = ReviewService(workspace)
+        snapshot = service.load("testing-effect")
+        request = {
+            "schema": "virtuoso/review-attempt@0.1",
+            "submission_id": "12121212121212121212121212121212",
+            "item_id": "testing-effect",
+            "item_content_hash": snapshot.content_hash,
+            "started_at": "2026-09-02T12:00:00+00:00",
+            "initial_answered_at": "2026-09-02T12:00:01+00:00",
+            "completed_at": "2026-09-02T12:00:02+00:00",
+            "initial_response": "A response to the loaded prompt.",
+            "retry": None,
+            "hint_used": False,
+            "answer_revealed": True,
+            "result": "partial",
+            "confidence": 3,
+            "open_notes": False,
+        }
+        original_load = workspace.load_item
+        changed = False
+
+        def load_then_change(item_id: str):
+            nonlocal changed
+            item = original_load(item_id)
+            if not changed:
+                item.path.write_text(
+                    item.path.read_text(encoding="utf-8") + "\nChanged after validation.\n",
+                    encoding="utf-8",
+                )
+                changed = True
+            return item
+
+        workspace.load_item = load_then_change  # type: ignore[method-assign]
+
+        with self.assertRaises(ReviewError) as raised:
+            service.record(json.dumps(request))
+
+        self.assertEqual(raised.exception.code, "stale-content")
+        self.assertEqual(raised.exception.recovery, "reload-item")
+        with sqlite3.connect(workspace.db_path) as db:
+            counts = {
+                table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "attempts",
+                    "attempt_timings",
+                    "scheduler_proposals",
+                    "scheduler_state",
+                )
+            }
+        self.assertEqual(counts, {table: 0 for table in counts})
+
+    def test_skip_revalidates_markdown_at_the_write_boundary(self) -> None:
+        self._init_with_item()
+        workspace = WorkspaceService.open(self.workspace)
+        service = ReviewService(workspace)
+        snapshot = service.load("testing-effect")
+        request = {
+            "schema": "virtuoso/review-skip@0.1",
+            "submission_id": "13131313131313131313131313131313",
+            "item_id": "testing-effect",
+            "item_content_hash": snapshot.content_hash,
+            "occurred_at": "2026-09-02T12:01:00+00:00",
+            "surface": "obsidian-plugin",
+        }
+        original_load = workspace.load_item
+        changed = False
+
+        def load_then_change(item_id: str):
+            nonlocal changed
+            item = original_load(item_id)
+            if not changed:
+                item.path.write_text(
+                    item.path.read_text(encoding="utf-8") + "\nChanged after validation.\n",
+                    encoding="utf-8",
+                )
+                changed = True
+            return item
+
+        workspace.load_item = load_then_change  # type: ignore[method-assign]
+
+        with self.assertRaises(ReviewError) as raised:
+            service.skip(json.dumps(request))
+
+        self.assertEqual(raised.exception.code, "stale-content")
+        self.assertEqual(raised.exception.recovery, "reload-item")
+        with sqlite3.connect(workspace.db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM review_skips").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM scheduler_state").fetchone()[0], 0)
+
     def test_load_stale_item_returns_reload_recovery(self) -> None:
         self._init_with_item()
         item_path = self.workspace / "items" / "testing-effect.md"

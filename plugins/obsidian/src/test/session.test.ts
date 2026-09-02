@@ -15,6 +15,17 @@ import {
 
 const HASH = "a".repeat(64);
 
+type LoadConfirmationMismatch = "item-id" | "focus";
+type AttemptConfirmationMismatch =
+	| "event-id"
+	| "item-id"
+	| "content-hash"
+	| "result"
+	| "confidence"
+	| "initial-latency"
+	| "completed-at";
+type SkipConfirmationMismatch = "event-id" | "item-id" | "content-hash" | "occurred-at";
+
 class FakeClient implements ReviewClient {
 	recorded: ReviewAttemptRequest[] = [];
 	skipped: ReviewSkipRequest[] = [];
@@ -26,6 +37,9 @@ class FakeClient implements ReviewClient {
 	itemHash = HASH;
 	includeSecond = false;
 	nextLoadFailures = 0;
+	loadMismatch: LoadConfirmationMismatch | null = null;
+	recordMismatch: AttemptConfirmationMismatch | null = null;
+	skipMismatch: SkipConfirmationMismatch | null = null;
 
 	async due(): Promise<ReviewQueuePayload> {
 		const items = [
@@ -68,10 +82,10 @@ class FakeClient implements ReviewClient {
 		return {
 			schema: "virtuoso/review-item@0.1",
 			item: {
-				item_id: itemId,
+				item_id: this.loadMismatch === "item-id" ? "different-item" : itemId,
 				title:
 					itemId === "second-item" ? "Explain spaced practice" : "Explain the testing effect",
-				focus: "learning-science",
+				focus: this.loadMismatch === "focus" ? "different-focus" : "learning-science",
 				content_hash: itemId === "second-item" ? HASH : this.itemHash,
 				prompt:
 					itemId === "second-item"
@@ -101,7 +115,7 @@ class FakeClient implements ReviewClient {
 			);
 		}
 		if (this.recordWait !== null) await this.recordWait;
-		return {
+		const payload: ReviewAttemptResultPayload = {
 			schema: "virtuoso/review-attempt-result@0.1",
 			attempt: {
 				event_id: `attempt-${request.submission_id}`,
@@ -109,7 +123,10 @@ class FakeClient implements ReviewClient {
 				item_content_hash: request.item_content_hash,
 				result: request.result,
 				confidence: request.confidence,
-				initial_latency_ms: 1250,
+				initial_latency_ms: Math.max(
+					0,
+					Date.parse(request.initial_answered_at) - Date.parse(request.started_at),
+				),
 				administered: false,
 				occurred_at: request.completed_at,
 			},
@@ -120,6 +137,18 @@ class FakeClient implements ReviewClient {
 				due_at: "2026-09-03T12:00:05.000Z",
 			},
 		};
+		if (this.recordMismatch === "event-id") payload.attempt.event_id = "attempt-other";
+		else if (this.recordMismatch === "item-id") payload.attempt.item_id = "different-item";
+		else if (this.recordMismatch === "content-hash") {
+			payload.attempt.item_content_hash = "b".repeat(64);
+		} else if (this.recordMismatch === "result") payload.attempt.result = "demonstrated";
+		else if (this.recordMismatch === "confidence") payload.attempt.confidence = 4;
+		else if (this.recordMismatch === "initial-latency") {
+			payload.attempt.initial_latency_ms += 1;
+		} else if (this.recordMismatch === "completed-at") {
+			payload.attempt.occurred_at = "2026-09-02T12:00:30.000Z";
+		}
+		return payload;
 	}
 
 	async skip(request: ReviewSkipRequest): Promise<ReviewSkipResultPayload> {
@@ -132,7 +161,7 @@ class FakeClient implements ReviewClient {
 				"retry-submit",
 			);
 		}
-		return {
+		const payload: ReviewSkipResultPayload = {
 			schema: "virtuoso/review-skip-result@0.1",
 			skip: {
 				event_id: `skip-${request.submission_id}`,
@@ -142,6 +171,14 @@ class FakeClient implements ReviewClient {
 				surface: "obsidian-plugin",
 			},
 		};
+		if (this.skipMismatch === "event-id") payload.skip.event_id = "skip-other";
+		else if (this.skipMismatch === "item-id") payload.skip.item_id = "different-item";
+		else if (this.skipMismatch === "content-hash") {
+			payload.skip.item_content_hash = "b".repeat(64);
+		} else if (this.skipMismatch === "occurred-at") {
+			payload.skip.occurred_at = "2026-09-02T12:01:30.000Z";
+		}
+		return payload;
 	}
 }
 
@@ -232,6 +269,125 @@ describe("ReviewSessionController", () => {
 		expect(controller.state.phase).toBe("support");
 		expect(controller.state.retry).toBeNull();
 		expect(controller.submitRetry("A response written after the hint.")).toBe(false);
+	});
+
+	it.each<LoadConfirmationMismatch>(["item-id", "focus"])(
+		"rejects a %s load confirmation",
+		async (mismatch) => {
+			const client = new FakeClient();
+			client.loadMismatch = mismatch;
+			const controller = new ReviewSessionController(client, {
+				now: scriptedClock(["2026-09-02T12:00:00.000Z"]),
+				newSubmissionId: () => "40404040404040404040404040404040",
+			});
+
+			await controller.start();
+			expect(controller.state.item).toBeNull();
+			expect(controller.state.error).toMatchObject({
+				code: "response-mismatch",
+				recovery: "reload-item",
+			});
+
+			client.loadMismatch = null;
+			expect(await controller.reloadCurrent()).toBe(true);
+			expect(controller.state.item?.item_id).toBe("testing-effect");
+			expect(controller.state.context?.focus).toBe("learning-science");
+		},
+	);
+
+	it("keeps a blank demonstrated grade locally correctable", async () => {
+		const client = new FakeClient();
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+			]),
+			newSubmissionId: () => "10101010101010101010101010101010",
+		});
+		await controller.start();
+		controller.submitInitial("");
+		controller.reveal();
+
+		expect(controller.canMarkDemonstrated()).toBe(false);
+		expect(await controller.grade("demonstrated", 3)).toBe(false);
+		expect(controller.state.phase).toBe("grade");
+		expect(controller.state.error).toBeNull();
+		expect(client.recorded).toHaveLength(0);
+
+		expect(await controller.grade("not-demonstrated", 3)).toBe(true);
+		expect(controller.state.phase).toBe("complete");
+		expect(client.recorded).toHaveLength(1);
+		expect(client.recorded[0].result).toBe("not-demonstrated");
+	});
+
+	it.each<AttemptConfirmationMismatch>([
+		"event-id",
+		"item-id",
+		"content-hash",
+		"result",
+		"confidence",
+		"initial-latency",
+		"completed-at",
+	])("keeps a %s attempt confirmation pending", async (mismatch) => {
+		const client = new FakeClient();
+		client.recordMismatch = mismatch;
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+			]),
+			newSubmissionId: () => "20202020202020202020202020202020",
+		});
+		await controller.start();
+		controller.submitInitial("A measured response.");
+		controller.reveal();
+
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(controller.state.phase).toBe("grade");
+		expect(controller.state.error).toMatchObject({
+			code: "response-mismatch",
+			recovery: "retry-submit",
+		});
+		expect(client.recorded).toHaveLength(1);
+
+		client.recordMismatch = null;
+		expect(await controller.retrySubmission()).toBe(true);
+		expect(client.recorded).toHaveLength(2);
+		expect(client.recorded[1]).toEqual(client.recorded[0]);
+		expect(controller.state.phase).toBe("complete");
+	});
+
+	it.each<SkipConfirmationMismatch>([
+		"event-id",
+		"item-id",
+		"content-hash",
+		"occurred-at",
+	])("keeps a %s skip confirmation pending", async (mismatch) => {
+		const client = new FakeClient();
+		client.skipMismatch = mismatch;
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+			]),
+			newSubmissionId: () => "30303030303030303030303030303030",
+		});
+		await controller.start();
+
+		expect(await controller.skip()).toBe(false);
+		expect(controller.state.error).toMatchObject({
+			code: "response-mismatch",
+			recovery: "retry-submit",
+		});
+		expect(client.skipped).toHaveLength(1);
+
+		client.skipMismatch = null;
+		expect(await controller.retrySubmission()).toBe(true);
+		expect(client.skipped).toHaveLength(2);
+		expect(client.skipped[1]).toEqual(client.skipped[0]);
+		expect(controller.state.phase).toBe("complete");
 	});
 
 	it("keeps the card open after a CLI failure and retries the exact request", async () => {
@@ -509,6 +665,31 @@ describe("ReviewSessionController", () => {
 		expect(await controller.reloadCurrent()).toBe(true);
 		expect(controller.state.phase).toBe("prompt");
 		expect(controller.state.item?.content_hash).toBe("b".repeat(64));
+	});
+
+	it("rejects an advance action without an already-recorded code", async () => {
+		const client = new FakeClient();
+		client.recordError = new ReviewClientError(
+			"A mismatched error tried to advance the card.",
+			"record-failed",
+			"advance-card",
+		);
+		const controller = new ReviewSessionController(client, {
+			now: scriptedClock([
+				"2026-09-02T12:00:00.000Z",
+				"2026-09-02T12:00:01.000Z",
+				"2026-09-02T12:00:02.000Z",
+			]),
+			newSubmissionId: () => "50505050505050505050505050505050",
+		});
+		await controller.start();
+		controller.submitInitial("A measured response.");
+		controller.reveal();
+
+		expect(await controller.grade("partial", 3)).toBe(false);
+		expect(await controller.acknowledgeRecorded()).toBe(false);
+		expect(controller.state.phase).toBe("grade");
+		expect(client.recorded).toHaveLength(1);
 	});
 
 	it("advances only after the CLI confirms an earlier submission was recorded", async () => {
