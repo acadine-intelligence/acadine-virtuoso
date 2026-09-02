@@ -24,6 +24,16 @@ optional read projections: Obsidian vault, Hermes context, project systems
 - `infrastructure`: Markdown, SQLite, FSRS serialization, clock, external process runner.
 - `cli`: argument parsing, prompts, JSON output, exit codes.
 
+## Obsidian review boundary
+
+The optional Obsidian plugin is a local interface over the installed CLI. In this path, offline means Obsidian, the local CLI, and the local workspace can run without a live agent, server, or network.
+
+The plugin settings hold the CLI executable path and workspace path. `review due` and `review load` return versioned content snapshots. The plugin keeps the active snapshot in memory for the open session. It has no durable review cache. `review record` validates the snapshot hash and writes the measured direct attempt, scheduler proposal, and scheduler state through the core transaction. `review skip` validates the same hash, appends one skip event, and leaves scheduler state unchanged.
+
+The plugin does not open SQLite or calculate an interval. It blocks another submission while a write runs. Process, schema, workspace, and stale-content errors retain the current card and carry a recovery action.
+
+The review slice excludes agent enrichment. `plugins/obsidian/src/enrichment.ts` defines the additive boundary for a later explicit action. Its pure guard accepts only enrichment-owned fields. It rejects schedule, evidence, hash, result, and other core-owned fields. The current review interface does not call the guard or expose an enrichment action.
+
 ## Storage and synchronization
 
 Markdown owns item prose. SQLite owns derived and append-only state. Every item version is content-hashed. A future sync adapter compares owned fields and hashes; it never applies generic last-write-wins. Conflicting learner-authored edits become explicit conflict records.

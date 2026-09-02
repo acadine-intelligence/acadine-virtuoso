@@ -12,6 +12,7 @@ from typing import Any, Sequence
 from .candidates import CandidateService
 from .errors import VirtuosoError
 from .practice import PracticeIO, PracticeService
+from .review import ReviewError
 from .workspace import WorkspaceError, WorkspaceService
 
 
@@ -105,6 +106,28 @@ def _parser() -> argparse.ArgumentParser:
 
     attempts = commands.add_parser("attempts", help="show evidence and proposals")
     attempts.add_argument("--json", action="store_true")
+
+    review = commands.add_parser(
+        "review", help="run the stable JSON contract used by local review interfaces"
+    )
+    review_commands = review.add_subparsers(dest="review_command", required=True)
+    review_due = review_commands.add_parser(
+        "due", help="list due and new learning items without answer content"
+    )
+    review_due.add_argument("--json", action="store_true")
+    review_load = review_commands.add_parser(
+        "load", help="load one hash-bound learning item content snapshot"
+    )
+    review_load.add_argument("--item", required=True)
+    review_load.add_argument("--json", action="store_true")
+    review_record = review_commands.add_parser(
+        "record", help="record one measured direct review attempt from JSON stdin"
+    )
+    review_record.add_argument("--json", action="store_true")
+    review_skip = review_commands.add_parser(
+        "skip", help="append one review skip event from JSON stdin"
+    )
+    review_skip.add_argument("--json", action="store_true")
 
     queries = commands.add_parser(
         "queries", help="read-only analytics over the workspace database"
@@ -468,10 +491,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "attempts": workspace.list_attempts(),
                     "proposals": workspace.list_proposals(),
+                    "skips": workspace.list_review_skips(),
                 },
                 as_json=args.json,
             )
             return 0
+        if args.command == "review":
+            from .review import REVIEW_ITEM_SCHEMA, REVIEW_QUEUE_SCHEMA, ReviewService
+
+            service = ReviewService(workspace)
+            if args.review_command == "due":
+                _emit(
+                    {
+                        "schema": REVIEW_QUEUE_SCHEMA,
+                        "items": [item.to_dict() for item in service.due()],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.review_command == "load":
+                _emit(
+                    {
+                        "schema": REVIEW_ITEM_SCHEMA,
+                        "item": service.load(args.item).to_dict(),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.review_command == "record":
+                _emit(
+                    service.attempt_result_payload(service.record(sys.stdin.read())),
+                    as_json=args.json,
+                )
+                return 0
+            if args.review_command == "skip":
+                _emit(
+                    service.skip_result_payload(service.skip(sys.stdin.read())),
+                    as_json=args.json,
+                )
+                return 0
         if args.command == "queries":
             from . import queries as queries_module
 
@@ -839,7 +897,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 0
+    except ReviewError as exc:
+        print(json.dumps(exc.to_payload(), sort_keys=True), file=sys.stderr)
+        return 2
     except VirtuosoError as exc:
+        if args.command == "review":
+            message = str(exc)
+            lowered = message.lower()
+            if "stale" in lowered:
+                code = "stale-content"
+                recovery = "reload-item"
+            elif "locked" in lowered or "busy" in lowered:
+                code = "workspace-busy"
+                recovery = "retry-submit"
+            else:
+                code = "workspace-error"
+                recovery = "check-settings"
+            error = ReviewError(message, code=code, recovery=recovery)
+            print(json.dumps(error.to_payload(), sort_keys=True), file=sys.stderr)
+            return 2
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     except sqlite3.Error as exc:

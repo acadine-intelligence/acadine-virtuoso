@@ -32,7 +32,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 11
+_CURRENT_MIGRATION_VERSION = 12
 
 
 class WorkspaceError(VirtuosoError):
@@ -990,6 +990,27 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'candidate decision action is inconsistent');
                 END""",
+            """CREATE TABLE IF NOT EXISTS review_skips (
+                event_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                item_content_hash TEXT NOT NULL CHECK(length(item_content_hash) = 64),
+                occurred_at TEXT NOT NULL,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TRIGGER review_skips_reject_update
+                BEFORE UPDATE ON review_skips
+                BEGIN
+                    SELECT RAISE(ABORT, 'review_skips is append-only');
+                END""",
+            """CREATE TRIGGER review_skips_reject_delete
+                BEFORE DELETE ON review_skips
+                BEGIN
+                    SELECT RAISE(ABORT, 'review_skips is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1062,7 +1083,8 @@ class WorkspaceService:
                 8: statements[27:28],
                 9: statements[28:31],
                 10: statements[31:48],
-                11: statements[48:],
+                11: statements[48:52],
+                12: statements[52:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -3661,6 +3683,68 @@ class WorkspaceService:
             attempt["support_actions"] = support_actions
             attempts.append(attempt)
         return attempts
+
+    def record_review_skip(
+        self,
+        *,
+        event_id: str,
+        item_id: str,
+        item_content_hash: str,
+        occurred_at: str,
+        surface: str,
+    ) -> dict[str, str]:
+        if not isinstance(event_id, str) or not event_id.startswith("skip-"):
+            raise WorkspaceError("review skip event id is invalid")
+        if not isinstance(item_content_hash, str) or len(item_content_hash) != 64:
+            raise WorkspaceError("review skip item content hash must be a SHA-256 value")
+        if not isinstance(surface, str) or not 1 <= len(surface) <= 64:
+            raise WorkspaceError("review skip surface must contain 1 to 64 characters")
+        parsed_at = self._parse_aware_datetime(
+            occurred_at, label="review skip occurred timestamp"
+        )
+        item = self.load_item(item_id)
+        if item.content_hash != item_content_hash:
+            raise WorkspaceError(
+                "stale item content; reload the review item before skipping"
+            )
+        payload = {
+            "event_id": event_id,
+            "item_id": item_id,
+            "item_content_hash": item_content_hash,
+            "occurred_at": parsed_at.isoformat(),
+            "surface": surface,
+        }
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT content_hash FROM items WHERE item_id = ?", (item_id,)
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(f"no learning item with id: {item_id}")
+                if row["content_hash"] != item_content_hash:
+                    raise WorkspaceError(
+                        "stale item content; reload the review item before skipping"
+                    )
+                db.execute(
+                    """
+                    INSERT INTO review_skips(
+                        event_id, item_id, item_content_hash, occurred_at, surface
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    tuple(payload.values()),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise WorkspaceError(f"review skip could not be appended: {exc}") from exc
+        return payload
+
+    def list_review_skips(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT event_id, item_id, item_content_hash, occurred_at, surface
+                   FROM review_skips ORDER BY occurred_at, event_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_proposals(self) -> list[dict[str, Any]]:
         with self._connect() as db:

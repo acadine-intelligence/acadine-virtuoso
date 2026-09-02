@@ -295,6 +295,88 @@ class PracticeService:
         self._persist(attempt=attempt, proposal=proposal)
         return PracticeResult(attempt=attempt, proposal=proposal)
 
+    def run_direct(
+        self,
+        *,
+        event_id: str,
+        item_id: str,
+        item_content_hash: str,
+        started_at: datetime,
+        initial_answered_at: datetime,
+        completed_at: datetime,
+        initial_response: str,
+        result: str,
+        confidence: int,
+        open_notes: bool,
+        support_actions: tuple[SupportAction, ...],
+    ) -> PracticeResult:
+        """Record one measured attempt completed by a local user interface."""
+        if result not in _RESULTS:
+            raise PracticeError(
+                "result must be one of demonstrated, partial, or not-demonstrated"
+            )
+        if (
+            not isinstance(confidence, int)
+            or isinstance(confidence, bool)
+            or not 1 <= confidence <= 5
+        ):
+            raise PracticeError("confidence must be an integer from 1 to 5")
+        if not isinstance(open_notes, bool):
+            raise PracticeError("open_notes must be true or false")
+        timestamps = (started_at, initial_answered_at, completed_at)
+        if any(value.tzinfo is None or value.utcoffset() is None for value in timestamps):
+            raise PracticeError("direct attempt timestamps must be timezone-aware")
+        started_at, initial_answered_at, completed_at = (
+            value.astimezone(timezone.utc) for value in timestamps
+        )
+        if initial_answered_at < started_at:
+            raise PracticeError("initial answer timestamp precedes attempt start")
+        if completed_at < initial_answered_at:
+            raise PracticeError("attempt completion timestamp precedes initial answer")
+
+        try:
+            item = self.workspace.load_item(item_id)
+        except WorkspaceError as exc:
+            raise PracticeError(str(exc)) from exc
+        if item.content_hash != item_content_hash:
+            raise PracticeError(
+                "stale item content; reload the review item before recording"
+            )
+        unaided_responses = [initial_response] + [
+            action.response or ""
+            for action in support_actions
+            if action.kind == "retry-unaided"
+        ]
+        if result == "demonstrated" and not any(
+            response.strip() for response in unaided_responses
+        ):
+            raise PracticeError(
+                "blank recall cannot be recorded as demonstrated; record partial or not-demonstrated"
+            )
+
+        initial_latency_ms = round(
+            (initial_answered_at - started_at).total_seconds() * 1000
+        )
+        attempt = AttemptRecord(
+            event_id=event_id,
+            item_id=item.item_id,
+            item_content_hash=item.content_hash,
+            occurred_at=completed_at,
+            started_at=started_at,
+            completed_at=completed_at,
+            initial_response=initial_response,
+            initial_latency_ms=initial_latency_ms,
+            result=result,
+            confidence=confidence,
+            open_notes=open_notes,
+            agent_help="none",
+            support_actions=support_actions,
+            administered=False,
+        )
+        proposal = self._schedule(item=item, attempt=attempt)
+        self._persist(attempt=attempt, proposal=proposal)
+        return PracticeResult(attempt=attempt, proposal=proposal)
+
     def _schedule(
         self, *, item: LearningItem, attempt: AttemptRecord
     ) -> SchedulerProposal:

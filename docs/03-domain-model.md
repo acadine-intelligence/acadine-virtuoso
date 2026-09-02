@@ -14,6 +14,9 @@
 `Attempt`
 : Append-only evidence with prompt version, start/end timestamps, elapsed milliseconds, result, confidence, open-notes state, and support actions.
 
+`ReviewSkip`
+: Append-only evidence that a learner skipped one exact item version through a named interface. It does not create an attempt or scheduler proposal.
+
 `SupportAction`
 : Retry, hint, worked feedback, or follow-up challenge. Assistance is evidence context. It is not a penalty hidden inside a score.
 

@@ -82,7 +82,9 @@ Read-only queries report per-focus performance, item history, due workload by fo
 
 ## The Obsidian plugin (optional)
 
-A community plugin gives you a human review queue for proposed items and a full-viewport review session with a keyboard ladder (reveal, retry, hint, grade) inside Obsidian. The plugin never computes intervals itself; every grade goes through the CLI, so there is exactly one scheduler and one evidence ledger. Obsidian is entirely optional; the CLI works without it.
+The plugin runs the full local review flow inside Obsidian. Set the installed Virtuoso executable and workspace paths, then run `Virtuoso: Start offline review`. You can type the first response, take one unaided retry, show a hint, reveal the answer, record result and confidence, mark notes as open, or skip.
+
+Offline here means Obsidian, the installed CLI, and the local workspace work without a live agent, server, or network. The plugin keeps only the open session snapshot in memory. Every grade and skip goes through a versioned JSON CLI contract with a content hash. The CLI remains the only scheduler and evidence writer. See `plugins/obsidian/README.md` for setup and recovery steps.
 
 ## Extension boundary
 

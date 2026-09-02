@@ -1,37 +1,21 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Vault } from "obsidian";
-import { spawn } from "child_process";
+import { VirtuosoCliClient } from "./cli-client";
 import {
-	cardContextRows,
-	deckChapterCards,
 	fmKey,
 	frontmatter,
 	isLearningItemFrontmatter,
 	learningItemId,
-	parseDueOutput,
-	parsePracticeRationales,
-	parseTransferProjects,
 } from "./parsing";
-import { GradeGate } from "./grading";
+import { ReviewSessionController } from "./session";
 
 /**
  * Virtuoso for Obsidian.
  *
- * Ownership boundaries (2026-07-24 architecture decision, extended 2026-08-22):
- * - The Virtuoso CLI owns scheduling and the evidence ledger. This plugin NEVER
- *   computes intervals itself — every grade shells out to the CLI, so there is
- *   exactly one scheduler and one ledger writer.
- * - Obsidian SR keeps flashcard + whole-note schedules (inline comments / sr-*).
- * - Project priority belongs to the project system.
- *
- * Commands:
- * - "Open review queue"          — accept/reject proposed learning items.
- * - "Cycle today's cards"        — hotkey-driven rep session over everything
- *                                  due today (CLI items + book deck chapters).
- *                                  One card at a time: prompt -> reveal ->
- *                                  grade (again/hard/good/easy) or skip.
+ * The installed Virtuoso CLI is the only scheduler and evidence writer. This
+ * plugin holds one review snapshot in memory, displays the practice flow, and
+ * submits hash-bound decisions through versioned JSON CLI contracts. It never
+ * calculates an interval or opens SQLite.
  */
-
-type Rating = "again" | "hard" | "good" | "easy";
 
 interface VirtuosoItem {
 	file: TFile;
@@ -42,44 +26,28 @@ interface VirtuosoItem {
 	createdDate: string;
 }
 
-interface DueCard {
-	source: "item" | "deck";
-	id: string;
-	/** Deck cards only: chapter number this card belongs to ("2" for "deck-ch2"). */
-	chapter?: string;
-	title: string;
-	promptLines: string[];
-	detail?: string;
-	focus?: string;
-	projectId?: string;
-	linkedProjectIds?: string[];
-	whyNow?: string;
-}
-
 interface VirtuosoSettings {
 	itemsDir: string;
 	cliPath: string;
-	deckPath: string;
+	workspacePath: string;
 }
 
 const DEFAULT_SETTINGS: VirtuosoSettings = {
 	itemsDir: "07-learning/virtuoso/items",
-	cliPath: "~/.virtuoso/scheduler.py",
-	deckPath: "07-learning/deck.md",
+	cliPath: "",
+	workspacePath: "",
 };
 
 class ReviewQueueModal extends Modal {
-	private items: VirtuosoItem[];
-	private decide: (item: VirtuosoItem, verdict: "accepted" | "rejected") => Promise<void>;
-
 	constructor(
 		app: App,
-		items: VirtuosoItem[],
-		decide: (item: VirtuosoItem, verdict: "accepted" | "rejected") => Promise<void>,
+		private readonly items: VirtuosoItem[],
+		private readonly decide: (
+			item: VirtuosoItem,
+			verdict: "accepted" | "rejected",
+		) => Promise<void>,
 	) {
 		super(app);
-		this.items = items;
-		this.decide = decide;
 	}
 
 	onOpen() {
@@ -115,139 +83,235 @@ class ReviewQueueModal extends Modal {
 	}
 }
 
-/**
- * Full-viewport rep session. One due card at a time:
- * prompt shown first, Space/Enter reveals the answer, then grade or skip.
- */
-class RepSessionModal extends Modal {
-	private app2: App;
-	private cards: DueCard[];
-	private grade: (card: DueCard, rating: Rating | "skip") => Promise<string | null>;
-	private index = 0;
-	private revealed = false;
+class ReviewSessionModal extends Modal {
 	private statusEl!: HTMLElement;
 	private bodyEl!: HTMLElement;
-	/** One scheduler call per card per session; one chapter grade per session. See grading.ts. */
-	private gate = new GradeGate();
+	private selectedResult: "demonstrated" | "partial" | "not-demonstrated" =
+		"partial";
+	private selectedConfidence = 3;
+	private lastWrite: "grade" | "skip" | null = null;
 
 	constructor(
 		app: App,
-		cards: DueCard[],
-		grade: (card: DueCard, rating: Rating | "skip") => Promise<string | null>,
+		private readonly controller: ReviewSessionController,
+		private readonly openSettings: () => void,
 	) {
 		super(app);
-		this.app2 = app;
-		this.cards = cards;
-		this.grade = grade;
 	}
 
 	onOpen() {
-		this.modalEl.addClass("virtuoso-rep-modal");
+		this.modalEl.addClass("virtuoso-review-modal");
 		this.modalEl.style.width = "min(760px, 92vw)";
-		this.contentEl.createEl("h2", { text: "Virtuoso — today's reps" });
-		this.statusEl = this.contentEl.createDiv({ cls: "virtuoso-rep-status" });
-		this.bodyEl = this.contentEl.createDiv({ cls: "virtuoso-rep-body" });
-
-		const keyHandler = (evt: KeyboardEvent) => {
-			if (evt.key === "Escape") return; // default modal close
-			if (!this.revealed && (evt.key === " " || evt.key === "Enter")) {
-				evt.preventDefault();
-				this.revealed = true;
-				this.render();
-				return;
-			}
-			if (this.revealed) {
-				const map: Record<string, Rating> = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
-				const r = map[evt.key];
-				if (r) {
-					evt.preventDefault();
-					void this.submit(r);
-				} else if (evt.key.toLowerCase() === "s") {
-					evt.preventDefault();
-					void this.submit("skip");
-				}
-			}
-		};
-		this.scope.register([], "Space", () => keyHandler(new KeyboardEvent("keydown", { key: " " })));
-		this.scope.register([], "Enter", () => keyHandler(new KeyboardEvent("keydown", { key: "Enter" })));
-		for (const k of ["1", "2", "3", "4"]) {
-			this.scope.register([], k, () => keyHandler(new KeyboardEvent("keydown", { key: k })));
-		}
-		this.scope.register([], "s", () => keyHandler(new KeyboardEvent("keydown", { key: "s" })));
-
-		this.render();
+		this.contentEl.createEl("h2", { text: "Virtuoso review" });
+		this.statusEl = this.contentEl.createDiv({ cls: "virtuoso-review-status" });
+		this.bodyEl = this.contentEl.createDiv({ cls: "virtuoso-review-body" });
+		this.perform(() => this.controller.start());
 	}
 
-	private render() {
-		const { bodyEl, statusEl } = this;
-		bodyEl.empty();
-		if (this.index >= this.cards.length) {
-			statusEl.setText("Session complete.");
-			bodyEl.createEl("p", { text: "All of today's cards handled. Evidence is in the ledger." });
+	private perform(action: () => Promise<unknown>): void {
+		const pending = action();
+		this.render();
+		void pending.finally(() => this.render());
+	}
+
+	private render(): void {
+		const state = this.controller.state;
+		this.bodyEl.empty();
+		this.renderError();
+		if (state.phase === "loading" || state.phase === "idle") {
+			this.statusEl.setText(
+				state.error ? "Review stopped. Use the recovery action." : "Loading the local review queue.",
+			);
 			return;
 		}
-		const card = this.cards[this.index];
-		const gradedHint =
-			card.source === "deck" && card.chapter && this.gate.isChapterGraded(card.chapter)
-				? "  ·  chapter already graded — practice only"
-				: "";
-		statusEl.setText(`Card ${this.index + 1} of ${this.cards.length}${gradedHint}${this.revealed ? "" : "  ·  recall first, then Space to reveal"}`);
-		bodyEl.createEl("h3", { text: card.title });
-		const contextRows = cardContextRows(card);
-		if (contextRows.length > 0) {
-			const contextEl = bodyEl.createDiv({ cls: "virtuoso-rep-context" });
-			contextEl.style.color = "var(--text-muted)";
-			contextEl.style.marginBottom = "1em";
-			for (const row of contextRows) {
-				const line = contextEl.createEl("p");
-				line.style.margin = "0.25em 0";
-				line.style.whiteSpace = "pre-wrap";
-				line.style.overflowWrap = "anywhere";
-				line.createEl("strong", { text: `${row.label}:` });
-				line.createEl("span", { text: ` ${row.text}` });
-			}
+		if (state.phase === "empty") {
+			this.statusEl.setText("Review queue clear.");
+			this.bodyEl.createEl("p", { text: "No due or new items." });
+			return;
 		}
-		for (let i = 0; i < card.promptLines.length; i++) {
-			bodyEl.createEl("p", { text: card.promptLines[i] });
-			if (!this.revealed && i === 0 && card.promptLines.length > 1) break; // multi-part: reveal part by part
+		if (state.phase === "complete") {
+			this.statusEl.setText("Session complete.");
+			this.bodyEl.createEl("p", {
+				text: "The CLI recorded each decision in the local workspace.",
+			});
+			return;
 		}
-		if (this.revealed) {
-			if (card.detail) {
-				const d = bodyEl.createEl("p");
-				d.style.color = "var(--text-muted)";
-				d.setText(card.detail);
-			}
-			const btns = bodyEl.createDiv({ cls: "virtuoso-rep-buttons" });
-			const mk = (label: string, r: Rating | "skip") => {
-				const b = btns.createEl("button", { text: label });
-				b.addEventListener("click", () => void this.submit(r));
-				return b;
-			};
-			mk("Again (1)", "again").style.marginRight = "0.5em";
-			mk("Hard (2)", "hard").style.marginRight = "0.5em";
-			mk("Good (3)", "good").style.marginRight = "0.5em";
-			mk("Easy (4)", "easy").style.marginRight = "0.5em";
-			mk("Skip (s)", "skip");
-		}
+
+		this.statusEl.setText(
+			`Card ${state.position} of ${state.total}${state.inFlight ? " · saving" : ""}`,
+		);
+		const item = state.item;
+		if (item === null) return;
+		this.bodyEl.createEl("h3", { text: item.title });
+		this.bodyEl.createEl("p", { text: item.prompt });
+
+		if (state.phase === "prompt") this.renderPrompt();
+		else if (state.phase === "support") this.renderSupport();
+		else if (state.phase === "retry") this.renderRetry();
+		else if (state.phase === "grade") this.renderGrade();
 	}
 
-	private async submit(rating: Rating | "skip") {
-		const card = this.cards[this.index];
-		if (rating !== "skip") {
-			// NB-3 + NB-2 gate: true only for the first answer of a card whose
-			// chapter has not been graded yet (deck cards); item cards have no
-			// chapter, so only the per-card rule applies.
-			if (this.gate.consume(card.id, card.chapter)) {
-				const err = await this.grade(card, rating);
-				if (err) new Notice(`Virtuoso CLI: ${err}`, 6000);
-			} else {
-				new Notice("Practice retry — already graded this session.", 2500);
+	private renderError(): void {
+		const error = this.controller.state.error;
+		if (error === null) return;
+		const panel = this.bodyEl.createDiv({ cls: "virtuoso-review-error" });
+		panel.createEl("p", { text: error.message });
+		const label =
+			error.recovery === "reload-item"
+				? "Reload item"
+				: error.recovery === "retry-submit"
+					? "Retry submission"
+					: error.recovery === "advance-card"
+						? "Continue to next card"
+						: "Open settings";
+		const button = panel.createEl("button", { text: label });
+		button.disabled = this.controller.state.inFlight;
+		button.addEventListener("click", () => {
+			if (error.recovery === "reload-item") {
+				this.perform(() => this.controller.reloadCurrent());
+				return;
 			}
+			if (error.recovery === "retry-submit") {
+				if (this.lastWrite === "grade") {
+					this.perform(() =>
+						this.controller.grade(this.selectedResult, this.selectedConfidence),
+					);
+				} else if (this.lastWrite === "skip") {
+					this.perform(() => this.controller.skip());
+				}
+				return;
+			}
+			if (error.recovery === "advance-card") {
+				this.perform(() => this.controller.acknowledgeRecorded());
+				return;
+			}
+			this.openSettings();
+		});
+	}
+
+	private renderPrompt(): void {
+		const state = this.controller.state;
+		const notesLabel = this.bodyEl.createEl("label");
+		const notes = notesLabel.createEl("input", { type: "checkbox" });
+		notes.checked = state.openNotes;
+		notes.disabled = state.inFlight;
+		notes.addEventListener("change", () => this.controller.setOpenNotes(notes.checked));
+		notesLabel.appendText(" Notes are open");
+
+		const response = this.bodyEl.createEl("textarea");
+		response.placeholder = "Type your first recall before using help.";
+		response.rows = 6;
+		response.disabled = state.inFlight;
+		const submit = this.bodyEl.createEl("button", { text: "Submit initial response" });
+		submit.disabled = state.inFlight;
+		submit.addEventListener("click", () => {
+			this.controller.submitInitial(response.value);
+			this.render();
+		});
+		this.renderSkipButton();
+	}
+
+	private renderSupport(): void {
+		const state = this.controller.state;
+		this.bodyEl.createEl("p", {
+			text: `Initial response: ${state.initialResponse || "(blank)"}`,
+		});
+		if (state.hintUsed && state.item?.hint) {
+			this.bodyEl.createEl("p", { text: `Hint: ${state.item.hint}` });
 		}
-		this.revealed = false;
-		if (rating !== "again") this.index++; // "again" re-queues the same card within the session
-		else this.cards.push(card); // retry later in this session
-		this.render();
+		if (state.retry === null) {
+			const retry = this.bodyEl.createEl("button", { text: "Retry unaided" });
+			retry.disabled = state.inFlight;
+			retry.addEventListener("click", () => {
+				this.controller.beginRetry();
+				this.render();
+			});
+		}
+		if (state.item?.hint && !state.hintUsed) {
+			const hint = this.bodyEl.createEl("button", { text: "Show hint" });
+			hint.disabled = state.inFlight;
+			hint.addEventListener("click", () => {
+				this.controller.useHint();
+				this.render();
+			});
+		}
+		const reveal = this.bodyEl.createEl("button", { text: "Reveal answer" });
+		reveal.disabled = state.inFlight;
+		reveal.addEventListener("click", () => {
+			this.controller.reveal();
+			this.render();
+		});
+		this.renderSkipButton();
+	}
+
+	private renderRetry(): void {
+		const state = this.controller.state;
+		const response = this.bodyEl.createEl("textarea");
+		response.placeholder = "Try once more without the hint or answer.";
+		response.rows = 6;
+		response.disabled = state.inFlight;
+		const submit = this.bodyEl.createEl("button", { text: "Submit unaided retry" });
+		submit.disabled = state.inFlight;
+		submit.addEventListener("click", () => {
+			this.controller.submitRetry(response.value);
+			this.render();
+		});
+		this.renderSkipButton();
+	}
+
+	private renderGrade(): void {
+		const state = this.controller.state;
+		this.bodyEl.createEl("h4", { text: "Answer" });
+		this.bodyEl.createEl("p", { text: state.item?.answer ?? "" });
+
+		const resultLabel = this.bodyEl.createEl("label", { text: "Result " });
+		const result = resultLabel.createEl("select");
+		for (const [value, label] of [
+			["demonstrated", "Demonstrated"],
+			["partial", "Partial"],
+			["not-demonstrated", "Not demonstrated"],
+		] as const) {
+			const option = result.createEl("option", { text: label });
+			option.value = value;
+		}
+		result.value = this.selectedResult;
+		result.disabled = state.inFlight;
+		result.addEventListener("change", () => {
+			this.selectedResult = result.value as typeof this.selectedResult;
+		});
+
+		const confidenceLabel = this.bodyEl.createEl("label", { text: " Confidence " });
+		const confidence = confidenceLabel.createEl("select");
+		for (let value = 1; value <= 5; value += 1) {
+			const option = confidence.createEl("option", { text: String(value) });
+			option.value = String(value);
+		}
+		confidence.value = String(this.selectedConfidence);
+		confidence.disabled = state.inFlight;
+		confidence.addEventListener("change", () => {
+			this.selectedConfidence = Number(confidence.value);
+		});
+
+		const grade = this.bodyEl.createEl("button", { text: "Record grade" });
+		grade.disabled = state.inFlight;
+		grade.addEventListener("click", () => {
+			this.selectedResult = result.value as typeof this.selectedResult;
+			this.selectedConfidence = Number(confidence.value);
+			this.lastWrite = "grade";
+			this.perform(() =>
+				this.controller.grade(this.selectedResult, this.selectedConfidence),
+			);
+		});
+		this.renderSkipButton();
+	}
+
+	private renderSkipButton(): void {
+		const skip = this.bodyEl.createEl("button", { text: "Skip" });
+		skip.disabled = this.controller.state.inFlight;
+		skip.addEventListener("click", () => {
+			this.lastWrite = "skip";
+			this.perform(() => this.controller.skip());
+		});
 	}
 
 	onClose() {
@@ -271,22 +335,18 @@ export default class VirtuosoPlugin extends Plugin {
 			});
 			this.addCommand({
 				id: "virtuoso-cycle-due",
-				name: "Cycle today's cards",
-				callback: () => void this.openRepSession(),
+				name: "Start offline review",
+				callback: () => this.openReviewSession(),
 			});
 			this.addSettingTab(new VirtuosoSettingTab(this.app, this));
-		} catch (err) {
-			// Issue #9: a plugin that fails to load disappears silently — Obsidian
-			// restricted mode or a corrupt data.json shows the user nothing. Surface
-			// the failure path we own; the console keeps the full stack.
-			console.error("Virtuoso plugin failed to load:", err);
+		} catch (error) {
+			console.error("Virtuoso plugin failed to load:", error);
 			new Notice(
-				`Virtuoso failed to load: ${err instanceof Error ? err.message : String(err)}. ` +
-					"If the plugin stays inactive, check restricted-mode (Community plugins " +
-					"toggle) and the plugin's data.json.",
+				`Virtuoso failed to load: ${error instanceof Error ? error.message : String(error)}. ` +
+					"Check restricted mode and the plugin settings.",
 				10000,
 			);
-			throw err;
+			throw error;
 		}
 	}
 
@@ -296,21 +356,6 @@ export default class VirtuosoPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-
-	private cli(): string {
-		return this.settings.cliPath.replace(/^~(?=\/|$)/, (process.env.HOME ?? ""));
-	}
-
-	/** Run one CLI command and capture stdout. Context callers use read-only commands. */
-	private cliRun(args: string[]): Promise<{ ok: boolean; stdout: string }> {
-		return new Promise((resolve) => {
-			const proc = spawn("python3", [this.cli(), ...args], { timeout: 15000 });
-			let stdout = "";
-			proc.stdout.on("data", (d: unknown) => (stdout += String(d)));
-			proc.on("error", () => resolve({ ok: false, stdout }));
-			proc.on("close", (code: number | null) => resolve({ ok: code === 0, stdout }));
-		});
 	}
 
 	private async loadProposed(): Promise<VirtuosoItem[]> {
@@ -339,12 +384,9 @@ export default class VirtuosoPlugin extends Plugin {
 		return items;
 	}
 
-	/** The human-review write: flip review_state on a proposal. */
 	private async decide(item: VirtuosoItem, verdict: "accepted" | "rejected") {
 		const vault = this.app.vault as Vault;
 		const raw = await vault.read(item.file);
-		// Canonical key is review_state (underscore); tolerate the legacy
-		// hyphenated spelling from older drafts.
 		const line = /(^review_state:.*$)|(^review-state:.*$)/m;
 		if (!line.test(raw)) return;
 		await vault.modify(item.file, raw.replace(line, `review_state: ${verdict}`));
@@ -353,136 +395,75 @@ export default class VirtuosoPlugin extends Plugin {
 
 	private async openReviewQueue() {
 		const proposed = await this.loadProposed();
-		new ReviewQueueModal(this.app, proposed, (item, verdict) => this.decide(item, verdict)).open();
+		new ReviewQueueModal(this.app, proposed, (item, verdict) =>
+			this.decide(item, verdict),
+		).open();
 	}
 
-	/** Build today's card list from the CLI's own due output (items + deck). */
-	private async loadDueCards(): Promise<DueCard[]> {
-		const vault = this.app.vault as Vault;
-		const cards: DueCard[] = [];
-
-		// Deck chapters due, straight from the CLI verdict.
-		const due = await this.cliRun(["due"]);
-		const parsed = parseDueOutput(due.stdout);
-		let rationales: Record<string, string> = {};
-		let transferProjects: Record<string, string[]> = {};
-		if (parsed.itemsDue.length > 0) {
-			const [attempts, transfers, next] = await Promise.all([
-				this.cliRun(["attempts", "--json"]),
-				this.cliRun(["transfer", "list", "--json"]),
-				this.cliRun(["next", "--json"]),
-			]);
-			rationales = parsePracticeRationales(
-				attempts.ok ? attempts.stdout : "",
-				next.ok ? next.stdout : "",
-			);
-			if (transfers.ok) transferProjects = parseTransferProjects(transfers.stdout);
-		}
-		if (parsed.deckChaptersDue.length > 0) {
-			const deckIds = new Set(parsed.deckChaptersDue);
-			const deckFile = vault.getAbstractFileByPath(this.settings.deckPath);
-			if (deckFile instanceof TFile) {
-				const raw = await vault.read(deckFile);
-				for (const chap of deckChapterCards(raw)) {
-					if (!deckIds.has(chap.ch)) continue;
-					for (let i = 0; i < chap.qa.length; i++) {
-						const card = chap.qa[i];
-						cards.push({
-							source: "deck",
-							id: `deck-ch${chap.ch}-${i}`,
-							chapter: chap.ch,
-							title: `Book deck · Ch ${chap.ch} — ${chap.title} (${i + 1}/${chap.qa.length})`,
-							promptLines: [card.q],
-							detail: card.a || "(no answer key in deck note — check the source)",
-						});
-					}
-				}
-			}
-		}
-
-		// Virtuoso items due per the CLI, rendered from their notes.
-		if (parsed.itemsDue.length > 0) {
-			const folder = vault.getAbstractFileByPath(this.settings.itemsDir);
-			if (folder && "children" in folder) {
-				// One vault read per note: build an item_id -> note lookup first (was: one
-				// full folder rescan per due id — O(items x due) reads).
-				const byItemId = new Map<string, { fm: Record<string, string>; body: string; basename: string }>();
-				for (const child of (folder as unknown as { children: TFile[] }).children) {
-					if (!(child instanceof TFile) || child.extension !== "md") continue;
-					const raw = await vault.read(child);
-					const fm = frontmatter(raw);
-					if (!isLearningItemFrontmatter(fm)) continue;
-					const id = learningItemId(fm);
-					if (id) {
-						const body = raw.slice(raw.indexOf("---", 4) + 4);
-						byItemId.set(id, { fm, body, basename: child.basename });
-					}
-				}
-				for (const itemId of parsed.itemsDue) {
-					const hit = byItemId.get(itemId);
-					if (!hit) continue;
-					const lines = hit.body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-					cards.push({
-						source: "item",
-						id: itemId,
-						title: fmKey(hit.fm, "title") || hit.basename,
-						promptLines: lines,
-						focus: fmKey(hit.fm, "focus") || undefined,
-						projectId: fmKey(hit.fm, "project_id") || undefined,
-						linkedProjectIds: transferProjects[itemId],
-						whyNow: rationales[itemId],
-					});
-				}
-			}
-		}
-		return cards;
+	private openReviewSession(): void {
+		const client = new VirtuosoCliClient(
+			this.settings.cliPath,
+			this.settings.workspacePath,
+		);
+		new ReviewSessionModal(
+			this.app,
+			new ReviewSessionController(client),
+			() => this.openPluginSettings(),
+		).open();
 	}
 
-	private async openRepSession() {
-		const cards = await this.loadDueCards();
-		if (cards.length === 0) {
-			new Notice("Virtuoso: nothing due today.");
+	private openPluginSettings(): void {
+		const app = this.app as App & {
+			setting?: { open(): void; openTabById(id: string): void };
+		};
+		if (!app.setting) {
+			new Notice("Open Settings, then select Virtuoso.");
 			return;
 		}
-		new RepSessionModal(this.app, cards, (card, rating) => this.gradeCard(card, rating)).open();
-	}
-
-	/** Grade through the CLI only — the plugin never computes an interval. */
-	private async gradeCard(card: DueCard, rating: Rating | "skip"): Promise<string | null> {
-		if (rating === "skip") {
-			// Issue #4: a skip must leave a trace. Record it in the CLI's
-			// evidence ledger (schedule untouched); a failure surfaces as a
-			// Notice rather than vanishing.
-			if (card.source !== "item") return null;
-			const res = await this.cliRun(["skip", card.id, "--surface", "obsidian-plugin"]);
-			if (!res.ok) new Notice(`Virtuoso skip record failed: ${res.stdout.trim()}`, 6000);
-			return null;
-		}
-		const args =
-			card.source === "deck" && card.chapter
-				? ["deck-rep", card.chapter, rating]
-				: ["review", card.id, rating];
-		const res = await this.cliRun(args);
-		if (!res.ok) return res.stdout.trim() || "command failed";
-		new Notice(res.stdout.trim(), 3500);
-		return null;
+		app.setting.open();
+		app.setting.openTabById(this.manifest.id);
 	}
 }
 
 class VirtuosoSettingTab extends PluginSettingTab {
-	private plugin: VirtuosoPlugin;
-
-	constructor(app: App, plugin: VirtuosoPlugin) {
+	constructor(app: App, private readonly plugin: VirtuosoPlugin) {
 		super(app, plugin);
-		this.plugin = plugin;
 	}
 
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
 		new Setting(containerEl)
-			.setName("Items directory")
-			.setDesc("Vault path holding virtuoso-learning-item notes")
+			.setName("Virtuoso executable")
+			.setDesc("Absolute path to the installed virtuoso executable")
+			.addText((text) =>
+				text
+					.setPlaceholder("/path/to/acadine-virtuoso/.venv/bin/virtuoso")
+					.setValue(this.plugin.settings.cliPath)
+					.onChange((value) => {
+						void (async () => {
+							this.plugin.settings.cliPath = value.trim();
+							await this.plugin.saveSettings();
+						})();
+					}),
+			);
+		new Setting(containerEl)
+			.setName("Virtuoso workspace")
+			.setDesc("Absolute path to the local workspace created by virtuoso init")
+			.addText((text) =>
+				text
+					.setPlaceholder("/path/to/virtuoso-workspace")
+					.setValue(this.plugin.settings.workspacePath)
+					.onChange((value) => {
+						void (async () => {
+							this.plugin.settings.workspacePath = value.trim();
+							await this.plugin.saveSettings();
+						})();
+					}),
+			);
+		new Setting(containerEl)
+			.setName("Proposal items directory")
+			.setDesc("Vault path for optional proposed-item review")
 			.addText((text) =>
 				text
 					.setPlaceholder(DEFAULT_SETTINGS.itemsDir)
@@ -490,34 +471,6 @@ class VirtuosoSettingTab extends PluginSettingTab {
 					.onChange((value) => {
 						void (async () => {
 							this.plugin.settings.itemsDir = value || DEFAULT_SETTINGS.itemsDir;
-							await this.plugin.saveSettings();
-						})();
-					}),
-			);
-		new Setting(containerEl)
-			.setName("Scheduler CLI path")
-			.setDesc("Path to virtuoso.py — all grades run through it")
-			.addText((text) =>
-				text
-					.setPlaceholder(DEFAULT_SETTINGS.cliPath)
-					.setValue(this.plugin.settings.cliPath)
-					.onChange((value) => {
-						void (async () => {
-							this.plugin.settings.cliPath = value || DEFAULT_SETTINGS.cliPath;
-							await this.plugin.saveSettings();
-						})();
-					}),
-			);
-		new Setting(containerEl)
-			.setName("Deck note path")
-			.setDesc("Vault path to the spaced-repetition deck note")
-			.addText((text) =>
-				text
-					.setPlaceholder(DEFAULT_SETTINGS.deckPath)
-					.setValue(this.plugin.settings.deckPath)
-					.onChange((value) => {
-						void (async () => {
-							this.plugin.settings.deckPath = value || DEFAULT_SETTINGS.deckPath;
 							await this.plugin.saveSettings();
 						})();
 					}),

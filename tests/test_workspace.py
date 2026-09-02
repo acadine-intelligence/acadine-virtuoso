@@ -140,7 +140,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (11,))
+            self.assertEqual(migration, (12,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -169,7 +169,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 12)),
+                list(range(1, 13)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -503,7 +503,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -695,6 +695,9 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ).fetchall()
             ]:
                 db.execute(f'DROP TRIGGER "{trigger}"')
+            db.execute("DROP TRIGGER review_skips_reject_update")
+            db.execute("DROP TRIGGER review_skips_reject_delete")
+            db.execute("DROP TABLE review_skips")
             db.execute("DROP TABLE attempt_timings")
             db.execute("DROP TABLE scheduler_proposals")
             db.execute("DROP TABLE scheduler_state")
@@ -842,7 +845,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             state = db.execute(
                 "SELECT source_event_id, state_json FROM scheduler_state"
             ).fetchall()
-        self.assertEqual(versions, list(range(1, 12)))
+        self.assertEqual(versions, list(range(1, 13)))
         self.assertEqual(
             attempt,
             [
