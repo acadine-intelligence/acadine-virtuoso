@@ -130,6 +130,33 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="check workspace health")
     doctor.add_argument("--json", action="store_true")
 
+    search = commands.add_parser(
+        "search", help="lexical (FTS5) and semantic (embedding kNN) retrieval"
+    )
+    search_commands = search.add_subparsers(dest="search_command", required=True)
+    search_lexical = search_commands.add_parser("lex", help="word search over items")
+    search_lexical.add_argument("--query", required=True)
+    search_lexical.add_argument("--limit", type=int, default=10)
+    search_lexical.add_argument("--json", action="store_true")
+    search_embed = search_commands.add_parser(
+        "embed", help="store or replace an embedding vector (JSON) for one item"
+    )
+    search_embed.add_argument("--item", required=True)
+    search_embed.add_argument("--model", required=True)
+    search_embed.add_argument("--vector", required=True)
+    search_embed.add_argument("--json", action="store_true")
+    search_semantic = search_commands.add_parser(
+        "sem", help="cosine kNN over stored embeddings"
+    )
+    search_semantic.add_argument("--model", required=True)
+    search_semantic.add_argument("--vector", required=True)
+    search_semantic.add_argument("--limit", type=int, default=10)
+    search_semantic.add_argument("--json", action="store_true")
+    search_status_cmd = search_commands.add_parser(
+        "status", help="index freshness and embedding inventory"
+    )
+    search_status_cmd.add_argument("--json", action="store_true")
+
     source = commands.add_parser(
         "source", help="connect and inspect read-only Markdown or Obsidian sources"
     )
@@ -471,6 +498,71 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "search":
+            from dataclasses import asdict as _asdict
+
+            from . import search as search_module
+
+            if args.search_command == "lex":
+                hits = search_module.lexical_search(
+                    workspace, args.query, limit=args.limit
+                )
+                _emit(
+                    {
+                        "schema": "virtuoso/lexical-search@0.1",
+                        "query": args.query,
+                        "hits": [_asdict(hit) for hit in hits],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.search_command == "embed":
+                try:
+                    vector = json.loads(args.vector)
+                    if not isinstance(vector, list):
+                        raise ValueError("vector must be a JSON array")
+                except ValueError as exc:
+                    _emit({"error": f"invalid vector JSON: {exc}"}, as_json=True)
+                    return 2
+                search_module.embed_upsert(
+                    workspace,
+                    item_id=args.item,
+                    model=args.model,
+                    vector=vector,
+                )
+                _emit(
+                    {
+                        "schema": "virtuoso/embed-upsert@0.1",
+                        "item_id": args.item,
+                        "model": args.model,
+                        "dim": len(vector),
+                    },
+                    as_json=True,
+                )
+                return 0
+            if args.search_command == "sem":
+                try:
+                    vector = json.loads(args.vector)
+                    if not isinstance(vector, list):
+                        raise ValueError("vector must be a JSON array")
+                except ValueError as exc:
+                    _emit({"error": f"invalid vector JSON: {exc}"}, as_json=True)
+                    return 2
+                hits = search_module.semantic_search(
+                    workspace, model=args.model, query_vector=vector, limit=args.limit
+                )
+                _emit(
+                    {
+                        "schema": "virtuoso/semantic-search@0.1",
+                        "model": args.model,
+                        "hits": [_asdict(hit) for hit in hits],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.search_command == "status":
+                _emit(search_module.search_status(workspace), as_json=args.json)
+                return 0
         if args.command == "candidate":
             service = CandidateService(workspace)
             if args.candidate_command == "generate":
