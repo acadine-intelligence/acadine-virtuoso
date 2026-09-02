@@ -2,7 +2,7 @@
 
 ## Direct evidence
 
-Jonathan's 2026-08-19 voice and chat source asks for a mental gym centered on active recall and the testing effect. Recall latency should fall over time. Practice should connect to tests, computational exercises, and authentic project use. Virtue and destiny structures are optional; simple bottom-up learning is first-class.
+The foundation of effective learning is based on principles around spaced repetition, active recall and the testing effect. Recall latency should fall over time. Practice should connect to tests, computational exercises, and authentic project use. Virtue and destiny structures are optional; simple bottom-up learning is first-class.
 
 The current local deployment has five pilot learning items and an SM-2-lite path-bound script. It proves there is real material and a scheduling need, but it does not run the full recall journey, isolate per-workspace data, or expose a safe extension contract.
 
