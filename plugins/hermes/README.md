@@ -6,10 +6,10 @@ its own.
 
 ## Tools
 
-- `virtuoso_due` — what is due now (recommended next + delayed transfer checks)
-- `virtuoso_next` — single recommended practice item
-- `virtuoso_transfer_record` — record a real-project transfer event (evidence)
-- `virtuoso_status` — workspace health
+- `virtuoso_due`: what is due now (recommended next + delayed transfer checks)
+- `virtuoso_next`: single recommended practice item
+- `virtuoso_transfer_record`: record a real-project transfer event with an optional artifact reference
+- `virtuoso_status`: workspace health
 
 All tools are service-gated on `shutil.which("virtuoso")`: if the CLI is not
 installed, the toolset never appears in agent schemas.
@@ -41,8 +41,26 @@ plugins:
         workspace: /path/to/your-virtuoso-workspace
 ```
 
-Default workspace: `~/.virtuoso/workspace` (override with the `workspace:`
-setting or the `--workspace` flag).
+Default workspace: `~/.virtuoso/workspace`. Override it with the `workspace:`
+plugin setting.
+
+## Result and argument contract
+
+Every handler returns one JSON object. Success uses `{"success": true,
+"data": ...}`. Failure uses `{"success": false, "error": "..."}`.
+`virtuoso_due` succeeds only when both its next-item and delayed-check calls
+succeed. Its failure adds `component` with `recommended_next` or
+`transfer_checks_due`. A timeout, spawn failure, non-zero exit, empty output,
+malformed JSON, or non-object JSON fails closed.
+
+Failure output omits the subprocess argv. This keeps workspace paths and
+transfer prose out of wrapper-generated diagnostics. The underlying CLI error
+message remains available.
+
+Item and project identifiers use lowercase words or numbers separated by
+single dashes. Focus is an optional free-text track name. If supplied, focus
+must be non-empty. The wrapper passes every dynamic value as `--flag=value`,
+so a valid free-text value that starts with `-` remains data.
 
 ## Design notes
 
