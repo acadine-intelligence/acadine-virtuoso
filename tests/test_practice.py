@@ -353,6 +353,7 @@ class PracticeServiceTests(unittest.TestCase):
             "open_notes": attempt.open_notes,
             "agent_help": attempt.agent_help,
             "support_actions": [asdict(action) for action in attempt.support_actions],
+            "administered": attempt.administered,
         }
         proposal_payload = {
             "proposal_id": proposal.proposal_id,
@@ -430,6 +431,164 @@ class PracticeServiceTests(unittest.TestCase):
                 now=later,
             )
         self.assertEqual(len(self.workspace.list_attempts()), 1)
+
+
+class AdministeredPracticeTests(unittest.TestCase):
+    """`run_administered`: agent-mediated attempts with honest attribution.
+
+    The learner answered out-of-band (chat, voice); an agent transcribes the
+    answer and grade. Latency was not measured by Virtuoso, so it is stored
+    as NULL/unknown — never 0 ms and never fabricated.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve() / "learner"
+        self.workspace = WorkspaceService.init(self.root)
+        self.workspace.add_item(
+            item_id="testing-effect",
+            title="Explain the testing effect",
+            focus="learning-science",
+            prompt="Why does retrieval strengthen later recall?",
+            answer="Retrieval changes memory and improves later access.",
+            hint="Contrast effortful retrieval with rereading.",
+            follow_up="Give one coding-project example.",
+        )
+        self.now = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_administered_attempt_records_null_latency_and_marker(self) -> None:
+        result = PracticeService(self.workspace).run_administered(
+            item_id="testing-effect",
+            response="Retrieval strengthens access paths.",
+            result="demonstrated",
+            confidence=4,
+            now=self.now,
+        )
+
+        self.assertIsNone(result.attempt.initial_latency_ms)
+        self.assertTrue(result.attempt.administered)
+        self.assertEqual(result.attempt.agent_help, "substantial")
+        self.assertEqual(result.attempt.result, "demonstrated")
+        self.assertEqual(result.attempt.confidence, 4)
+        self.assertFalse(result.attempt.open_notes)
+        self.assertEqual(result.attempt.support_actions, ())
+        self.assertEqual(result.proposal.algorithm, "fsrs")
+        self.assertEqual(result.proposal.source_event_id, result.attempt.event_id)
+        self.assertGreater(result.proposal.due_at, self.now)
+        self.assertNotIn("0 ms", result.proposal.rationale)
+        self.assertIn("unmeasured", result.proposal.rationale)
+
+        with sqlite3.connect(self.workspace.db_path) as db:
+            row = db.execute(
+                "SELECT initial_latency_ms, administered, agent_help, result"
+                " FROM attempts"
+            ).fetchone()
+            timing = db.execute("SELECT COUNT(*) FROM attempt_timings").fetchone()[0]
+            state = db.execute(
+                "SELECT source_event_id FROM scheduler_state"
+            ).fetchone()
+        self.assertEqual(row, (None, 1, "substantial", "demonstrated"))
+        self.assertEqual(timing, 0)
+        self.assertEqual(state, (result.attempt.event_id,))
+
+    def test_administered_attempt_is_distinguishable_from_interactive(self) -> None:
+        PracticeService(self.workspace).run_administered(
+            item_id="testing-effect",
+            response="An administered answer.",
+            result="partial",
+            confidence=2,
+            now=self.now,
+        )
+        PracticeService(
+            self.workspace, clock=FakeClock([100.0, 101.25, 102.0])
+        ).run(
+            item_id="testing-effect",
+            io=ScriptedIO(
+                ["n", "A direct interactive answer.", "reveal", "demonstrated", "4"]
+            ),
+            now=self.now + timedelta(hours=1),
+            agent_help="none",
+        )
+
+        attempts = self.workspace.list_attempts()
+        self.assertEqual(len(attempts), 2)
+        by_marker = {bool(attempt["administered"]): attempt for attempt in attempts}
+        self.assertEqual(by_marker[True]["initial_latency_ms"], None)
+        self.assertEqual(by_marker[True]["agent_help"], "substantial")
+        self.assertEqual(by_marker[False]["initial_latency_ms"], 1250)
+        self.assertEqual(by_marker[False]["agent_help"], "none")
+        self.assertIsNone(by_marker[True]["started_at"])
+        self.assertIsNone(by_marker[True]["completed_at"])
+        self.assertIsNotNone(by_marker[False]["started_at"])
+
+    def test_administered_agent_help_override_is_recorded(self) -> None:
+        result = PracticeService(self.workspace).run_administered(
+            item_id="testing-effect",
+            response="Answered with only a nudge.",
+            result="demonstrated",
+            confidence=3,
+            agent_help="light",
+            now=self.now,
+        )
+        self.assertEqual(result.attempt.agent_help, "light")
+
+    def test_administered_rejects_blank_response_for_demonstrated(self) -> None:
+        with self.assertRaisesRegex(PracticeError, "blank recall"):
+            PracticeService(self.workspace).run_administered(
+                item_id="testing-effect",
+                response="   ",
+                result="demonstrated",
+                confidence=4,
+                now=self.now,
+            )
+        self.assertEqual(self.workspace.list_attempts(), [])
+
+    def test_administered_validates_result_confidence_and_help(self) -> None:
+        cases = (
+            ({"result": "aced-it"}, "result"),
+            ({"confidence": 0}, "confidence"),
+            ({"confidence": 6}, "confidence"),
+            ({"agent_help": "generous"}, "agent_help"),
+        )
+        base = {
+            "item_id": "testing-effect",
+            "response": "some answer",
+            "result": "partial",
+            "confidence": 3,
+            "now": self.now,
+        }
+        for overrides, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(PracticeError, message):
+                    PracticeService(self.workspace).run_administered(
+                        **{**base, **overrides}
+                    )
+        self.assertEqual(self.workspace.list_attempts(), [])
+
+    def test_administered_requires_timezone_aware_timestamp(self) -> None:
+        with self.assertRaisesRegex(PracticeError, "timezone-aware"):
+            PracticeService(self.workspace).run_administered(
+                item_id="testing-effect",
+                response="answer",
+                result="partial",
+                confidence=3,
+                now=datetime(2026, 8, 19, 12, 0),
+            )
+
+    def test_doctor_stays_healthy_with_administered_attempts(self) -> None:
+        PracticeService(self.workspace).run_administered(
+            item_id="testing-effect",
+            response="Administered answer.",
+            result="demonstrated",
+            confidence=4,
+            now=self.now,
+        )
+        doctor = self.workspace.doctor()
+        self.assertEqual(doctor["status"], "healthy")
+        self.assertEqual(doctor["attempts"], 1)
 
 
 if __name__ == "__main__":

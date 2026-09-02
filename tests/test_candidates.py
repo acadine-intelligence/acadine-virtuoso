@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from conftest import downgrade_attempt_chain_to_v9
 from virtuoso.workspace import WorkspaceService
 
 
@@ -511,6 +512,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v6 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -529,33 +532,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "SELECT item_id, title, focus, relative_path, content_hash, "
                 "created_at FROM items_with_retired"
             )
-            db.execute("PRAGMA legacy_alter_table = ON")
-            db.execute("ALTER TABLE attempts RENAME TO attempts_v10")
-            db.execute(
-                """CREATE TABLE attempts (
-                    event_id TEXT PRIMARY KEY,
-                    item_id TEXT NOT NULL REFERENCES items(item_id),
-                    item_content_hash TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    initial_response TEXT NOT NULL,
-                    initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
-                    result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
-                    confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
-                    open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
-                    agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
-                    support_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )"""
-            )
-            db.execute(
-                "INSERT INTO attempts SELECT event_id, item_id, "
-                "item_content_hash, occurred_at, initial_response, "
-                "initial_latency_ms, result, confidence, open_notes, "
-                "agent_help, support_json, created_at FROM attempts_v10"
-            )
-            db.execute("DROP TABLE attempts_v10")
-            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DELETE FROM schema_migrations WHERE version >= 7")
             sources_before = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
 
@@ -590,6 +568,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v6 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -608,33 +588,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "SELECT item_id, title, focus, relative_path, content_hash, "
                 "created_at FROM items_with_retired"
             )
-            db.execute("PRAGMA legacy_alter_table = ON")
-            db.execute("ALTER TABLE attempts RENAME TO attempts_v10")
-            db.execute(
-                """CREATE TABLE attempts (
-                    event_id TEXT PRIMARY KEY,
-                    item_id TEXT NOT NULL REFERENCES items(item_id),
-                    item_content_hash TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    initial_response TEXT NOT NULL,
-                    initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
-                    result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
-                    confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
-                    open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
-                    agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
-                    support_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )"""
-            )
-            db.execute(
-                "INSERT INTO attempts SELECT event_id, item_id, "
-                "item_content_hash, occurred_at, initial_response, "
-                "initial_latency_ms, result, confidence, open_notes, "
-                "agent_help, support_json, created_at FROM attempts_v10"
-            )
-            db.execute("DROP TABLE attempts_v10")
-            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DROP TABLE items_with_retired")
+            db.execute("PRAGMA legacy_alter_table = OFF")
             db.execute("DELETE FROM schema_migrations WHERE version >= 7")
             db.execute("CREATE TABLE review_candidates(candidate_id TEXT PRIMARY KEY)")
 

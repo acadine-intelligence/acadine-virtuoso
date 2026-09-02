@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from conftest import downgrade_attempt_chain_to_v9
 from virtuoso.workspace import TransferEvidence, WorkspaceError, WorkspaceService
 
 
@@ -52,36 +53,6 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
             ]
 
     @staticmethod
-    def _downgrade_attempts_to_legacy_shape(db: sqlite3.Connection) -> None:
-        """Rebuild attempts in its pre-v10 shape (issue #2 migration test aid)."""
-        db.execute("PRAGMA legacy_alter_table = ON")
-        db.execute("ALTER TABLE attempts RENAME TO attempts_v10")
-        db.execute(
-            """CREATE TABLE attempts (
-                event_id TEXT PRIMARY KEY,
-                item_id TEXT NOT NULL REFERENCES items(item_id),
-                item_content_hash TEXT NOT NULL,
-                occurred_at TEXT NOT NULL,
-                initial_response TEXT NOT NULL,
-                initial_latency_ms INTEGER NOT NULL CHECK(initial_latency_ms >= 0),
-                result TEXT NOT NULL CHECK(result IN ('demonstrated','partial','not-demonstrated')),
-                confidence INTEGER NOT NULL CHECK(confidence BETWEEN 1 AND 5),
-                open_notes INTEGER NOT NULL CHECK(open_notes IN (0,1)),
-                agent_help TEXT NOT NULL CHECK(agent_help IN ('none','light','substantial','unknown')),
-                support_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        db.execute(
-            "INSERT INTO attempts SELECT event_id, item_id, "
-            "item_content_hash, occurred_at, initial_response, "
-            "initial_latency_ms, result, confidence, open_notes, "
-            "agent_help, support_json, created_at FROM attempts_v10"
-        )
-        db.execute("DROP TABLE attempts_v10")
-        db.execute("PRAGMA legacy_alter_table = OFF")
-
-    @staticmethod
     def _downgrade_fixture_to_v5(service: WorkspaceService) -> None:
         with sqlite3.connect(service.db_path) as db:
             trigger_names = [
@@ -99,6 +70,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v5 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -119,7 +92,6 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
             )
             db.execute("DROP TABLE items_with_retired")
             db.execute("PRAGMA legacy_alter_table = OFF")
-            DelayedTransferCheckMigrationTests._downgrade_attempts_to_legacy_shape(db)
             db.execute("DELETE FROM schema_migrations WHERE version > 5")
 
     @staticmethod
@@ -136,7 +108,6 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "transfer_checks",
             ):
                 db.execute(f'DROP TABLE IF EXISTS "{table}"')
-            DelayedTransferCheckMigrationTests._downgrade_attempts_to_legacy_shape(db)
             db.execute("DELETE FROM schema_migrations WHERE version > 4")
 
     def test_v4_workspace_migrates_to_v6_without_changing_existing_transfer_evidence(
@@ -282,7 +253,7 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
             ).fetchone()[0]
         self.assertEqual(after, before)
-        self.assertEqual(trigger_count, 10)
+        self.assertEqual(trigger_count, 11)
         self.assertEqual(self._versions(reopened), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     def test_v5_open_rejects_missing_historical_table_before_v6_creation(
@@ -447,6 +418,8 @@ class DelayedTransferCheckMigrationTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v7 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
