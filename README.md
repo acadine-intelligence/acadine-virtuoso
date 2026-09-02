@@ -6,14 +6,15 @@ Your material stays yours: items are plain Markdown you can read and edit; SQLit
 
 ## Why
 
-Most learning tools measure activity. Virtuoso measures attempts: what you recalled, how long it took, what help you used, and whether you could apply it later in a real project. It refuses to infer competence from completion counts, streaks, or AI-generated answers. An attempt is evidence or it is nothing.
+Most learning tools measure activity. Virtuoso measures attempts: what you recalled, how long it took, what help you used, and whether you could apply it later in a real project. It refuses to infer competence from completion counts, streaks, or AI-generated answers. Virtuoso records the context needed to interpret each attempt as evidence.
 
 ## Install
 
 Requires Python 3.11+.
 
 ```bash
-git clone <repo-url> && cd <repo-name>
+git clone https://github.com/acadine-intelligence/acadine-virtuoso.git
+cd acadine-virtuoso
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
@@ -53,13 +54,21 @@ Scheduling is explainable: each attempt produces a scheduler proposal carrying t
 
 ## Beyond single items
 
-**Read-only sources.** Connect any Markdown folder or Obsidian vault as a source. Virtuoso indexes paths, titles, hashes and wikilinks; it never writes to your notes and never copies their prose into its database.
+### Read-only sources
 
-**Project transfer evidence.** When you apply something you learned to real work, record it: outcome, independence, artifact reference, your reflection. A delayed capability check follows days later, with a pre-attempt prediction and append-only completion evidence. None of it ever claims mastery.
+Connect any Markdown folder or Obsidian vault as a source. Virtuoso indexes paths, titles, hashes and wikilinks; it never writes to your notes and never copies their prose into its database.
 
-**Retrieval (RAG-ready).** Lexical full-text search over all items (word-stemmed, so "goroutine" finds "goroutines"), plus an embedding table with cosine kNN. Virtuoso never calls an embedding API itself: you compute vectors with any tool you like and store them. Find the items closest to a question, then feed them to a tutor agent, a session composer, or your own prompt.
+### Project transfer evidence
 
-**Analytics.** Read-only queries over your own database: per-focus performance, full item history, due workload by focus, and stale source links. Every query opens the database in read-only mode.
+When you apply something you learned to real work, record the outcome, independence, artifact reference and your reflection. A delayed capability check follows days later, with a pre-attempt prediction and append-only completion evidence. These records never create a mastery claim.
+
+### Retrieval
+
+Lexical full-text search works across all items. Word stemming lets "goroutine" find "goroutines". An embedding table supports cosine kNN. Virtuoso never calls an embedding API itself. You compute vectors with your chosen tool and store them locally. The retrieved items can feed a tutor agent, a session composer or your own prompt.
+
+### Analytics
+
+Read-only queries report per-focus performance, item history, due workload by focus and stale source links. Every query opens the database in read-only mode.
 
 ## The Obsidian plugin (optional)
 
@@ -71,22 +80,22 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 
 ## What Virtuoso does not do
 
-- No XP, streaks, leaderboards, or moral scoring
-- No cloud, accounts, or telemetry
-- No automatic content generation: you author the items (a review-candidate pipeline can propose structural practice from your indexed notes, but acceptance stays human)
-- No mastery claims from any single event
-- Does not require Obsidian, any agent, or any model
+- Virtuoso has no XP, streaks, leaderboards or moral scoring.
+- Virtuoso uses no cloud service, account or telemetry.
+- Virtuoso does not generate content automatically. You author the items. A review-candidate pipeline can propose structural practice from indexed notes, and a human decides whether to accept it.
+- A single event never creates a mastery claim.
+- The CLI runs without Obsidian, an agent or a model.
 
 ## Documentation
 
-- `docs/12-cli-reference.md` — every command, flag, JSON shape, exit code
-- `docs/13-agent-usage.md` — how agents drive the CLI
-- `docs/10-learning-research.md` — the research basis and its limits
-- `docs/03-domain-model.md` — who owns which state and why
+- `docs/12-cli-reference.md`: every command, flag, JSON shape and exit code
+- `docs/13-agent-usage.md`: how agents drive the CLI
+- `docs/10-learning-research.md`: the research basis and its limits
+- `docs/03-domain-model.md`: who owns which state and why
 
 ## Status
 
-Early, dogfooded daily, honest about scope. The completion boundary lives in `product.json`; this README documents what exists today, not a roadmap promise.
+Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the implemented behavior.
 
 ## Verify
 
