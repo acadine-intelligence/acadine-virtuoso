@@ -1,6 +1,6 @@
 # Production readiness
 
-Virtuoso is not released. This file records the intended checks without claiming they have passed.
+Virtuoso is not released. The public source baseline has passed the checks recorded in `docs/16-verification-history.md`; the release requirements below remain open.
 
 ## Installation and first run
 
@@ -16,8 +16,8 @@ SQLite migrations run transactionally. Before any future destructive migration, 
 
 ## Release evidence
 
-Required before release: clean-environment install, all Build OS verification commands, representative journeys, exact-commit independent review, migration/backup/restore proof, user acceptance, known limitations, and an approved distribution decision.
+Required before release: clean-environment installation, public CI, Build OS verification, representative journeys, exact-commit independent review, migration and restore proof, user acceptance, known limitations, and an approved distribution decision.
 
 ## Distribution boundary
 
-Current distribution is local-only. No Git remote, package publication, public repository, hosted service, or external data transfer is authorized by this iteration.
+The source is available from the public GitHub repository and installs into a local project environment. No package registry release or hosted service exists. Runtime workspace data remains local unless a user explicitly moves it.

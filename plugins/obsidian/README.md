@@ -17,8 +17,8 @@ Human review queue for Virtuoso learning items, inside Obsidian.
 
 That single frontmatter flip is the **entire write surface**. Scheduling,
 intervals, and evidence stay with the Virtuoso CLI; flashcards stay with the
-Obsidian Spaced Repetition plugin. This plugin never touches schedule state —
-that boundary is the 2026-07-24 architecture decision.
+Obsidian Spaced Repetition plugin. This plugin never touches schedule state.
+That boundary comes from the 2026-07-24 architecture decision.
 
 ## Build
 
@@ -41,6 +41,7 @@ Then enable "Virtuoso" in Obsidian's Community Plugins (restricted mode off).
 
 ## Publishing note
 
-At a future public cut this directory extracts to its own repo — Obsidian
-community listing requires `manifest.json` at a public repo root with a GitHub
-release containing `main.js`, `manifest.json`, `versions.json`.
+The plugin source is public inside this repository. An Obsidian Community
+listing requires a dedicated public plugin repository with `manifest.json` at
+its root and a GitHub Release containing `main.js`, `manifest.json`, and
+`versions.json`.

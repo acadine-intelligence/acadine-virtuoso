@@ -1,0 +1,80 @@
+name: CI
+
+# Pull request code receives no secrets or writable token.
+# The workflow does not interpolate event text into shell commands.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+
+      - name: Compile Python
+        run: .venv/bin/python -m compileall -q src tests
+
+      - name: Run Python tests
+        run: .venv/bin/python -m unittest discover -s tests -v
+
+      - name: Smoke-test installed CLI
+        run: .venv/bin/virtuoso --help
+
+  obsidian-plugin:
+    name: Obsidian plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: plugins/obsidian
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: plugins/obsidian/package-lock.json
+
+      - name: Install plugin dependencies
+        run: npm ci
+
+      - name: Type-check plugin
+        run: npm run typecheck
+
+      - name: Run plugin tests
+        run: npm test
+
+      - name: Build plugin
+        run: npm run build
