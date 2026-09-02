@@ -105,6 +105,28 @@ def _parser() -> argparse.ArgumentParser:
     attempts = commands.add_parser("attempts", help="show evidence and proposals")
     attempts.add_argument("--json", action="store_true")
 
+    queries = commands.add_parser(
+        "queries", help="read-only analytics over the workspace database"
+    )
+    query_commands = queries.add_subparsers(dest="query_command", required=True)
+    query_focus = query_commands.add_parser(
+        "focus", help="per-focus attempt outcomes"
+    )
+    query_focus.add_argument("--json", action="store_true")
+    query_history = query_commands.add_parser(
+        "history", help="attempt history for one item"
+    )
+    query_history.add_argument("--item", required=True)
+    query_history.add_argument("--json", action="store_true")
+    query_workload = query_commands.add_parser(
+        "workload", help="due-now and scheduled counts per focus"
+    )
+    query_workload.add_argument("--json", action="store_true")
+    query_stale = query_commands.add_parser(
+        "stale-links", help="source links whose note changed or disappeared"
+    )
+    query_stale.add_argument("--json", action="store_true")
+
     doctor = commands.add_parser("doctor", help="check workspace health")
     doctor.add_argument("--json", action="store_true")
 
@@ -394,6 +416,58 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.json,
             )
             return 0
+        if args.command == "queries":
+            from . import queries as queries_module
+
+            if args.query_command == "focus":
+                _emit(
+                    {
+                        "schema": "virtuoso/focus-performance@0.1",
+                        "focuses": [
+                            asdict(summary)
+                            for summary in queries_module.focus_performance(
+                                workspace.db_path
+                            )
+                        ],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.query_command == "history":
+                _emit(
+                    {
+                        "schema": "virtuoso/item-history@0.1",
+                        "item_id": args.item,
+                        "attempts": [
+                            asdict(entry)
+                            for entry in queries_module.item_history(
+                                workspace.db_path, args.item
+                            )
+                        ],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.query_command == "workload":
+                _emit(
+                    {
+                        "schema": "virtuoso/workload-by-focus@0.1",
+                        "focuses": queries_module.workload_by_focus(
+                            workspace.db_path
+                        ),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.query_command == "stale-links":
+                _emit(
+                    {
+                        "schema": "virtuoso/stale-links@0.1",
+                        "links": queries_module.stale_links(workspace.db_path),
+                    },
+                    as_json=args.json,
+                )
+                return 0
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
