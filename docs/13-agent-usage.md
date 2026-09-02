@@ -21,6 +21,7 @@ Translate learner intent into commands like this:
 | "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json`: selection scoped to one focus; a track with no items returns exit 2 with a clear error |
 | "Add this as a practice item" | `add --id ... --title ... --focus ... --prompt ... --answer ... [--hint ...] [--follow-up ...] --json` |
 | "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive; see the session protocol below) |
+| "Quiz me in chat" / learner answered out-of-band | `practice --item X --administer --response "..." --result ... --confidence N --json` (agent transcribes; latency stored as unknown) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |
 | "Is my workspace healthy?" | `doctor --json` |
 | "Connect my Obsidian vault / notes folder" | `source add --id ... --kind obsidian|markdown --path ROOT --json` |
@@ -40,7 +41,16 @@ Translate learner intent into commands like this:
 
 **Option A: relay to the human (preferred).** Tell the human to run the command in their terminal, or relay prompts and answers through the chat. The learner's own answers and self-grading are the evidence.
 
-**Option B: drive the protocol programmatically.** Feed stdin lines in protocol order and read stdout. The sequence is:
+**Option B: administered mode (`--administer`).** When the learner answers through the agent (chat, voice) instead of the terminal, run one non-interactive command after the exchange:
+
+```
+practice --item X --administer --response "<learner's transcribed answer>" \
+  --result <graded outcome> --confidence <1-5> [--agent-help <level>] --json
+```
+
+The attempt is marked `administered`, latency is stored as NULL/unknown (the tool measured nothing), and `--agent-help` defaults to `substantial`. Ask the learner for their answer and confidence BEFORE revealing the reference answer, exactly as the interactive protocol would. Do not pipe scripted stdin into interactive `practice`: that fabricates a near-zero latency measurement and pollutes the evidence.
+
+**Driving the interactive protocol directly (rarely appropriate).** Feed stdin lines in protocol order and read stdout — only sensible when a human is typing at a relayed live terminal, because the measured latency must belong to the learner. The sequence is:
 
 ```
 stdin:  <y|n>                     # Notes open?
@@ -60,7 +70,7 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 
 ## Standard agent workflows
 
-**Morning pulse.** `next --json` → present only the prompt and title → after the human answers, administer `practice` for that item → close with the printed next-review time. Optionally `transfer check due --json` first, since due checks outrank routine review.
+**Morning pulse.** `next --json` → present only the prompt and title → after the human answers in chat, record it with `practice --administer` (or relay an interactive session) → close with the printed next-review time. Optionally `transfer check due --json` first, since due checks outrank routine review.
 
 **Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/`; items are human-owned prose.
 

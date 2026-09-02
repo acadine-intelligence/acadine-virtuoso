@@ -48,15 +48,16 @@ class AttemptRecord:
     item_id: str
     item_content_hash: str
     occurred_at: datetime
-    started_at: datetime
-    completed_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
     initial_response: str
-    initial_latency_ms: int
+    initial_latency_ms: int | None
     result: str
     confidence: int
     open_notes: bool
     agent_help: str
     support_actions: tuple[SupportAction, ...]
+    administered: bool = False
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,76 @@ class PracticeService:
         )
         return PracticeResult(attempt=attempt, proposal=proposal)
 
+    def run_administered(
+        self,
+        *,
+        item_id: str,
+        response: str,
+        result: str,
+        confidence: int,
+        agent_help: str = "substantial",
+        now: datetime | None = None,
+    ) -> PracticeResult:
+        """Record an agent-administered attempt with honest attribution.
+
+        The learner answered outside Virtuoso's own prompt loop (chat,
+        voice, another tool); an agent transcribes the answer and grade.
+        Latency was not measured by this process, so it is stored as
+        NULL/unknown — never 0 ms and never fabricated — and the attempt
+        row carries an explicit `administered` marker. `agent_help`
+        defaults to `substantial` unless the caller states otherwise.
+        """
+        if result not in _RESULTS:
+            raise PracticeError(
+                "result must be one of demonstrated, partial, or not-demonstrated"
+            )
+        if (
+            not isinstance(confidence, int)
+            or isinstance(confidence, bool)
+            or not 1 <= confidence <= 5
+        ):
+            raise PracticeError("confidence must be an integer from 1 to 5")
+        if agent_help not in _AGENT_HELP:
+            raise PracticeError(
+                "agent_help must be one of none, light, substantial, or unknown"
+            )
+        occurred_at = now
+        if occurred_at is None:
+            occurred_at = datetime.now(timezone.utc)
+        elif occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            raise PracticeError("practice timestamps must be timezone-aware")
+        else:
+            occurred_at = occurred_at.astimezone(timezone.utc)
+        if result == "demonstrated" and not response.strip():
+            raise PracticeError(
+                "blank recall cannot be recorded as demonstrated; record partial or not-demonstrated"
+            )
+
+        try:
+            item = self.workspace.load_item(item_id)
+        except WorkspaceError as exc:
+            raise PracticeError(str(exc)) from exc
+
+        attempt = AttemptRecord(
+            event_id=f"attempt-{uuid.uuid4().hex}",
+            item_id=item.item_id,
+            item_content_hash=item.content_hash,
+            occurred_at=occurred_at,
+            started_at=None,
+            completed_at=None,
+            initial_response=response,
+            initial_latency_ms=None,
+            result=result,
+            confidence=confidence,
+            open_notes=False,
+            agent_help=agent_help,
+            support_actions=(),
+            administered=True,
+        )
+        proposal = self._schedule(item=item, attempt=attempt)
+        self._persist(attempt=attempt, proposal=proposal)
+        return PracticeResult(attempt=attempt, proposal=proposal)
+
     def _schedule(
         self, *, item: LearningItem, attempt: AttemptRecord
     ) -> SchedulerProposal:
@@ -303,10 +374,20 @@ class PracticeService:
 
         created_at = attempt.occurred_at
         proposed_state = next_card.to_json()
+        if attempt.administered:
+            latency_clause = (
+                "latency unmeasured (agent-administered) and support are retained "
+                "as evidence "
+            )
+        else:
+            latency_clause = (
+                f"latency {attempt.initial_latency_ms} ms and support are retained "
+                "as evidence "
+            )
         rationale = (
             f"FSRS rating {rating.name} from result {attempt.result}; "
-            f"latency {attempt.initial_latency_ms} ms and support are retained as evidence "
-            "but do not assert competence."
+            + latency_clause
+            + "but do not assert competence."
         )
         return SchedulerProposal(
             proposal_id=f"proposal-{uuid.uuid4().hex}",
@@ -334,8 +415,16 @@ class PracticeService:
                     "item_id": attempt.item_id,
                     "item_content_hash": attempt.item_content_hash,
                     "occurred_at": attempt.occurred_at.isoformat(),
-                    "started_at": attempt.started_at.isoformat(),
-                    "completed_at": attempt.completed_at.isoformat(),
+                    "started_at": (
+                        attempt.started_at.isoformat()
+                        if attempt.started_at is not None
+                        else None
+                    ),
+                    "completed_at": (
+                        attempt.completed_at.isoformat()
+                        if attempt.completed_at is not None
+                        else None
+                    ),
                     "initial_response": attempt.initial_response,
                     "initial_latency_ms": attempt.initial_latency_ms,
                     "result": attempt.result,
@@ -345,6 +434,7 @@ class PracticeService:
                     "support_actions": [
                         asdict(action) for action in attempt.support_actions
                     ],
+                    "administered": attempt.administered,
                 },
                 proposal={
                     "proposal_id": proposal.proposal_id,

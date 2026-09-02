@@ -354,6 +354,7 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "open_notes": False,
                 "agent_help": "none",
                 "support_actions": [],
+                "administered": False,
             },
             proposal={
                 "proposal_id": "proposal-" + "b" * 32,

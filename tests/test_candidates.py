@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from conftest import downgrade_attempt_chain_to_v9
 from virtuoso.workspace import WorkspaceService
 
 
@@ -511,6 +512,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v6 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -549,7 +552,7 @@ class StructuralCandidateTests(unittest.TestCase):
                 ).fetchall()
             }
             sources_after = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertTrue(
             {"candidate_runs", "review_candidates", "candidate_source_refs"}.issubset(tables)
         )
@@ -565,6 +568,8 @@ class StructuralCandidateTests(unittest.TestCase):
                 "candidate_decisions",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # v6 predates migration 10's attempt-chain rebuild.
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(

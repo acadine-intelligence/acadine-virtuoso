@@ -11,6 +11,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from conftest import (
+    V9_ATTEMPTS,
+    V9_ATTEMPT_TIMINGS,
+    V9_SCHEDULER_PROPOSALS,
+    V9_SCHEDULER_STATE,
+    downgrade_attempt_chain_to_v9,
+)
 from virtuoso.workspace import WorkspaceError, WorkspaceService
 
 
@@ -90,6 +97,10 @@ class WorkspaceServiceTests(unittest.TestCase):
                 "module_run_receipts",
             ):
                 db.execute(f'DROP TABLE "{table}"')
+            # A genuine v3 database predates migration 10's rebuild of the
+            # attempt evidence chain, so restore the original v1 table text
+            # (no administered column, latency NOT NULL, unquoted names).
+            downgrade_attempt_chain_to_v9(db)
             db.execute("PRAGMA legacy_alter_table = ON")
             db.execute("ALTER TABLE items RENAME TO items_with_retired")
             db.execute(
@@ -128,7 +139,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (9,))
+            self.assertEqual(migration, (10,))
 
     def test_init_refuses_to_overwrite_existing_workspace(self) -> None:
         WorkspaceService.init(self.root)
@@ -157,7 +168,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 10)),
+                list(range(1, 11)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -293,6 +304,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             "open_notes": False,
             "agent_help": "none",
             "support_actions": [],
+            "administered": False,
         }
         proposal = {
             "proposal_id": f"proposal-{event_id}",
@@ -490,7 +502,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -655,6 +667,222 @@ class WorkspaceServiceTests(unittest.TestCase):
             db.execute("CREATE VIEW attempts AS SELECT 1 AS wrong_column")
         with self.assertRaisesRegex(WorkspaceError, "incompatible database schema"):
             WorkspaceService.open(self.root)
+
+    _V9_ATTEMPTS = V9_ATTEMPTS
+    _V9_SCHEDULER_STATE = V9_SCHEDULER_STATE
+    _V9_SCHEDULER_PROPOSALS = V9_SCHEDULER_PROPOSALS
+    _V9_ATTEMPT_TIMINGS = V9_ATTEMPT_TIMINGS
+
+    def _downgrade_to_v9_with_measured_evidence(self) -> WorkspaceService:
+        """Rebuild the attempt evidence chain in its v9 shape with one
+        measured interactive attempt, so opening exercises migration 10."""
+        service = WorkspaceService.init(self.root)
+        item = service.add_item(
+            item_id="latency-item",
+            title="Measured latency item",
+            focus="migration",
+            prompt="What does migration 10 preserve?",
+            answer="Every measured attempt exactly as it was recorded.",
+        )
+        with sqlite3.connect(service.db_path) as db:
+            for trigger in [
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                    " AND name LIKE 'attempt%'"
+                ).fetchall()
+            ]:
+                db.execute(f'DROP TRIGGER "{trigger}"')
+            db.execute("DROP TABLE attempt_timings")
+            db.execute("DROP TABLE scheduler_proposals")
+            db.execute("DROP TABLE scheduler_state")
+            db.execute("DROP TABLE attempts")
+            db.execute(self._V9_ATTEMPTS)
+            db.execute(self._V9_SCHEDULER_STATE)
+            db.execute(self._V9_SCHEDULER_PROPOSALS)
+            db.execute(self._V9_ATTEMPT_TIMINGS)
+            db.execute(
+                """INSERT INTO attempts(
+                       event_id, item_id, item_content_hash, occurred_at,
+                       initial_response, initial_latency_ms, result, confidence,
+                       open_notes, agent_help, support_json, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "attempt-measured",
+                    item.item_id,
+                    item.content_hash,
+                    "2026-08-19T12:00:05+00:00",
+                    "measured answer",
+                    1250,
+                    "demonstrated",
+                    4,
+                    0,
+                    "none",
+                    "[]",
+                    "2026-08-19T12:00:05+00:00",
+                ),
+            )
+            db.execute(
+                "INSERT INTO attempt_timings(event_id, started_at, completed_at)"
+                " VALUES ('attempt-measured', '2026-08-19T12:00:00+00:00',"
+                " '2026-08-19T12:00:05+00:00')"
+            )
+            db.execute(
+                """INSERT INTO scheduler_proposals(
+                       proposal_id, source_event_id, item_id, algorithm,
+                       algorithm_version, learning_context, configuration_json,
+                       previous_state_json, proposed_state_json, due_at,
+                       rationale, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "proposal-measured",
+                    "attempt-measured",
+                    item.item_id,
+                    "fsrs",
+                    "6.3.2",
+                    "atomic-recall",
+                    "{}",
+                    None,
+                    "{}",
+                    "2026-08-20T12:00:05+00:00",
+                    "test proposal",
+                    "2026-08-19T12:00:05+00:00",
+                ),
+            )
+            db.execute(
+                """INSERT INTO scheduler_state(
+                       item_id, algorithm, algorithm_version, learning_context,
+                       configuration_json, state_json, source_event_id, updated_at
+                   ) VALUES (?, 'fsrs', '6.3.2', 'atomic-recall', '{}', '{}',
+                       'attempt-measured', '2026-08-19T12:00:05+00:00')""",
+                (item.item_id,),
+            )
+            db.execute("DELETE FROM schema_migrations WHERE version >= 10")
+        return service
+
+    def test_fresh_workspace_enforces_administered_latency_honesty(self) -> None:
+        service = WorkspaceService.init(self.root)
+        service.add_item(
+            item_id="honesty-item",
+            title="Honesty item",
+            focus="evidence",
+            prompt="What may latency never be?",
+            answer="Fabricated.",
+        )
+        with sqlite3.connect(service.db_path) as db:
+            item_hash = db.execute(
+                "SELECT content_hash FROM items WHERE item_id = 'honesty-item'"
+            ).fetchone()[0]
+            columns = {
+                row[1]
+                for row in db.execute("PRAGMA table_info(attempts)").fetchall()
+            }
+            self.assertIn("administered", columns)
+
+            def insert_attempt(event_id, latency, administered):
+                db.execute(
+                    """INSERT INTO attempts(
+                           event_id, item_id, item_content_hash, occurred_at,
+                           initial_response, initial_latency_ms, result,
+                           confidence, open_notes, agent_help, support_json,
+                           administered
+                       ) VALUES (?, 'honesty-item', ?, '2026-08-19T12:00:00+00:00',
+                           'text', ?, 'partial', 3, 0, 'substantial', '[]', ?)""",
+                    (event_id, item_hash, latency, administered),
+                )
+
+            insert_attempt("attempt-interactive", 1250, 0)
+            insert_attempt("attempt-administered", None, 1)
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert_attempt("attempt-null-interactive", None, 0)
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert_attempt("attempt-zero-forged", 0, 1)
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "INSERT INTO attempt_timings(event_id, started_at, completed_at)"
+                    " VALUES ('attempt-administered',"
+                    " '2026-08-19T12:00:00+00:00', '2026-08-19T12:00:01+00:00')"
+                )
+            rows = db.execute(
+                "SELECT event_id, initial_latency_ms, administered FROM attempts"
+                " ORDER BY event_id"
+            ).fetchall()
+        self.assertEqual(
+            rows,
+            [
+                ("attempt-administered", None, 1),
+                ("attempt-interactive", 1250, 0),
+            ],
+        )
+
+    def test_v9_to_v10_migration_preserves_measured_evidence_exactly(self) -> None:
+        self._downgrade_to_v9_with_measured_evidence()
+
+        migrated = WorkspaceService.open(self.root)
+
+        with sqlite3.connect(migrated.db_path) as db:
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+            attempt = db.execute(
+                "SELECT event_id, initial_latency_ms, administered, result,"
+                " confidence, agent_help, created_at FROM attempts"
+            ).fetchall()
+            timing = db.execute(
+                "SELECT event_id, started_at, completed_at FROM attempt_timings"
+            ).fetchall()
+            proposal = db.execute(
+                "SELECT proposal_id, source_event_id FROM scheduler_proposals"
+            ).fetchall()
+            state = db.execute(
+                "SELECT source_event_id, state_json FROM scheduler_state"
+            ).fetchall()
+        self.assertEqual(versions, list(range(1, 11)))
+        self.assertEqual(
+            attempt,
+            [
+                (
+                    "attempt-measured",
+                    1250,
+                    0,
+                    "demonstrated",
+                    4,
+                    "none",
+                    "2026-08-19T12:00:05+00:00",
+                )
+            ],
+        )
+        self.assertEqual(
+            timing,
+            [
+                (
+                    "attempt-measured",
+                    "2026-08-19T12:00:00+00:00",
+                    "2026-08-19T12:00:05+00:00",
+                )
+            ],
+        )
+        self.assertEqual(proposal, [("proposal-measured", "attempt-measured")])
+        self.assertEqual(state, [("attempt-measured", "{}")])
+        self.assertEqual(migrated.doctor()["attempts"], 1)
+
+    def test_v9_to_v10_migration_does_not_invent_administered_evidence(self) -> None:
+        self._downgrade_to_v9_with_measured_evidence()
+
+        migrated = WorkspaceService.open(self.root)
+
+        with sqlite3.connect(migrated.db_path) as db:
+            administered = db.execute(
+                "SELECT COUNT(*) FROM attempts WHERE administered = 1"
+            ).fetchone()[0]
+        self.assertEqual(administered, 0)
+        listed = migrated.list_attempts()
+        self.assertEqual(len(listed), 1)
+        self.assertFalse(listed[0]["administered"])
+        self.assertEqual(listed[0]["initial_latency_ms"], 1250)
 
     def test_failed_migration_rolls_back_new_schema_objects(self) -> None:
         (self.root / "items").mkdir(parents=True)

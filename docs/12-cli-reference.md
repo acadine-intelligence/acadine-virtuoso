@@ -104,6 +104,27 @@ Interactive protocol (stdout prompts, stdin answers, in order):
 
 On completion the attempt (with full assistance attribution) and an FSRS 6.3.2 scheduling proposal are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt.
 
+### `practice --administer`
+
+Record one agent-administered attempt non-interactively. Use this when the learner answered outside the terminal (chat, voice, another tool) and an agent transcribes the answer and grade. Never pipe scripted stdin into interactive `practice` for this purpose: that records a fabricated near-zero latency and pollutes the evidence.
+
+```
+virtuoso --workspace PATH practice --item ID --administer \
+  --response TEXT --result demonstrated|partial|not-demonstrated \
+  --confidence 1-5 [--agent-help none|light|substantial|unknown] [--json]
+```
+
+Contract:
+
+- `--response`, `--result` and `--confidence` are required with `--administer`, and rejected without it.
+- `initial_latency_ms` is stored as NULL/unknown. The tool did not measure the answer, so no latency exists; 0 ms is never written and no timing row is created.
+- The attempt row carries `administered = 1`, so administered and direct interactive attempts stay distinguishable in every query.
+- `--agent-help` defaults to `substantial` in this mode (the agent mediated the whole exchange). Pass a different level only when it honestly applies.
+- A blank `--response` cannot be graded `demonstrated`; the command fails closed.
+- The same FSRS proposal flow runs as for interactive attempts; the proposal rationale states that latency was unmeasured.
+
+JSON output: `{"event_id", "item_id", "result", "confidence", "agent_help", "administered": true, "initial_latency_ms": null, "occurred_at", "proposal_due_at", "proposal_algorithm"}`.
+
 ### `attempts`
 
 Show recorded evidence and scheduler proposals.
@@ -112,7 +133,7 @@ Show recorded evidence and scheduler proposals.
 virtuoso --workspace PATH attempts [--json]
 ```
 
-JSON output: `{"attempts": [...], "proposals": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`.
+JSON output: `{"attempts": [...], "proposals": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`.
 
 ## Sources (read-only Markdown/Obsidian)
 

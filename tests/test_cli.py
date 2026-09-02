@@ -144,6 +144,141 @@ class CliJourneyTests(unittest.TestCase):
         self.assertIn("run 'virtuoso init' first", failed.stderr)
         self.assertNotIn("Traceback", failed.stderr)
 
+    def _add_testing_effect_item(self) -> None:
+        self._run(
+            "add",
+            "--id",
+            "testing-effect",
+            "--title",
+            "Explain the testing effect",
+            "--focus",
+            "learning-science",
+            "--prompt",
+            "Why does active recall improve memory?",
+            "--answer",
+            "Retrieval changes memory and strengthens later access.",
+            "--json",
+        )
+
+    def test_administered_practice_records_honest_attribution(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+
+        administered = json.loads(
+            self._run(
+                "practice",
+                "--item",
+                "testing-effect",
+                "--administer",
+                "--response",
+                "Retrieval strengthens later access paths.",
+                "--result",
+                "demonstrated",
+                "--confidence",
+                "4",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(administered["item_id"], "testing-effect")
+        self.assertEqual(administered["result"], "demonstrated")
+        self.assertEqual(administered["confidence"], 4)
+        self.assertEqual(administered["agent_help"], "substantial")
+        self.assertTrue(administered["administered"])
+        self.assertIsNone(administered["initial_latency_ms"])
+
+        attempts = json.loads(self._run("attempts", "--json").stdout)
+        self.assertEqual(len(attempts["attempts"]), 1)
+        attempt = attempts["attempts"][0]
+        self.assertEqual(attempt["administered"], 1)
+        self.assertIsNone(attempt["initial_latency_ms"])
+        self.assertIsNone(attempt["started_at"])
+        self.assertIsNone(attempt["completed_at"])
+        self.assertEqual(attempt["agent_help"], "substantial")
+
+        doctor = json.loads(self._run("doctor", "--json").stdout)
+        self.assertEqual(doctor["status"], "healthy")
+        self.assertEqual(doctor["attempts"], 1)
+
+    def test_administered_practice_accepts_agent_help_override(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+
+        administered = json.loads(
+            self._run(
+                "practice",
+                "--item",
+                "testing-effect",
+                "--administer",
+                "--response",
+                "Answered with a nudge only.",
+                "--result",
+                "partial",
+                "--confidence",
+                "2",
+                "--agent-help",
+                "light",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(administered["agent_help"], "light")
+        self.assertTrue(administered["administered"])
+
+    def test_administered_practice_requires_transcription_flags(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+
+        failed = self._run(
+            "practice",
+            "--item",
+            "testing-effect",
+            "--administer",
+            expected=2,
+        )
+        self.assertIn("--response", failed.stderr)
+        self.assertIn("--result", failed.stderr)
+        self.assertIn("--confidence", failed.stderr)
+        self.assertNotIn("Traceback", failed.stderr)
+
+    def test_interactive_practice_rejects_administered_only_flags(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+
+        failed = self._run(
+            "practice",
+            "--item",
+            "testing-effect",
+            "--response",
+            "smuggled transcription",
+            expected=2,
+        )
+        self.assertIn("--administer", failed.stderr)
+        self.assertNotIn("Traceback", failed.stderr)
+
+    def test_interactive_practice_output_is_unchanged(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+
+        practised = self._run(
+            "practice",
+            "--item",
+            "testing-effect",
+            input_text=(
+                "n\n"
+                "Retrieval strengthens access paths.\n"
+                "reveal\n"
+                "demonstrated\n"
+                "4\n"
+            ),
+        )
+        self.assertIn("Challenge: Explain the testing effect", practised.stdout)
+        self.assertIn("Initial recall time:", practised.stdout)
+        self.assertIn("via fsrs 6.3.2", practised.stdout)
+        attempts = json.loads(self._run("attempts", "--json").stdout)
+        attempt = attempts["attempts"][0]
+        self.assertEqual(attempt["administered"], 0)
+        self.assertEqual(attempt["agent_help"], "none")
+        self.assertIsNotNone(attempt["initial_latency_ms"])
+
     def test_source_cli_connects_scans_and_lists_note_metadata(self) -> None:
         vault = Path(self.tmp.name).resolve() / "vault"
         vault.mkdir()
