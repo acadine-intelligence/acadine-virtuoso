@@ -1,25 +1,31 @@
-# Acadine Virtuoso
+# Virtuoso
 
-Virtuoso is a local-first CLI-based agentic personal self-learning system, designed to be used with coding agents or agent frameworks like Hermes. It's designed to be used in combination with learning techniques such as: spaced repetition, active recall, exercise and project-based learning, and the testing effect.
+A local-first command-line tool for deliberate practice. Virtuoso shows you a prompt before any answer, times your recall, records what help you used, and asks the FSRS spaced-repetition algorithm for a transparent next-review proposal you can inspect and override.
 
-If you've ever you used flashcards, you know how powerful spaced repetition can be. But managing the system and schedule of practise can now be done by your preferred agent.
+Your material stays yours: items are plain Markdown you can read and edit; SQLite holds derived evidence and scheduler state on your own disk. No account, no cloud, no telemetry.
 
-Virtuoso presents a prompt before feedback, times active recall, records what help was used, and asks FSRS 6.3.2 (by default) for an attributable next-review proposal. Markdown remains human-owned; SQLite holds derived evidence and scheduler state.
+## Why
 
-The current slices cover simple-mode active recall, a read-only Markdown/Obsidian source index, attributed project-transfer events, and manually authored delayed capability checks with pre-attempt predictions and append-only completion evidence. Hermes and Obsidian remain optional, and the core CLI works without either. A connected source stores only its path-scoped note metadata, hashes, and wikilinks in SQLite; source prose stays in its owning vault. Direction-led pathways, generated exercises, two-way synchronization, XP, automated scoring, and meta-scheduling remain later modules.
+Most learning tools measure activity. Virtuoso measures attempts: what you recalled, how long it took, what help you used, and whether you could apply it later in a real project. It refuses to infer competence from completion counts, streaks, or AI-generated answers. Virtuoso records the context needed to interpret each attempt as evidence.
 
 ## Install
 
+Requires Python 3.11+.
+
 ```bash
+git clone https://github.com/acadine-intelligence/acadine-virtuoso.git
+cd acadine-virtuoso
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
 
-## First practice journey
+## Five-minute tour
 
 ```bash
-WORKSPACE=/tmp/virtuoso-learner
+WORKSPACE=~/my-practice
 .venv/bin/virtuoso --workspace "$WORKSPACE" init
+
+# Add your first item: a question you want to be able to answer cold.
 .venv/bin/virtuoso --workspace "$WORKSPACE" add \
   --id testing-effect \
   --title "Explain the testing effect" \
@@ -28,104 +34,73 @@ WORKSPACE=/tmp/virtuoso-learner
   --answer "Retrieval changes memory and strengthens later access." \
   --hint "Compare retrieval with rereading." \
   --follow-up "Give one coding example."
+
+# What should I practice next?
 .venv/bin/virtuoso --workspace "$WORKSPACE" next --json
+
+# Practice: prompt first, recall timed, then reveal and grade honestly.
 .venv/bin/virtuoso --workspace "$WORKSPACE" practice --item testing-effect
+
+# Inspect the evidence and the scheduler's reasoning.
 .venv/bin/virtuoso --workspace "$WORKSPACE" attempts --json
 .venv/bin/virtuoso --workspace "$WORKSPACE" doctor --json
 ```
 
-Virtuoso does not infer competence from XP, completion, a test, or an agent-produced answer. Attempts retain actual start and completion times, result, initial latency, confidence, open-notes state, response, help attribution, worked-answer reveal, and timed follow-up support.
+## What it records, honestly
 
-## Read-only Markdown and Obsidian sources
+Every attempt stores the actual start and completion times, your initial response verbatim, recall latency, the result you graded, your confidence, whether notes were open, and how much help was used (none, light, substantial). Blank recalls cannot be graded as demonstrated. Agent-relayed sessions are marked `administered` with unknown latency rather than a fabricated zero.
 
-```bash
-VAULT=/path/to/your/vault
-.venv/bin/virtuoso --workspace "$WORKSPACE" source add \
-  --id personal-vault --kind obsidian --path "$VAULT" --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" source scan \
-  --id personal-vault --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" source notes \
-  --id personal-vault --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" source link \
-  --id personal-vault --path "Learning/Testing Effect.md" \
-  --item testing-effect --json
-```
+Scheduling is explainable: each attempt produces a scheduler proposal carrying the algorithm, version, configuration, previous state, proposed state, and a plain-language rationale. FSRS 6.3.2 is the built-in scheduler; the module protocol lets you swap it for your own.
 
-Scanning never writes to the source. It indexes relative paths, titles, content hashes, byte sizes, modification times, and Obsidian wikilinks. It does not copy note bodies into Virtuoso state. Markdown symlinks fail closed, scans have file and byte limits, deleted note metadata is removed transactionally, and `doctor` reports linked notes that changed or disappeared.
+## Beyond single items
 
-## Project-transfer evidence
+### Read-only sources
 
-```bash
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer record \
-  --item testing-effect \
-  --project virtuoso-cli \
-  --use-case "Applied retrieval practice to a real CLI journey." \
-  --outcome successful \
-  --independence guided \
-  --artifact git:abc123 \
-  --reflection "One design hint was used." \
-  --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer list --json
-```
+Connect any Markdown folder or Obsidian vault as a source. Virtuoso indexes paths, titles, hashes and wikilinks; it never writes to your notes and never copies their prose into its database.
 
-Transfer events are append-only and bound to the exact learning-item hash. Outcome, independence, artifact reference, and reflection remain separate. Each event proposes a seven-day delayed check and explicitly records that it does not claim mastery. Transfer events, checks, predictions, and completions all reject direct update or deletion.
+### Project transfer evidence
 
-Create a check only after authoring the changed or novel context, challenge, acceptance criteria, and scorer. Its UTC creation time cannot precede the source transfer event. Late creation after the inherited due time is allowed, but cannot be backdated. The due command is a chronological capability-evidence queue, not a scheduler or project-priority recommendation:
+When you apply something you learned to real work, record the outcome, independence, artifact reference and your reflection. A delayed capability check follows days later, with a pre-attempt prediction and append-only completion evidence. These records never create a mastery claim.
 
-```bash
-EVENT=transfer-00000000000000000000000000000000 # use an id from transfer list
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check create \
-  --event "$EVENT" \
-  --context-kind changed \
-  --context "The same distinction in a changed research policy." \
-  --prompt "Classify two artifacts and propose one falsifiable refresh rule." \
-  --acceptance-criteria "Classify both artifacts and state one testable cadence rule." \
-  --scorer-kind human \
-  --scorer-reference reviewer-jonathan \
-  --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check due --json
-```
+### Retrieval
 
-At or after both the inherited due time and check creation time, **before attempting the challenge or requesting help**, record the prediction. Completion cannot precede either check creation or that prediction. Then complete the changed task and append the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional opaque artifact reference:
+Lexical full-text search works across all items. Word stemming lets "goroutine" find "goroutines". An embedding table supports cosine kNN. Virtuoso never calls an embedding API itself. You compute vectors with your chosen tool and store them locally. The retrieved items can feed a tutor agent, a session composer or your own prompt.
 
-```bash
-CHECK=transfer-check-00000000000000000000000000000000 # use an id from check create/due
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check begin \
-  --check "$CHECK" \
-  --prediction "I expect the distinction to transfer, but cadence selection may be weak." \
-  --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" transfer check complete \
-  --check "$CHECK" \
-  --attempt "My independent classification and cadence rule." \
-  --assistance none \
-  --acceptance-evidence "The configured criteria were met." \
-  --teach-back "Retrievability stayed separate from project urgency." \
-  --outcome successful \
-  --artifact git:abc123 \
-  --json
-```
+### Analytics
 
-These three check records are raw capability evidence only. They never update recall attempts, FSRS/scheduler state, project selection or priority, or a capability/mastery label. References remain inert strings and are not opened, fetched, executed, or resolved.
+Read-only queries report per-focus performance, item history, due workload by focus and stale source links. Every query opens the database in read-only mode.
 
-The research basis and limits behind active recall, spacing, latency, transfer, and future meta-scheduling are in `docs/10-learning-research.md`.
+## The Obsidian plugin (optional)
 
-The CLI contract and integration guidance live in `docs/12-cli-reference.md` (every command, flag, JSON shape and exit code), `docs/13-agent-usage.md` (how agents drive the CLI, including a natural-language to command mapping), and `docs/14-api-consideration.md` (why the CLI is the API for now).
+A community plugin gives you a human review queue for proposed items and a full-viewport review session with a keyboard ladder (reveal, retry, hint, grade) inside Obsidian. The plugin never computes intervals itself; every grade goes through the CLI, so there is exactly one scheduler and one evidence ledger. Obsidian is entirely optional; the CLI works without it.
 
 ## Extension boundary
 
-External v0 modules use `virtuoso/module@0.1` manifests and bounded JSON over stdin/stdout. They are trusted local executables, not sandboxed plugins: a module runs with the invoking user's OS permissions and therefore must be reviewed before use. Virtuoso requires explicit per-call consent, rejects shell and command-wrapper indirection by declared name, resolved executable identity, and script-interpreter ancestry, invokes argv with `shell=False`, sends only declared projections whose supplied fields pass the protocol's nested type checks, and requires each result kind's declared fields. Output is captured in bounded temporary files, and the manifest hash is captured when loaded. V0 grants no descendant-process capability: on supported POSIX systems the child starts with a zero process limit and the runner always terminates its process group; module execution fails closed when that OS limit is unavailable. Core code alone decides whether to accept a returned proposal.
+External modules use a JSON-over-stdin/stdout protocol with explicit per-call consent, no shell indirection, bounded output, and fail-closed process limits. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. They are trusted local executables and should be reviewed before use.
 
-Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins are deliberately out of scope.
+## What Virtuoso does not do
+
+- Virtuoso has no XP, streaks, leaderboards or moral scoring.
+- Virtuoso uses no cloud service, account or telemetry.
+- Virtuoso does not generate content automatically. You author the items. A review-candidate pipeline can propose structural practice from indexed notes, and a human decides whether to accept it.
+- A single event never creates a mastery claim.
+- The CLI runs without Obsidian, an agent or a model.
+
+## Documentation
+
+- `docs/12-cli-reference.md`: every command, flag, JSON shape and exit code
+- `docs/13-agent-usage.md`: how agents drive the CLI
+- `docs/10-learning-research.md`: the research basis and its limits
+- `docs/03-domain-model.md`: who owns which state and why
+
+## Status
+
+Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the implemented behavior.
 
 ## Verify
 
 ```bash
 .venv/bin/python -m compileall -q src tests
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests
 .venv/bin/virtuoso --help
-python3 "$HOME/projects/acadine-build-os/scripts/buildos.py" verify .
 ```
-
-`product.json` and `docs/07-delivery-contract.md` define the current completion boundary.
-
-Good luck, and may you never stop learning and improving!
