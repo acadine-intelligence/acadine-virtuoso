@@ -1,6 +1,10 @@
 # Acadine Virtuoso
 
-Virtuoso is a local-first CLI mental gym. It presents a prompt before feedback, times active recall, records what help was used, and asks FSRS 6.3.2 for an attributable next-review proposal. Markdown remains human-owned; SQLite holds derived evidence and scheduler state.
+Virtuoso is a local-first CLI-based agentic personal self-learning system, designed to be used with coding agents or agent frameworks like Hermes. It's designed to be used in combination with learning techniques such as: spaced repetition, active recall, exercise and project-based learning, and the [testing effect]([url](https://en.wikipedia.org/wiki/Testing_effect)).
+
+If you've ever you used flashcards, you know how powerful spaced repetition can be. But managing the system and schedule of practise can now be done by your preferred agent.
+
+Virtuoso presents a prompt before feedback, times active recall, records what help was used, and asks FSRS 6.3.2 (by default) for an attributable next-review proposal. Markdown remains human-owned; SQLite holds derived evidence and scheduler state.
 
 The current slices cover simple-mode active recall, a read-only Markdown/Obsidian source index, attributed project-transfer events, and manually authored delayed capability checks with pre-attempt predictions and append-only completion evidence. Hermes and Obsidian remain optional, and the core CLI works without either. A connected source stores only its path-scoped note metadata, hashes, and wikilinks in SQLite; source prose stays in its owning vault. Direction-led pathways, generated exercises, two-way synchronization, XP, automated scoring, and meta-scheduling remain later modules.
 
@@ -122,4 +126,6 @@ Initial categories are scheduler, practice-format, source-adapter, scoring-signa
 python3 "$HOME/projects/acadine-build-os/scripts/buildos.py" verify .
 ```
 
-`product.json` and `docs/07-delivery-contract.md` define the current completion boundary. The initial GitHub repository is private; no public release is part of this slice.
+`product.json` and `docs/07-delivery-contract.md` define the current completion boundary.
+
+Good luck, and may you never stop learning and improving!
