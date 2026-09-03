@@ -106,8 +106,8 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 - `docs/03-domain-model.md`: who owns which state and why
 - `docs/15-release-notes.md`: public change history
 - `docs/16-verification-history.md`: reproducible checks and historical results
-- `CONTRIBUTING.md`: public setup, checks, and pull request workflow
-- `LICENSE`: MIT licence terms
+- [CONTRIBUTING.md](CONTRIBUTING.md): public setup, checks, and pull request workflow
+- [LICENSE](LICENSE): MIT licence terms
 
 ## Status
 

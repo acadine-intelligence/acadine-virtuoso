@@ -94,7 +94,7 @@ class PublicRepositoryContractTests(unittest.TestCase):
         agent_contract = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         for target in ("CONTRIBUTING.md", "LICENSE"):
             with self.subTest(target=target):
-                self.assertIn(target, readme)
+                self.assertIn(f"[{target}]({target})", readme)
         self.assertIn("CONTRIBUTING.md", agent_contract)
         self.assertIn(".github/workflows/ci.yml", agent_contract)
 
