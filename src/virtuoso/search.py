@@ -20,6 +20,7 @@ lexical rows rebuild automatically on first search.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -33,6 +34,8 @@ from .workspace import WorkspaceService
 
 _FTS_TABLE = "item_fts"
 _EMBED_TABLE = "item_embeddings"
+_METADATA_TABLE = "search_metadata"
+_LEXICAL_FINGERPRINT_KEY = "lexical_fingerprint"
 
 
 class SearchError(VirtuosoError):
@@ -89,36 +92,85 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         )
         """
     )
+    db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_METADATA_TABLE} (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
 
 
-def _reindex_lexical(service: WorkspaceService, db: sqlite3.Connection) -> None:
-    """Rebuild the lexical index from current non-retired items."""
-    db.execute(f"DELETE FROM {_FTS_TABLE}")
+def _active_items(service: WorkspaceService) -> tuple[tuple[str, str], ...]:
     with service._connect() as source:
         rows = source.execute(
-            "SELECT item_id FROM items WHERE retired_at IS NULL ORDER BY item_id"
+            "SELECT item_id, content_hash FROM items "
+            "WHERE retired_at IS NULL ORDER BY item_id"
         ).fetchall()
-        for row in rows:
-            item = service.load_item(row["item_id"])
-            db.execute(
-                f"INSERT INTO {_FTS_TABLE}(item_id, title, prompt, answer, hint) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (item.item_id, item.title, item.prompt, item.answer, item.hint or ""),
-            )
+    return tuple((row["item_id"], row["content_hash"]) for row in rows)
+
+
+def _lexical_fingerprint(active_items: tuple[tuple[str, str], ...]) -> str:
+    payload = json.dumps(active_items, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stored_fingerprint(db: sqlite3.Connection) -> str | None:
+    row = db.execute(
+        f"SELECT value FROM {_METADATA_TABLE} WHERE key = ?",
+        (_LEXICAL_FINGERPRINT_KEY,),
+    ).fetchone()
+    return row["value"] if row is not None else None
+
+
+def _reindex_lexical(
+    service: WorkspaceService,
+    db: sqlite3.Connection,
+    *,
+    active_items: tuple[tuple[str, str], ...],
+    fingerprint: str,
+) -> None:
+    """Rebuild the lexical index from current non-retired items."""
+    db.execute(f"DELETE FROM {_FTS_TABLE}")
+    for item_id, _content_hash in active_items:
+        item = service.load_item(item_id)
+        db.execute(
+            f"INSERT INTO {_FTS_TABLE}(item_id, title, prompt, answer, hint) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (item.item_id, item.title, item.prompt, item.answer, item.hint or ""),
+        )
+    db.execute(
+        f"""
+        INSERT INTO {_METADATA_TABLE}(key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (_LEXICAL_FINGERPRINT_KEY, fingerprint),
+    )
     db.commit()
 
 
 def _fresh_index(service: WorkspaceService) -> sqlite3.Connection:
     db = _connect_index(service)
-    _ensure_schema(db)
-    with service._connect() as source:
-        active = source.execute(
-            "SELECT COUNT(*) FROM items WHERE retired_at IS NULL"
-        ).fetchone()[0]
-    indexed = db.execute(f"SELECT COUNT(*) FROM {_FTS_TABLE}").fetchone()[0]
-    if indexed != active:
-        _reindex_lexical(service, db)
-    return db
+    try:
+        _ensure_schema(db)
+        active_items = _active_items(service)
+        fingerprint = _lexical_fingerprint(active_items)
+        indexed = db.execute(f"SELECT COUNT(*) FROM {_FTS_TABLE}").fetchone()[0]
+        if (
+            indexed != len(active_items)
+            or _stored_fingerprint(db) != fingerprint
+        ):
+            _reindex_lexical(
+                service,
+                db,
+                active_items=active_items,
+                fingerprint=fingerprint,
+            )
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def _plain_fts_query(query: str) -> str:
@@ -187,6 +239,21 @@ def embed_upsert(
     service.load_item(item_id)  # fails closed on unknown items
     db = _fresh_index(service)
     try:
+        db.execute("BEGIN IMMEDIATE")
+        dimensions = {
+            row["dim"]
+            for row in db.execute(
+                f"SELECT DISTINCT dim FROM {_EMBED_TABLE} WHERE model = ?",
+                (model,),
+            ).fetchall()
+        }
+        if dimensions and dimensions != {len(unit)}:
+            stored = ", ".join(str(dimension) for dimension in sorted(dimensions))
+            raise SearchError(
+                f"embedding dimension mismatch for model {model!r}: "
+                f"stored {stored}, new {len(unit)}; a model id must identify "
+                "one fixed dimensionality"
+            )
         db.execute(
             f"""
             INSERT INTO {_EMBED_TABLE}(item_id, model, dim, vector_json, updated_at)
@@ -220,6 +287,9 @@ def semantic_search(
     if not 1 <= limit <= 100:
         raise SearchError("limit must be between 1 and 100")
     query_unit = _unit(query_vector)
+    active_item_ids = {
+        item_id for item_id, _content_hash in _active_items(service)
+    }
     db = _fresh_index(service)
     try:
         rows = db.execute(
@@ -230,6 +300,8 @@ def semantic_search(
         db.close()
     hits: list[SemanticHit] = []
     for row in rows:
+        if row["item_id"] not in active_item_ids:
+            continue
         stored = json.loads(row["vector_json"])
         if len(stored) != len(query_unit):
             raise SearchError(
@@ -245,10 +317,9 @@ def semantic_search(
 
 def search_status(service: WorkspaceService) -> dict[str, Any]:
     """Index health: lexical freshness and embedding inventory."""
-    with service._connect() as source:
-        active = source.execute(
-            "SELECT COUNT(*) FROM items WHERE retired_at IS NULL"
-        ).fetchone()[0]
+    active_items = _active_items(service)
+    active = len(active_items)
+    active_fingerprint = _lexical_fingerprint(active_items)
     path = index_path(service)
     if not path.is_file():
         return {
@@ -258,6 +329,7 @@ def search_status(service: WorkspaceService) -> dict[str, Any]:
             "lexical_index_rows": 0,
             "active_items": active,
             "lexical_fresh": False,
+            "fingerprint": None,
             "embedding_models": [],
         }
     db = _fresh_index(service)
@@ -266,6 +338,7 @@ def search_status(service: WorkspaceService) -> dict[str, Any]:
         embed_rows = db.execute(
             f"SELECT model, COUNT(*) AS n FROM {_EMBED_TABLE} GROUP BY model"
         ).fetchall()
+        fingerprint = _stored_fingerprint(db)
     finally:
         db.close()
     return {
@@ -274,7 +347,8 @@ def search_status(service: WorkspaceService) -> dict[str, Any]:
         "exists": True,
         "lexical_index_rows": fts_rows,
         "active_items": active,
-        "lexical_fresh": fts_rows == active,
+        "lexical_fresh": fts_rows == active and fingerprint == active_fingerprint,
+        "fingerprint": fingerprint,
         "embedding_models": [
             {"model": row["model"], "vectors": row["n"]} for row in embed_rows
         ],
