@@ -21,7 +21,7 @@ This iteration is complete only when all of the following work from a clean loca
 15. `transfer check due` lists pending and started incomplete checks chronologically without writing state or becoming a scheduler/project-priority recommendation.
 16. `transfer check begin` appends one prediction at or after both the inherited due time and check creation time, before the learner attempts the changed challenge or requests help.
 17. `transfer check complete` appends one independent attempt no earlier than both check creation and its required prediction, with assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, optional inert artifact reference, timestamps, and `claims_mastery: false`; it cannot update scheduler, project selection, or capability state.
-18. The full unit/integration suite, compile check, Build OS verification, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
+18. The full unit/integration suite, compile check, public repository checks, representative CLI journeys, exact-commit independent review, and clean-worktree check pass.
 
 ## Automated verification
 
@@ -33,7 +33,7 @@ The implementation must declare and execute:
 - Deterministic synthetic CLI journey.
 - Module-boundary security tests.
 - Project-transfer attribution and stale-item tests.
-- Build OS `verify` against the exact commit.
+- GitHub Actions checks against the exact commit.
 
 The CLI has no visual surface, network service, browser console, or responsive layout in this slice. Accessibility is verified through keyboard-only prompts, no color dependency, stable plain text, and JSON output tests.
 
