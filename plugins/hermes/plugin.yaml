@@ -1,5 +1,5 @@
 name: virtuoso
-version: 0.1.0.dev0
+version: 0.1.0
 description: "Virtuoso active-recall tools for Hermes agents: what is due, recommended next item, evidence state. Wraps the installed `virtuoso` CLI against a configured workspace."
 author: Acadine
 kind: standalone

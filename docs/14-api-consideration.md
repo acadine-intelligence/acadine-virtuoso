@@ -1,12 +1,12 @@
 # API consideration
 
-Should Virtuoso expose an API beyond the CLI? A decision note, not a commitment. Status: thinking, 2026-08-20; no API is built and none is owed by the current delivery contract.
+This note considers an API beyond the CLI. It records a decision without making a commitment. Status: thinking, 2026-08-20; no API is built and none is owed by the current delivery contract.
 
 ## Surfaces that already exist
 
 1. **The CLI with `--json`**: stable JSON output, documented exit codes, plain-language stderr errors. This is the current integration contract (see `docs/12-cli-reference.md` and `docs/13-agent-usage.md`).
 2. **The Python services**: `WorkspaceService`, `PracticeService`, `CandidateService` are importable, typed, and tested. Any Python process can embed Virtuoso directly.
-3. **The module contract** (`virtuoso/module@0.1`), the extension surface. External local executables exchange bounded typed JSON under consent, permissions, timeouts and receipts. This is how third-party capability is meant to enter.
+3. **The module contract** (`virtuoso/module@0.1`), the extension surface. External local executables exchange bounded typed JSON after calling code passes `allow_trusted=True`. There is no public CLI command for module execution. The runner applies permission bounds, timeouts, and receipts. This is how third-party capability is meant to enter.
 
 ## Options
 

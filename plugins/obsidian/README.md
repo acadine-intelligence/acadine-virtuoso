@@ -78,4 +78,4 @@ npm test
 npm run build
 ```
 
-The plugin source is public in this repository. An Obsidian Community listing needs a dedicated public plugin repository with `manifest.json` at its root. The GitHub release must contain `main.js`, `manifest.json`, and `versions.json`.
+The plugin source is public in this repository. An Obsidian Community listing needs a dedicated public plugin repository with `manifest.json` at its root. The manually triggered release workflow prepares `virtuoso-obsidian-0.1.0.zip` and also attaches `main.js`, `manifest.json`, and `versions.json` as separate assets. It creates a draft GitHub Release after required CI. A maintainer decides whether to publish it.

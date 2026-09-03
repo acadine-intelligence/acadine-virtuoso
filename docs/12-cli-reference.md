@@ -9,7 +9,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 ```
 
 - `--workspace PATH` is required for every command except `--version`, and always comes before the command. It selects the learner workspace directory created by `init`.
-- `--version` prints the package version (`0.1.0.dev0`) and exits 0; no workspace needed.
+- `--version` prints the package version (`0.1.0`) and exits 0; no workspace is needed.
 - Most commands accept `--json`. On success, `--json` makes stdout a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
 
 ## Exit codes
@@ -47,7 +47,7 @@ Check workspace health: database integrity, item freshness, source-link stalenes
 virtuoso --workspace PATH doctor [--json]
 ```
 
-JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `stale_items`, `stale_source_links`, `workspace_schema`, `workload`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) answers "how much is left today": items whose latest proposal is due, items with any schedule, and items never attempted (the new pool `next` draws from). Read-only: never mutates evidence and never silently repairs missing schema objects.
+JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `stale_items`, `stale_source_links`, `legacy_files`, `workspace_schema`, `workload`. Each `legacy_files` entry has `path`, `reason`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) answers "how much is left today": items whose current scheduler proposal is due, items with a current schedule, and items never attempted (the new pool `next` draws from). Read-only: never mutates evidence and never silently repairs missing schema objects.
 
 ## Items
 
@@ -170,7 +170,7 @@ Request schema: `virtuoso/review-attempt@0.1`. It requires these exact fields:
 - `confidence`: integer 1 through 5.
 - `open_notes`: whether notes were open during recall.
 
-Output schema: `virtuoso/review-attempt-result@0.1`. The attempt carries `administered: false`, measured latency, result, and item hash. The proposal carries the FSRS algorithm, version, and due time. Core code writes the attempt, proposal, and scheduler state in one SQLite transaction.
+Output schema: `virtuoso/review-attempt-result@0.1`. The `attempt` object contains `event_id`, `item_id`, `item_content_hash`, `result`, `confidence`, `initial_latency_ms`, `administered`, and `occurred_at`. The `proposal` object contains `proposal_id`, `algorithm`, `algorithm_version`, and `due_at`. Core code writes the attempt, proposal, and scheduler state in one SQLite transaction.
 
 Record a skip by sending a JSON object on stdin:
 
@@ -179,7 +179,7 @@ printf '%s' "$SKIP_JSON" | \
   virtuoso --workspace PATH review skip --json
 ```
 
-Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. The CLI appends the skip event and leaves scheduler state unchanged.
+Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
 
 Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
 
@@ -200,6 +200,78 @@ virtuoso --workspace PATH attempts [--json]
 ```
 
 JSON output: `{"attempts": [...], "proposals": [...], "skips": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`. Skips carry the item hash, timestamp, and source surface. A skip never changes scheduler state.
+
+## Read-only analytics
+
+Every `queries` command opens SQLite in read-only mode and leaves workspace state unchanged. Use `--json` for the versioned response contract.
+
+### `queries focus`
+
+```
+virtuoso --workspace PATH queries focus [--json]
+```
+
+Output schema: `virtuoso/focus-performance@0.1`. The top-level `focuses` array contains `focus`, `items`, `attempts`, `demonstrated`, `partial`, `not_demonstrated`, `administered`, `mean_confidence`, and `mean_latency_ms`. A mean is `null` when no qualifying value exists.
+
+### `queries history`
+
+```
+virtuoso --workspace PATH queries history --item ITEM [--json]
+```
+
+Output schema: `virtuoso/item-history@0.1`. The response contains `item_id` and `attempts`. Each attempt contains `event_id`, `item_id`, `occurred_at`, `result`, `confidence`, `agent_help`, `administered`, and `latency_ms`. An administered attempt has `latency_ms: null`.
+
+### `queries workload`
+
+```
+virtuoso --workspace PATH queries workload [--json]
+```
+
+Output schema: `virtuoso/workload-by-focus@0.1`. The top-level `focuses` array contains `focus`, `items`, `scheduled`, and `due_now`. Workload uses the configured scheduler algorithm and learning context. It counts only the proposal selected by current scheduler state, so proposal history cannot inflate the result.
+
+### `queries stale-links`
+
+```
+virtuoso --workspace PATH queries stale-links [--json]
+```
+
+Output schema: `virtuoso/stale-links@0.1`. The top-level `links` array contains `item_id`, `source_id`, and `relative_path` for each linked source note whose current indexed hash no longer matches.
+
+## Retrieval
+
+The retrieval index is derived state in `.virtuoso/search.sqlite3`. Lexical commands refresh stale index content from active workspace items. Semantic commands use vectors supplied by the caller. Virtuoso does not call an embedding service.
+
+### `search lex`
+
+```
+virtuoso --workspace PATH search lex --query TEXT [--limit N] [--json]
+```
+
+Output schema: `virtuoso/lexical-search@0.1`. The response contains `query` and `hits`. Each hit contains `item_id`, `score`, and `snippet`. The default limit is 10. The query follows the plain-text behavior described under exit codes.
+
+### `search embed`
+
+```
+virtuoso --workspace PATH search embed --item ITEM --model MODEL --vector JSON [--json]
+```
+
+Output schema: `virtuoso/embed-upsert@0.1`. The response contains `item_id`, `model`, and `dim`. The vector must be a non-zero JSON array of finite numbers. A model keeps one vector dimension across all items. An unknown or retired item is rejected, and a failed write leaves the existing index unchanged.
+
+### `search sem`
+
+```
+virtuoso --workspace PATH search sem --model MODEL --vector JSON [--limit N] [--json]
+```
+
+Output schema: `virtuoso/semantic-search@0.1`. The response contains `model` and `hits`. Each hit contains `item_id` and cosine `score`. The default limit is 10. Results include active items only, and the query vector must match the stored dimension for the selected model.
+
+### `search status`
+
+```
+virtuoso --workspace PATH search status [--json]
+```
+
+Output schema: `virtuoso/search-status@0.1`. The response contains `index`, `exists`, `lexical_index_rows`, `active_items`, `lexical_fresh`, `fingerprint`, and `embedding_models`. Each embedding-model entry contains `model` and `vectors`. `fingerprint` is `null` before a lexical index fingerprint exists.
 
 ## Sources (read-only Markdown/Obsidian)
 
