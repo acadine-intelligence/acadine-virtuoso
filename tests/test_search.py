@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -11,14 +12,32 @@ from virtuoso.search import (
     SearchError,
     embed_upsert,
     lexical_search,
+    search_status,
     semantic_search,
 )
-from virtuoso.workspace import WorkspaceService
+from virtuoso.workspace import WorkspaceError, WorkspaceService
 
 
 def _unit(vector: list[float]) -> list[float]:
     norm = sum(v * v for v in vector) ** 0.5 or 1.0
     return [round(v / norm, 6) for v in vector]
+
+
+def _replace_item_text(
+    service: WorkspaceService, item_id: str, old: str, new: str
+) -> None:
+    item = service.load_item(item_id)
+    text = item.path.read_text(encoding="utf-8")
+    changed = text.replace(old, new)
+    if changed == text:
+        raise AssertionError(f"test fixture text is missing: {old}")
+    item.path.write_text(changed, encoding="utf-8")
+    content_hash = hashlib.sha256(changed.encode("utf-8")).hexdigest()
+    with service._connect() as db:
+        db.execute(
+            "UPDATE items SET content_hash = ? WHERE item_id = ?",
+            (content_hash, item_id),
+        )
 
 
 class SearchTests(unittest.TestCase):
@@ -122,6 +141,65 @@ class SearchTests(unittest.TestCase):
         hits = lexical_search(self.workspace, "tunneling")
         self.assertEqual([hit.item_id for hit in hits], ["fresh"])
 
+    def test_lexical_index_rebuilds_when_active_identity_changes_at_same_count(
+        self,
+    ) -> None:
+        self.assertEqual(
+            [hit.item_id for hit in lexical_search(self.workspace, "goroutine")],
+            ["goroutines"],
+        )
+        self.workspace.retire_item("goroutines")
+        self.workspace.add_item(
+            item_id="replacement",
+            title="Replacement retrieval item",
+            focus="retrieval",
+            prompt="Explain quuxreplacement.",
+            answer="Quuxreplacement identifies the new active item.",
+        )
+
+        self.assertEqual(lexical_search(self.workspace, "goroutine"), [])
+        self.assertEqual(
+            [hit.item_id for hit in lexical_search(self.workspace, "quuxreplacement")],
+            ["replacement"],
+        )
+
+    def test_lexical_index_rebuilds_when_active_content_hash_changes(self) -> None:
+        self.workspace.add_item(
+            item_id="mutable-text",
+            title="Mutable retrieval text",
+            focus="retrieval",
+            prompt="Explain cobaltmarker.",
+            answer="cobaltmarker is the original indexed term.",
+        )
+        self.assertEqual(
+            [hit.item_id for hit in lexical_search(self.workspace, "cobaltmarker")],
+            ["mutable-text"],
+        )
+
+        _replace_item_text(
+            self.workspace, "mutable-text", "cobaltmarker", "ambermarker"
+        )
+
+        self.assertEqual(lexical_search(self.workspace, "cobaltmarker"), [])
+        self.assertEqual(
+            [hit.item_id for hit in lexical_search(self.workspace, "ambermarker")],
+            ["mutable-text"],
+        )
+
+    def test_search_status_fingerprint_tracks_active_content(self) -> None:
+        lexical_search(self.workspace, "goroutine")
+        before = search_status(self.workspace)
+
+        _replace_item_text(
+            self.workspace, "goroutines", "Lightweight threads", "Scheduled functions"
+        )
+        after = search_status(self.workspace)
+
+        self.assertRegex(before["fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(after["fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.assertTrue(after["lexical_fresh"])
+
     def test_lexical_search_treats_ordinary_punctuation_as_plain_text(self) -> None:
         self.workspace.add_item(
             item_id="plain-syntax",
@@ -168,6 +246,67 @@ class SearchTests(unittest.TestCase):
                 item_id="broadcasting",
                 model="bad-values",
                 vector=["not-a-number"],  # type: ignore[list-item]
+            )
+
+    def test_semantic_search_excludes_retired_items(self) -> None:
+        embed_upsert(
+            self.workspace,
+            item_id="broadcasting",
+            model="retirement-model",
+            vector=[1.0, 0.0],
+        )
+        embed_upsert(
+            self.workspace,
+            item_id="goroutines",
+            model="retirement-model",
+            vector=[1.0, 0.0],
+        )
+        self.workspace.retire_item("goroutines")
+
+        hits = semantic_search(
+            self.workspace,
+            model="retirement-model",
+            query_vector=[1.0, 0.0],
+        )
+
+        self.assertEqual([hit.item_id for hit in hits], ["broadcasting"])
+
+    def test_upsert_rejects_mixed_model_dimensions_without_corruption(self) -> None:
+        embed_upsert(
+            self.workspace,
+            item_id="broadcasting",
+            model="fixed-dimension-model",
+            vector=[1.0, 0.0],
+        )
+
+        with self.assertRaisesRegex(SearchError, "dimension"):
+            embed_upsert(
+                self.workspace,
+                item_id="goroutines",
+                model="fixed-dimension-model",
+                vector=[1.0, 0.0, 0.0],
+            )
+
+        hits = semantic_search(
+            self.workspace,
+            model="fixed-dimension-model",
+            query_vector=[1.0, 0.0],
+        )
+        self.assertEqual([hit.item_id for hit in hits], ["broadcasting"])
+        model = next(
+            entry
+            for entry in search_status(self.workspace)["embedding_models"]
+            if entry["model"] == "fixed-dimension-model"
+        )
+        self.assertEqual(model["vectors"], 1)
+
+    def test_upsert_unknown_item_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(WorkspaceError, "no learning item"):
+            embed_upsert(
+                self.workspace,
+                item_id="missing-item",
+                model="model",
+                vector=[1.0, 0.0],
             )
 
     def test_json_vector_roundtrip(self) -> None:
