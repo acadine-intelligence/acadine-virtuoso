@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from pathlib import Path
 from virtuoso.practice import PracticeService
 from virtuoso.queries import (
     QueryError,
+    _connect_read_only,
     focus_performance,
     item_history,
     stale_links,
@@ -107,9 +109,55 @@ class QueryTests(unittest.TestCase):
     def test_stale_links_empty_on_healthy_workspace(self) -> None:
         self.assertEqual(stale_links(self.workspace.db_path), [])
 
+    def test_queries_support_reserved_characters_in_workspace_path(self) -> None:
+        temp_root = Path(self.tmp.name).resolve()
+        misparsed_target = temp_root / "spaces "
+        special = WorkspaceService.init(
+            temp_root / "spaces #hash?question%percent ünicode" / "learner"
+        )
+        special.add_item(
+            item_id="encoded-path",
+            title="Encoded path",
+            focus="path-contract",
+            prompt="Can every valid local path be queried?",
+            answer="Yes, when the SQLite URI encodes reserved characters.",
+        )
+
+        summaries = focus_performance(special.db_path)
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0].focus, "path-contract")
+        self.assertEqual(summaries[0].items, 1)
+        self.assertEqual(summaries[0].attempts, 0)
+        self.assertEqual(item_history(special.db_path, "encoded-path"), [])
+        self.assertEqual(
+            workload_by_focus(special.db_path),
+            [
+                {
+                    "focus": "path-contract",
+                    "items": 1,
+                    "due_now": 0,
+                    "scheduled": 0,
+                }
+            ],
+        )
+        self.assertEqual(stale_links(special.db_path), [])
+        self.assertFalse(misparsed_target.exists())
+
     def test_missing_database_fails_closed(self) -> None:
+        missing = Path(self.tmp.name).resolve() / "absent.sqlite3"
         with self.assertRaisesRegex(QueryError, "not found"):
-            focus_performance(Path(self.tmp.name) / "absent.sqlite3")
+            focus_performance(missing)
+        self.assertFalse(missing.exists())
+
+    def test_read_only_connection_enables_query_only(self) -> None:
+        db = _connect_read_only(self.workspace.db_path)
+        try:
+            self.assertEqual(db.execute("PRAGMA query_only").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.OperationalError):
+                db.execute("CREATE TABLE forbidden(value TEXT)")
+        finally:
+            db.close()
 
     def test_queries_never_write(self) -> None:
         self._practice("item-a", "demonstrated", 4)
