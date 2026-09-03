@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import sys
 import tempfile
 import time
@@ -48,6 +50,27 @@ class ModuleBoundaryTests(unittest.TestCase):
 
     def _run(self, manifest: ModuleManifest, request: dict[str, object], **kwargs: object):
         return ModuleRunner(**kwargs).run(manifest, request, allow_trusted=True)
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _terminate_and_reap_test_pid(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
 
     def test_valid_external_command_receives_bounded_projection_and_returns_typed_result(self) -> None:
         script = self._script(
@@ -439,6 +462,122 @@ print(json.dumps({
                 ModuleManifest.load(path),
                 {"schema": "virtuoso/module-request@0.1", "projections": {}},
             )
+
+    def test_timeout_applies_while_child_does_not_read_stdin(self) -> None:
+        pid_path = self.root / "non-reading-child.pid"
+        slow = self._script(
+            "non-reading.py",
+            "import os,pathlib,time\n"
+            f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\n"
+            "time.sleep(3)\n",
+        )
+        path = self._manifest(slow)
+        value = json.loads(path.read_text())
+        value["command"]["timeout_seconds"] = 0.5
+        path.write_text(json.dumps(value))
+        request = {
+            "schema": "virtuoso/module-request@0.1",
+            "projections": {"challenge.summary": {"prompt": "x" * 100_000}},
+        }
+
+        caught: ModuleError | None = None
+        child_pid: int | None = None
+        child_running_after_return = True
+        started = time.monotonic()
+        try:
+            try:
+                self._run(
+                    ModuleManifest.load(path),
+                    request,
+                    max_input_bytes=200_000,
+                )
+            except ModuleError as exc:
+                caught = exc
+            elapsed = time.monotonic() - started
+            self.assertTrue(pid_path.is_file(), "module did not start")
+            child_pid = int(pid_path.read_text())
+            child_running_after_return = self._pid_is_running(child_pid)
+        finally:
+            if child_pid is not None:
+                self._terminate_and_reap_test_pid(child_pid)
+
+        self.assertIsNotNone(caught)
+        assert caught is not None
+        self.assertIn("timed out", str(caught))
+        self.assertLess(elapsed, 1.5)
+        self.assertFalse(child_running_after_return)
+
+    def test_early_closed_stdin_is_cleaned_up_before_error_returns(self) -> None:
+        pid_path = self.root / "early-close-child.pid"
+        early_close = self._script(
+            "early-close.py",
+            "import os,pathlib,time\n"
+            f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\n"
+            "os.close(0)\n"
+            "time.sleep(3)\n",
+        )
+        path = self._manifest(early_close)
+        value = json.loads(path.read_text())
+        value["command"]["timeout_seconds"] = 1
+        path.write_text(json.dumps(value))
+        request = {
+            "schema": "virtuoso/module-request@0.1",
+            "projections": {"challenge.summary": {"prompt": "x" * 100_000}},
+        }
+
+        caught: ModuleError | None = None
+        child_pid: int | None = None
+        child_running_after_return = True
+        started = time.monotonic()
+        try:
+            try:
+                self._run(
+                    ModuleManifest.load(path),
+                    request,
+                    max_input_bytes=200_000,
+                )
+            except ModuleError as exc:
+                caught = exc
+            elapsed = time.monotonic() - started
+            self.assertTrue(pid_path.is_file(), "module did not start")
+            child_pid = int(pid_path.read_text())
+            child_running_after_return = self._pid_is_running(child_pid)
+        finally:
+            if child_pid is not None:
+                self._terminate_and_reap_test_pid(child_pid)
+
+        self.assertIsNotNone(caught)
+        assert caught is not None
+        self.assertFalse(child_running_after_return)
+        self.assertIn("input", str(caught))
+        self.assertLess(elapsed, 1.5)
+
+    def test_descendant_scans_are_throttled_during_module_run(self) -> None:
+        descendant_scan_count = 0
+
+        class CountingRunner(ModuleRunner):
+            @staticmethod
+            def _descendant_pids(root_pid: int) -> set[int]:
+                nonlocal descendant_scan_count
+                descendant_scan_count += 1
+                return set()
+
+        slow_valid = self._script(
+            "slow-valid.py",
+            "import json,time\n"
+            "time.sleep(0.65)\n"
+            "print(json.dumps({'schema':'virtuoso/module-result@0.1','module_id':'example-score','kind':'score-proposal','payload':{'score':1}}))\n",
+        )
+        runner = CountingRunner()
+
+        result = runner.run(
+            ModuleManifest.load(self._manifest(slow_valid)),
+            {"schema": "virtuoso/module-request@0.1", "projections": {}},
+            allow_trusted=True,
+        )
+
+        self.assertEqual(result.payload, {"score": 1})
+        self.assertLessEqual(descendant_scan_count, 6)
 
     def test_timeout_kills_descendant_processes(self) -> None:
         marker = self.root / "descendant-survived"
