@@ -219,7 +219,7 @@ Connects a read-only source. Rejects symlinked roots, missing roots, duplicates,
 virtuoso --workspace PATH source scan --id SOURCE [--json]
 ```
 
-Indexes (or re-indexes) the source. JSON output: `{"receipt_id", "source_id", "indexed", "removed", "skipped", "total_bytes", "occurred_at"}`. Bounded: file-count and byte limits fail closed without partial updates; symlinks are never followed.
+Indexes (or re-indexes) the source. JSON output: `{"receipt_id", "source_id", "indexed", "removed", "skipped", "total_bytes", "occurred_at"}`. Bounded: file-count and byte limits fail closed without partial updates; symlinks are never followed. For an `obsidian` source, the scanner prunes directory components named `.obsidian` or `.trash`, counts their Markdown paths as `skipped`, and does not open those files or charge them to scan budgets. A generic `markdown` source does not apply these Obsidian-specific exclusions.
 
 ### `source list` / `source notes`
 

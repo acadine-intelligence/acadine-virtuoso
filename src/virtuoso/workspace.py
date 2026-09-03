@@ -29,6 +29,7 @@ _ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SOURCE_KINDS = {"markdown", "obsidian"}
+_OBSIDIAN_EXCLUDED_DIRECTORIES = frozenset({".obsidian", ".trash"})
 _TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
 _TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
 _TRANSFER_EVENT_ID = re.compile(r"^transfer-[0-9a-f]{32}$")
@@ -1228,9 +1229,38 @@ class WorkspaceService:
         def traversal_error(exc: OSError) -> None:
             raise WorkspaceError(f"source traversal failed: {exc}") from exc
 
-        root_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+        directory_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+
+        def count_excluded_markdown(
+            dirname: str, *, parent_descriptor: int
+        ) -> int:
+            try:
+                excluded_descriptor = os.open(
+                    dirname,
+                    directory_flags,
+                    dir_fd=parent_descriptor,
+                )
+            except OSError as exc:
+                raise WorkspaceError(f"source traversal failed: {exc}") from exc
+            try:
+                excluded_walker = os.fwalk(
+                    ".",
+                    topdown=True,
+                    onerror=traversal_error,
+                    follow_symlinks=False,
+                    dir_fd=excluded_descriptor,
+                )
+                return sum(
+                    1
+                    for _directory, _dirnames, filenames, _descriptor in excluded_walker
+                    for filename in filenames
+                    if Path(filename).suffix.lower() == ".md"
+                )
+            finally:
+                os.close(excluded_descriptor)
+
         try:
-            root_descriptor = os.open(source.root, root_flags)
+            root_descriptor = os.open(source.root, directory_flags)
         except OSError as exc:
             raise WorkspaceError(f"source traversal failed: {exc}") from exc
         try:
@@ -1258,6 +1288,15 @@ class WorkspaceService:
                         raise WorkspaceError(
                             f"source traversal failed: directory entry is not a directory: {dirname}"
                         )
+                    if (
+                        source.kind == "obsidian"
+                        and dirname in _OBSIDIAN_EXCLUDED_DIRECTORIES
+                    ):
+                        skipped += count_excluded_markdown(
+                            dirname,
+                            parent_descriptor=directory_descriptor,
+                        )
+                        continue
                     safe_directories.append(dirname)
                 dirnames[:] = safe_directories
 

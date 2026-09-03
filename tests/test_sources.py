@@ -111,6 +111,215 @@ Links: [[Active Recall]], [[Spacing#Intervals|spacing]], [[Active Recall]].
         config = json.loads((self.root / "virtuoso.json").read_text())
         self.assertNotIn("Secret private prose", json.dumps(config))
 
+    def test_obsidian_scan_excludes_reserved_directories_and_counts_markdown(
+        self,
+    ) -> None:
+        source_files = {
+            "visible.md": b"# Visible\n",
+            ".private/kept.md": b"# Kept hidden note\n",
+            ".obsidian/workspace.md": b"# Workspace metadata\n",
+            ".obsidian/plugins/cache.md": b"# Plugin cache\n",
+            ".trash/old.md": b"# Soft deleted\n",
+            "Area/.trash/UPPER.MD": b"# Nested trash\n",
+            ".trash/readme.txt": b"Not Markdown\n",
+        }
+        for relative_path, body in source_files.items():
+            path = self.vault / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        before = {
+            relative_path: (self.vault / relative_path).read_bytes()
+            for relative_path in source_files
+        }
+        self.service.add_source(
+            source_id="core-vault", kind="obsidian", root=self.vault
+        )
+
+        receipt = self.service.scan_source("core-vault")
+
+        self.assertEqual(
+            [
+                document.relative_path
+                for document in self.service.list_source_documents("core-vault")
+            ],
+            [".private/kept.md", "visible.md"],
+        )
+        self.assertEqual(receipt.indexed, 2)
+        self.assertEqual(receipt.skipped, 4)
+        self.assertEqual(
+            receipt.total_bytes,
+            len(source_files["visible.md"]) + len(source_files[".private/kept.md"]),
+        )
+        self.assertEqual(
+            {
+                relative_path: (self.vault / relative_path).read_bytes()
+                for relative_path in source_files
+            },
+            before,
+        )
+
+    def test_obsidian_exclusions_do_not_use_file_budget_or_open_markdown(
+        self,
+    ) -> None:
+        (self.vault / "visible.md").write_text("# Visible\n", encoding="utf-8")
+        hidden_files = {
+            ".obsidian/must-not-open-workspace.md": "# Metadata\n",
+            ".trash/must-not-open-trash.md": "# Deleted\n",
+        }
+        for relative_path, body in hidden_files.items():
+            path = self.vault / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        self.service.add_source(
+            source_id="core-vault", kind="obsidian", root=self.vault
+        )
+        original_open = os.open
+
+        def reject_hidden_file_open(
+            path: object, flags: int, *args: object, **kwargs: object
+        ) -> int:
+            if path in {
+                "must-not-open-workspace.md",
+                "must-not-open-trash.md",
+            }:
+                raise AssertionError(f"excluded Markdown was opened: {path}")
+            return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+        supports_dir_fd = set(os.supports_dir_fd)
+        supports_dir_fd.add(reject_hidden_file_open)
+        with (
+            patch("virtuoso.workspace.os.open", new=reject_hidden_file_open),
+            patch(
+                "virtuoso.workspace.os.supports_dir_fd",
+                new=supports_dir_fd,
+            ),
+        ):
+            receipt = self.service.scan_source("core-vault", max_files=1)
+
+        self.assertEqual(receipt.indexed, 1)
+        self.assertEqual(receipt.skipped, 2)
+
+    def test_obsidian_exclusions_do_not_use_total_byte_budget(self) -> None:
+        visible = b"# Visible\n"
+        (self.vault / "visible.md").write_bytes(visible)
+        for relative_path in (".obsidian/workspace.md", ".trash/old.md"):
+            path = self.vault / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"# Excluded\n" + b"x" * 100)
+        self.service.add_source(
+            source_id="core-vault", kind="obsidian", root=self.vault
+        )
+
+        receipt = self.service.scan_source(
+            "core-vault",
+            max_files=10,
+            max_file_bytes=1_000,
+            max_total_bytes=len(visible),
+        )
+
+        self.assertEqual(receipt.indexed, 1)
+        self.assertEqual(receipt.skipped, 2)
+        self.assertEqual(receipt.total_bytes, len(visible))
+
+    def test_obsidian_excluded_count_does_not_follow_directory_symlinks(
+        self,
+    ) -> None:
+        outside = Path(self.tmp.name).resolve() / "outside-hidden"
+        outside.mkdir()
+        outside_body = b"# Outside\n\nPrivate source content.\n"
+        (outside / "private.md").write_bytes(outside_body)
+        (self.vault / "visible.md").write_text("# Visible\n", encoding="utf-8")
+        trash = self.vault / ".trash"
+        trash.mkdir()
+        (trash / "local.md").write_text("# Local trash\n", encoding="utf-8")
+        (trash / "linked").symlink_to(outside, target_is_directory=True)
+        (self.vault / ".obsidian").symlink_to(outside, target_is_directory=True)
+        self.service.add_source(
+            source_id="core-vault", kind="obsidian", root=self.vault
+        )
+
+        receipt = self.service.scan_source("core-vault")
+
+        self.assertEqual(receipt.skipped, 1)
+        self.assertEqual(
+            [
+                document.relative_path
+                for document in self.service.list_source_documents("core-vault")
+            ],
+            ["visible.md"],
+        )
+        self.assertNotIn(outside_body, self.service.db_path.read_bytes())
+
+    def test_markdown_source_keeps_obsidian_reserved_directory_names(self) -> None:
+        for relative_path in (
+            "visible.md",
+            ".obsidian/workspace.md",
+            ".trash/old.md",
+        ):
+            path = self.vault / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {path.stem}\n", encoding="utf-8")
+        self.service.add_source(source_id="notes", kind="markdown", root=self.vault)
+
+        receipt = self.service.scan_source("notes")
+
+        self.assertEqual(
+            [
+                document.relative_path
+                for document in self.service.list_source_documents("notes")
+            ],
+            [".obsidian/workspace.md", ".trash/old.md", "visible.md"],
+        )
+        self.assertEqual(receipt.skipped, 0)
+
+    def test_obsidian_rescan_removes_previously_indexed_reserved_paths(self) -> None:
+        source_files = {
+            "visible.md": b"# Visible\n",
+            ".obsidian/workspace.md": b"# Workspace\n",
+            ".trash/old.md": b"# Old\n",
+        }
+        for relative_path, body in source_files.items():
+            path = self.vault / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        self.service.add_source(
+            source_id="core-vault", kind="obsidian", root=self.vault
+        )
+        with self.service._connect() as db:
+            for relative_path in (".obsidian/workspace.md", ".trash/old.md"):
+                path = self.vault / relative_path
+                status = path.stat()
+                raw = path.read_bytes()
+                db.execute(
+                    """
+                    INSERT INTO source_documents(
+                        source_id, relative_path, title, content_hash,
+                        wikilinks_json, modified_ns, byte_size, indexed_at
+                    ) VALUES (?, ?, ?, ?, '[]', ?, ?, ?)
+                    """,
+                    (
+                        "core-vault",
+                        relative_path,
+                        path.stem,
+                        hashlib.sha256(raw).hexdigest(),
+                        status.st_mtime_ns,
+                        len(raw),
+                        "2026-09-03T00:00:00+00:00",
+                    ),
+                )
+
+        receipt = self.service.scan_source("core-vault")
+
+        self.assertEqual(receipt.removed, 2)
+        self.assertEqual(receipt.skipped, 2)
+        self.assertEqual(
+            [
+                document.relative_path
+                for document in self.service.list_source_documents("core-vault")
+            ],
+            ["visible.md"],
+        )
+
     def test_rescan_removes_deleted_metadata_and_keeps_source_unchanged(self) -> None:
         note = self.vault / "Atomic.md"
         note.write_text("# Atomic\n\nHuman-authored source.\n", encoding="utf-8")
