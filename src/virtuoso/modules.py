@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover - non-POSIX platforms fail closed at run
 MANIFEST_SCHEMA = "virtuoso/module@0.1"
 REQUEST_SCHEMA = "virtuoso/module-request@0.1"
 RESULT_SCHEMA = "virtuoso/module-result@0.1"
+_DESCENDANT_SCAN_INTERVAL_SECONDS = 0.25
 _ALLOWED_CATEGORIES = {
     "scheduler": "scheduler-proposal",
     "practice-format": "practice-proposal",
@@ -412,7 +413,10 @@ class ModuleRunner:
                 "module execution requires an OS process limit that prevents descendants"
             )
         started = time.monotonic()
+        deadline = started + manifest.timeout_seconds
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process: subprocess.Popen[bytes] | None = None
+            descendants: set[int] = set()
             try:
                 process = subprocess.Popen(
                     list(manifest.argv),
@@ -424,38 +428,78 @@ class ModuleRunner:
                     env=environment,
                     start_new_session=(os.name == "posix"),
                     preexec_fn=self._deny_descendant_processes,
+                    bufsize=0,
                 )
                 assert process.stdin is not None
-                process.stdin.write(encoded)
-                process.stdin.close()
-                deadline = started + manifest.timeout_seconds
-                descendants: set[int] = set()
+                os.set_blocking(process.stdin.fileno(), False)
+                input_offset = 0
+                next_descendant_scan = started
                 while process.poll() is None:
-                    descendants.update(self._descendant_pids(process.pid))
-                    if os.fstat(stdout_file.fileno()).st_size > self.max_output_bytes:
-                        self._terminate_process_tree(process, descendants)
-                        process.wait()
-                        raise ModuleError("module exceeded output limit")
-                    if os.fstat(stderr_file.fileno()).st_size > self.max_output_bytes:
-                        self._terminate_process_tree(process, descendants)
-                        process.wait()
-                        raise ModuleError("module exceeded error output limit")
-                    if time.monotonic() >= deadline:
-                        descendants.update(self._descendant_pids(process.pid))
-                        self._terminate_process_tree(process, descendants)
-                        process.wait()
+                    now = time.monotonic()
+                    if now >= deadline:
                         raise ModuleError(
                             f"module timed out after {manifest.timeout_seconds:g} seconds"
                         )
+                    if input_offset < len(encoded):
+                        try:
+                            written = os.write(
+                                process.stdin.fileno(), encoded[input_offset:]
+                            )
+                        except BlockingIOError:
+                            pass
+                        except BrokenPipeError as exc:
+                            raise ModuleError(
+                                "module input closed before request completed"
+                            ) from exc
+                        except OSError as exc:
+                            raise ModuleError(f"module input write failed: {exc}") from exc
+                        else:
+                            if written == 0:
+                                raise ModuleError(
+                                    "module input closed before request completed"
+                                )
+                            input_offset += written
+                            if input_offset == len(encoded):
+                                process.stdin.close()
+                    if now >= next_descendant_scan:
+                        descendants.update(self._descendant_pids(process.pid))
+                        next_descendant_scan = (
+                            now + _DESCENDANT_SCAN_INTERVAL_SECONDS
+                        )
+                    if os.fstat(stdout_file.fileno()).st_size > self.max_output_bytes:
+                        raise ModuleError("module exceeded output limit")
+                    if os.fstat(stderr_file.fileno()).st_size > self.max_output_bytes:
+                        raise ModuleError("module exceeded error output limit")
                     time.sleep(0.01)
-                # A successful executable must not leave work running after its
-                # proposal has been accepted. The process group still exists
-                # after the group leader exits, so always terminate it.
-                self._terminate_process_tree(process, descendants)
+                if input_offset < len(encoded) and process.returncode == 0:
+                    raise ModuleError("module input closed before request completed")
             except ModuleError:
                 raise
             except (OSError, subprocess.SubprocessError) as exc:
-                raise ModuleError(f"module process could not start: {exc}") from exc
+                message = (
+                    "module process could not start"
+                    if process is None
+                    else "module process failed"
+                )
+                raise ModuleError(f"{message}: {exc}") from exc
+            finally:
+                if process is not None:
+                    if process.stdin is not None and not process.stdin.closed:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+                    descendants.update(self._descendant_pids(process.pid))
+                    self._terminate_process_tree(process, descendants)
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
+            assert process is not None
             duration_ms = max(0, round((time.monotonic() - started) * 1000))
             stdout_file.seek(0, os.SEEK_END)
             stderr_file.seek(0, os.SEEK_END)
