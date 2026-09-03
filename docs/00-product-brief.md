@@ -1,8 +1,8 @@
 # Product brief
 
-Acadine Virtuoso is a local-first active-recall CLI. It turns user-owned Markdown and current work into one worthwhile challenge, records what the attempt demonstrated, and proposes when and how to practise next.
+Acadine Virtuoso is a local-first learning and active-recall CLI. It turns user-owned Markdown and current work into one worthwhile learning or practice action, records each activity under its correct evidence type, and proposes when to practise again after recall.
 
-The first use case is maintainer dogfood. The initial slice stays small: initialize a workspace, add a manually authored recall item, attempt it before seeing the answer, record latency and assistance, and obtain a transparent FSRS-backed next-review proposal.
+The first use case is maintainer dogfood. The initial path stays small: initialize a workspace, add a manually authored item, study first when the material is unfamiliar, attempt recall before seeing the answer, record latency and assistance, and obtain a transparent FSRS-backed next-review proposal.
 
 ## Outcome
 
@@ -11,12 +11,14 @@ The learner retrieves important ideas reliably, retrieves them faster over time,
 ## Hero workflow
 
 1. `virtuoso init` creates a local Markdown and SQLite workspace.
-2. `virtuoso add` creates one active-recall item.
-3. `virtuoso practice` presents the prompt with the answer hidden and starts the timer.
-4. The learner attempts recall, then may retry, request a hint, or reveal worked feedback.
-5. Virtuoso records correctness, latency, confidence, open-notes state, and help used.
-6. The chosen scheduler proposes the next review and explains its algorithm, configuration, and context.
-7. The learner can inspect the append-only attempt record.
+2. `virtuoso add` creates one recall-first or learn-first item.
+3. `virtuoso next` returns a typed action and its reason.
+4. A learn-first action shows the learning unit and records explicit study completion without starting a schedule.
+5. A practice action presents the prompt with the answer hidden and starts the timer.
+6. The learner attempts recall, then may retry, request a hint, or reveal worked feedback.
+7. Virtuoso records correctness, latency, confidence, open-notes state, and help used.
+8. The chosen scheduler proposes the next review and explains its algorithm, configuration, and context.
+9. The learner can inspect separate append-only study and recall records.
 
 ## Boundary
 

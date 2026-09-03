@@ -101,6 +101,7 @@ class ReviewService:
 
     def load(self, item_id: str) -> ReviewItemSnapshot:
         item = self.workspace.load_item(item_id)
+        self.workspace.require_practice_ready(item_id)
         return ReviewItemSnapshot(
             item_id=item.item_id,
             title=item.title,
@@ -348,6 +349,11 @@ class ReviewService:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise WorkspaceError("review queue timestamp must be timezone-aware")
         observed_at = observed_at.astimezone(timezone.utc)
+        practice_ready = {
+            state.item_id
+            for state in self.workspace.learning_states()
+            if state.action == "practice"
+        }
 
         scheduler = self.workspace.configuration().get("scheduler")
         if not isinstance(scheduler, dict):
@@ -386,6 +392,8 @@ class ReviewService:
         due: list[tuple[datetime, ReviewQueueItem]] = []
         new: list[ReviewQueueItem] = []
         for row in rows:
+            if row["item_id"] not in practice_ready:
+                continue
             if row["due_at"] is None:
                 new.append(
                     ReviewQueueItem(

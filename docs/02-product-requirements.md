@@ -2,13 +2,15 @@
 
 ## V0 job
 
-When a learner begins focused practice, Virtuoso presents one relevant prompt before any answer and measures the retrieval attempt. Bounded support is provided only when requested. Virtuoso records attributable evidence and proposes the next review without claiming mastery.
+When a learner begins a focused session, Virtuoso selects a typed learning or practice action. Unfamiliar material starts with bounded study. Practice presents one relevant prompt before any answer and measures the retrieval attempt. Virtuoso records each activity under its correct evidence type and makes no mastery claim.
 
 ## Functional requirements
 
 - Initialize an isolated local workspace with Markdown items and SQLite state.
-- Add manually authored items containing prompt, answer, optional hint, and optional follow-up.
-- Select a due item deterministically from simple-mode focus and scheduler state.
+- Add manually authored recall-first items, or learn-first items with a learning unit, prompt, and hidden answer.
+- Select a typed `learn` or `practice` action deterministically from entry mode, current study evidence, focus, and scheduler state.
+- Record explicit study completion against exact item and learning-unit hashes without starting FSRS.
+- Require a matching current study event before any practice writer accepts a learn-first item.
 - Keep the answer hidden until an explicit attempt.
 - Measure elapsed recall time in the program; never accept a user-supplied latency as authoritative in interactive mode.
 - Support retry unaided, hint, worked answer/feedback, and smaller follow-up challenge.
@@ -27,6 +29,7 @@ When a learner begins focused practice, Virtuoso presents one relevant prompt be
 - Virtuoso sends modules no database path or arbitrary workspace projection. Modules are trusted local executables. Calling code must pass `allow_trusted=True`; there is no public CLI command for module execution. They are not OS-sandboxed processes and may independently access files allowed to the invoking user.
 - No personal learning data is committed to this repository.
 - Missing or stale inputs are reported as uncertainty.
+- Study completion proves exposure only. It never creates a recall, capability, transfer, or mastery claim.
 
 ## Deferred modules
 

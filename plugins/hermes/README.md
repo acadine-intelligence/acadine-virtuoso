@@ -6,8 +6,8 @@ its own. This is an optional adapter. The CLI remains the canonical interface.
 
 ## Tools
 
-- `virtuoso_due`: what is due now (recommended next + delayed transfer checks)
-- `virtuoso_next`: single recommended practice item
+- `virtuoso_due`: what is due now (typed next learning/practice action + delayed transfer checks)
+- `virtuoso_next`: single recommended learning or practice action
 - `virtuoso_transfer_record`: record a real-project transfer event with an optional artifact reference
 - `virtuoso_status`: workspace health
 

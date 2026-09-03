@@ -2,13 +2,15 @@
 
 [![CI](https://github.com/acadine-intelligence/acadine-virtuoso/actions/workflows/ci.yml/badge.svg)](https://github.com/acadine-intelligence/acadine-virtuoso/actions/workflows/ci.yml)
 
-A local-first command-line tool for deliberate practice. Virtuoso shows you a prompt before any answer, times your recall, records what help you used, and asks the FSRS spaced-repetition algorithm for a transparent next-review proposal you can inspect and override.
+A local-first command-line tool for deliberate learning and practice. Virtuoso can show unfamiliar material first or begin with recall. During practice it shows the prompt before any answer, times your recall, records help, and asks FSRS for a transparent next-review proposal.
 
 Your material stays yours: items are plain Markdown you can read and edit; SQLite holds derived evidence and scheduler state on your own disk. No account, no cloud, no telemetry.
 
 ## Why
 
 Most learning tools measure activity. Virtuoso measures attempts: what you recalled, how long it took, what help you used, and whether you could apply it later in a real project. It refuses to infer competence from completion counts, streaks, or AI-generated answers. Virtuoso records the context needed to interpret each attempt as evidence.
+
+New material needs a different first action. Mark an item `learn-first` to read its learning unit before recall. Virtuoso records that completion as study activity. It starts scheduling only after the first real recall attempt.
 
 ## Install
 
@@ -48,9 +50,13 @@ WORKSPACE=~/my-practice
 .venv/bin/virtuoso --workspace "$WORKSPACE" doctor --json
 ```
 
+For unfamiliar material, add `--entry-mode learn-first` and `--learning-unit "..."`. `next --json` then returns `action: learn`. Run `virtuoso --workspace "$WORKSPACE" learn --item ITEM_ID`, read the unit, and choose `finish` or `stop`. A finished study step records no attempt, schedule, capability state, or mastery claim.
+
 ## What it records, honestly
 
-Every attempt stores the actual start and completion times, your initial response verbatim, recall latency, the result you graded, your confidence, whether notes were open, and how much help was used (none, light, substantial). Blank recalls cannot be graded as demonstrated. Agent-relayed sessions are marked `administered` with unknown latency rather than a fabricated zero.
+Every attempt stores the actual start and completion times, your initial response verbatim, recall latency, the result you graded, your confidence, whether notes were open, and how much help was used (none, light, substantial). Blank recalls cannot be graded as demonstrated. Agent-relayed sessions are marked `administered` with unknown latency instead of a fabricated zero.
+
+A study event records the exact item hash, learning-unit hash, time, and source surface. It records exposure only. If either hash changes, Virtuoso asks for a new learning step and keeps the old event as history.
 
 Scheduling is explainable: each attempt produces a scheduler proposal carrying the algorithm, version, configuration, previous state, proposed state, and a plain-language rationale. FSRS 6.3.2 is the built-in scheduler; the module protocol lets you swap it for your own.
 
@@ -78,13 +84,15 @@ Lexical full-text search works across all items. Word stemming lets "goroutine" 
 
 ### Analytics
 
-Read-only queries report per-focus performance, item history, due workload by focus and stale source links. Every query opens the database in read-only mode.
+Read-only queries report per-focus performance, item history, due workload, typed learning state, and stale source links. Every query opens the database in read-only mode.
 
 ## The Obsidian plugin (optional)
 
 The plugin runs the full local review flow inside Obsidian. Set the installed Virtuoso executable and workspace paths, then run `Virtuoso: Start offline review`. You can type the first response, take one unaided retry, show a hint, reveal the answer, record result and confidence, mark notes as open, or skip.
 
 Offline here means Obsidian, the installed CLI, and the local workspace work without a live agent, server, or network. The plugin keeps only the open session snapshot in memory. Every grade and skip goes through a versioned JSON CLI contract with a content hash. The CLI remains the only scheduler and evidence writer. See `plugins/obsidian/README.md` for setup and recovery steps.
+
+The current Obsidian review queue omits learn-first items that still need study. Complete their learning step in the CLI first.
 
 ## Extension boundary
 

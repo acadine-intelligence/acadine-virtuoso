@@ -11,6 +11,7 @@ from typing import Any, Sequence
 
 from .candidates import CandidateService
 from .errors import VirtuosoError
+from .learning import LearningService
 from .practice import PracticeIO, PracticeService
 from .review import ReviewError
 from .workspace import WorkspaceError, WorkspaceService
@@ -46,7 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="virtuoso", description="Local-first active-recall practice"
+        prog="virtuoso", description="Local-first learning and active recall"
     )
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--workspace", type=Path, required=True)
@@ -63,6 +64,12 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--answer", required=True)
     add.add_argument("--hint")
     add.add_argument("--follow-up")
+    add.add_argument(
+        "--entry-mode",
+        choices=("recall-first", "learn-first"),
+        default="recall-first",
+    )
+    add.add_argument("--learning-unit")
     add.add_argument("--json", action="store_true")
 
     retire = commands.add_parser("retire", help="retire an item from selection")
@@ -72,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     next_command = commands.add_parser("next", help="recommend the next item")
     next_command.add_argument("--focus", help="restrict selection to one focus track")
     next_command.add_argument("--json", action="store_true")
+
+    learn = commands.add_parser(
+        "learn", help="read and explicitly finish one learn-first item"
+    )
+    learn.add_argument("--item", required=True)
 
     practice = commands.add_parser("practice", help="run an active-recall session")
     practice.add_argument("--item", required=True)
@@ -146,6 +158,10 @@ def _parser() -> argparse.ArgumentParser:
         "workload", help="due-now and scheduled counts per focus"
     )
     query_workload.add_argument("--json", action="store_true")
+    query_learning = query_commands.add_parser(
+        "learning", help="typed learning or practice state for active items"
+    )
+    query_learning.add_argument("--json", action="store_true")
     query_stale = query_commands.add_parser(
         "stale-links", help="source links whose note changed or disappeared"
     )
@@ -396,6 +412,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 answer=args.answer,
                 hint=args.hint,
                 follow_up=args.follow_up,
+                entry_mode=args.entry_mode,
+                learning_unit=args.learning_unit,
             )
             _emit(
                 {
@@ -403,6 +421,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "title": item.title,
                     "focus": item.focus,
                     "path": str(item.path),
+                    "content_hash": item.content_hash,
+                    "entry_mode": item.entry_mode,
+                    "learning_unit_hash": item.learning_unit_hash,
                 },
                 as_json=args.json,
             )
@@ -417,15 +438,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _emit(
                 {
+                    "schema": "virtuoso/next-action@0.1",
+                    "action": selection.action,
                     "item_id": selection.item.item_id,
                     "title": selection.item.title,
                     "focus": selection.item.focus,
-                    "prompt": selection.item.prompt,
+                    "item_content_hash": selection.item.content_hash,
+                    "learning_unit_hash": selection.item.learning_unit_hash,
+                    "prompt": (
+                        selection.item.prompt
+                        if selection.action == "practice"
+                        else None
+                    ),
                     "rationale": selection.rationale,
                     "alternatives": list(selection.alternatives),
                     "uncertainty": selection.uncertainty,
                 },
                 as_json=args.json,
+            )
+            return 0
+        if args.command == "learn":
+            LearningService(workspace).run(
+                item_id=args.item,
+                io=ConsoleIO(),
+                surface="cli",
             )
             return 0
         if args.command == "practice":
@@ -492,6 +528,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "attempts": workspace.list_attempts(),
                     "proposals": workspace.list_proposals(),
                     "skips": workspace.list_review_skips(),
+                    "study_events": workspace.list_study_events(),
                 },
                 as_json=args.json,
             )
@@ -572,6 +609,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                             algorithm=scheduler["algorithm"],
                             learning_context=scheduler["context"],
                         ),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.query_command == "learning":
+                _emit(
+                    {
+                        "schema": "virtuoso/learning-state@0.1",
+                        "items": queries_module.learning_state(workspace.db_path),
                     },
                     as_json=args.json,
                 )

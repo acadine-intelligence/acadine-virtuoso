@@ -112,6 +112,7 @@ class PracticeService:
 
         try:
             item = self.workspace.load_item(item_id)
+            self.workspace.require_practice_ready(item_id)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
 
@@ -273,6 +274,7 @@ class PracticeService:
 
         try:
             item = self.workspace.load_item(item_id)
+            self.workspace.require_practice_ready(item_id)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
 
@@ -337,6 +339,7 @@ class PracticeService:
 
         try:
             item = self.workspace.load_item(item_id)
+            self.workspace.require_practice_ready(item_id)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
         if item.content_hash != item_content_hash:

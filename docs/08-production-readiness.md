@@ -4,7 +4,7 @@ Virtuoso is not released. The public source baseline has passed the checks recor
 
 ## Installation and first run
 
-The first slice targets Python 3.11 and a project-local `.venv`. Installation must use tracked `pyproject.toml` and pinned runtime requirements, then prove import, CLI entry point, clean workspace initialization, and the synthetic hero journey.
+The first slice targets Python 3.11 and a project-local `.venv`. Installation must use tracked `pyproject.toml` and pinned runtime requirements, then prove import, CLI entry point, clean workspace initialization, and synthetic learn-first and recall-first journeys.
 
 ## Runtime and health
 
@@ -12,7 +12,7 @@ There is no server or port. Each command is a bounded local process. `doctor` wi
 
 ## Data lifecycle
 
-SQLite migrations run transactionally. Before any future destructive migration, Virtuoso must make a consistent local backup. Markdown stays user-owned. Attempts are append-only; corrections add events rather than deleting observations. Export, restore, retention, and deletion are release work and remain unverified.
+SQLite migrations run transactionally. Before any future destructive migration, Virtuoso must make a consistent local backup. Markdown stays user-owned. Study events and attempts are append-only; corrections add events rather than deleting observations. Export, restore, retention, and deletion are release work and remain unverified.
 
 ## Release evidence
 

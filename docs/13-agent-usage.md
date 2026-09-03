@@ -6,7 +6,7 @@ How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Vi
 
 1. **Always pass `--json`.** Human output is `key: value` lines; JSON output is the stable machine contract. Parse stdout, never scrape the human format.
 2. **Check the exit code.** 0 means success; 2 means a domain error. On 2, read stderr (`Error: ...`), which is written to be actionable, and either fix the input or surface it to the human. Never retry the same failing input unchanged.
-3. **Never fabricate evidence.** Attempts, transfer events and check completions are append-only records of what a real learner did. An agent may administer a session and transcribe the learner's answers; it may not invent results, and `--agent-help` / `--assistance` must honestly reflect any help the agent gave. When an agent runs a smoke test itself, record it as `substantial`, not `none`.
+3. **Never fabricate evidence.** Study events, attempts, transfer events and check completions are append-only records of what a real learner did. An agent may administer a session and transcribe the learner's answers; it may not invent results, and `--agent-help` / `--assistance` must honestly reflect any help the agent gave. When an agent runs a smoke test itself, record it as `substantial` rather than `none`.
 4. **Respect the boundaries.** Structural candidates remain proposal-only. Curriculum import candidates may create an item only after a human chooses `accept` or `edit`. `skip` and `reject` create no item. Sources stay read-only. A historical due value never becomes scheduler state, and an import never creates attempt or transfer evidence.
 5. **Never edit the SQLite database directly.** All state changes go through the CLI (or the Python services behind it). The schema is fail-closed: tampering is detected on next open and the workspace refuses to start.
 
@@ -17,9 +17,10 @@ Translate learner intent into commands like this:
 | The human says... | Run |
 |---|---|
 | "Set up my learning workspace" | `virtuoso --workspace PATH init --json` |
-| "What should I practice?" / "quiz me" / "what's next" | `next --json`: show the prompt, hide everything else |
+| "What should I do next?" | `next --json`: inspect `action`; for `learn`, offer the CLI learning step; for `practice`, show the prompt and keep the answer hidden |
 | "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json`: selection scoped to one focus; a track with no items returns exit 2 with a clear error |
 | "Add this as a practice item" | `add --id ... --title ... --focus ... --prompt ... --answer ... [--hint ...] [--follow-up ...] --json` |
+| "I am new to this material" / "teach this before testing me" | `add ... --entry-mode learn-first --learning-unit "..." --json`, then `learn --item ITEM`; only the learner may choose `finish` |
 | "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive; see the session protocol below) |
 | "Quiz me in chat" / learner answered out-of-band | `practice --item X --administer --response "..." --result ... --confidence N --json` (agent transcribes; latency stored as unknown) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |
@@ -27,6 +28,7 @@ Translate learner intent into commands like this:
 | "Compare outcomes by focus" | `queries focus --json` |
 | "Show the history for this item" | `queries history --item ITEM --json` |
 | "How much is due in each focus?" | `queries workload --json` |
+| "Which items need learning before practice?" | `queries learning --json` |
 | "Which source links are stale?" | `queries stale-links --json` |
 | "Find items containing these words" | `search lex --query TEXT --limit N --json` |
 | "Store this item's embedding" | `search embed --item ITEM --model MODEL --vector JSON --json` |
@@ -81,7 +83,7 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 
 ## Standard agent workflows
 
-**Morning pulse.** `next --json` → present only the prompt and title → after the human answers in chat, record it with `practice --administer` (or relay an interactive session) → close with the printed next-review time. Optionally `transfer check due --json` first, since due checks outrank routine review.
+**Morning pulse.** Run `next --json` and branch on `action`. For `learn`, ask the learner to run the local `learn` command and make their own finish decision. For `practice`, present only the prompt and title, then record the learner's answer through `practice --administer` or a live relay. Optionally run `transfer check due --json` first, since due checks outrank routine review.
 
 **Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/`; items are human-owned prose.
 
@@ -94,5 +96,6 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 - `Error: no learning item with id: ...` → list or re-check the id; do not guess.
 - `Error: item is stale because its Markdown changed` → the item file was edited; do not practice it until the workspace is re-synced; surface to the human.
 - `Error: scheduler state changed during practice` → concurrent modification; re-run `next` and start a fresh session.
+- `Error: item requires learning before practice` → run `next --json`, then let the learner complete `learn --item ITEM` before any recall attempt.
 - `Error: source ...` on scans or links → path or staleness problem; run `doctor --json` and surface the stale entry.
 - Empty `checks` from `transfer check due --json` is success, not an error.

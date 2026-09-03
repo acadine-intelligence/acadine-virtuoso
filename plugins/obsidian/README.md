@@ -54,7 +54,7 @@ The plugin loads due and new items from the CLI. Each card supports this flow:
 4. Show the optional hint or reveal the answer.
 5. Choose the result and confidence, then record the grade. You can also skip the card.
 
-Before answer reveal, the card shows its focus, explicit project links, and selection reason from the public CLI contract. The plugin does not infer project links from paths or note names.
+Before answer reveal, the card shows its focus, explicit project links, and selection reason from the public CLI contract. The plugin does not infer project links from paths or note names. Core `review due` omits learn-first items that still need their CLI learning step.
 
 The plugin keeps the open card snapshot in memory only. It sends every grade and skip to the versioned JSON review contract. The CLI checks the item content hash before it writes and again inside the write transaction. A stale item, schema mismatch, timeout, spawn failure, or nonzero CLI exit keeps the card open and shows a recovery action. The error panel preserves CLI stderr when no typed error envelope is available. The plugin advances only when the success response matches the pending submission, item, content hash, grade, and timestamp. A second click cannot start another write while one is running. A failed write can retry the same request. If a write succeeds and the next card fails to load, the plugin retries only the load and never sends the recorded decision again.
 

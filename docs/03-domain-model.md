@@ -6,7 +6,13 @@
 : Root containing configuration, authored Markdown, and runtime state.
 
 `LearningItem`
-: Human-authored prompt, answer, hint, follow-up, focus, context, and immutable item version. Markdown owns its prose.
+: Human-authored focus, entry mode, optional learning unit, prompt, answer, hint, follow-up, context, and immutable item version. Markdown owns its prose. Existing v0.1 items are recall-first. A v0.2 learn-first item requires learning prose before recall.
+
+`NextAction`
+: Versioned selection output typed as `learn` or `practice`, bound to the current item and learning-unit hashes and accompanied by a plain reason.
+
+`StudyEvent`
+: Append-only exposure activity for one exact learn-first item and learning-unit version. It records completion time and surface. It creates no recall, schedule, transfer, capability, or mastery evidence.
 
 `PracticeChallenge`
 : A versioned projection of one item shown to the learner. It contains no answer until the attempt boundary is crossed.
@@ -40,4 +46,4 @@
 
 ## Ownership
 
-Markdown owns learner prose. SQLite owns attempts, scheduler state, proposals, module receipts, XP events, and sync history. Project systems own commitments and milestones. Obsidian edits Markdown; Hermes may invoke contracts and supply approved context. No owner writes another owner's native state.
+Markdown owns learner prose. SQLite owns study events, attempts, scheduler state, proposals, module receipts, XP events, and sync history. Project systems own commitments and milestones. Obsidian edits Markdown; Hermes may invoke contracts and supply approved context. No owner writes another owner's native state.
