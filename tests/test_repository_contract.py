@@ -79,6 +79,8 @@ class PublicRepositoryContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         commands = (
+            "virtuoso --workspace PATH compose [--focus FOCUS] [--json]",
+            "virtuoso --workspace PATH compose decide --id PROPOSAL_ID",
             "virtuoso --workspace PATH learn --item ID",
             "virtuoso --workspace PATH queries focus [--json]",
             "virtuoso --workspace PATH queries history --item ITEM [--json]",
@@ -97,6 +99,8 @@ class PublicRepositoryContractTests(unittest.TestCase):
         schemas = (
             "virtuoso/item@0.2",
             "virtuoso/next-action@0.1",
+            "virtuoso/focus-proposal@0.1",
+            "virtuoso/learner-decision@0.1",
             "virtuoso/learning-state@0.1",
             "virtuoso/focus-performance@0.1",
             "virtuoso/item-history@0.1",

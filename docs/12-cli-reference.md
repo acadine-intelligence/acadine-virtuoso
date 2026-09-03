@@ -90,6 +90,28 @@ virtuoso --workspace PATH next [--focus FOCUS] [--json]
 
 Output schema: `virtuoso/next-action@0.1`. The flat envelope contains `action` (`learn` or `practice`), `item_id`, `title`, `focus`, `item_content_hash`, `learning_unit_hash`, `prompt`, `rationale`, `alternatives`, and `uncertainty`. A learn action returns `prompt: null`. A practice action returns the prompt so recall can begin. The answer and learning prose are never returned by `next`. `alternatives` retains the remaining item ids in rank order. `--focus` restricts the candidate set to one focus track. A focus with no due or new items fails closed with `Error: no learning item is due in focus '<name>'`.
 
+### `compose`
+
+Compose one evidence-aware practice proposal from current workspace evidence. The proposal identifies one primary challenge, cites the source events and item hashes used, explains skipped material, and states uncertainty. It never exposes the answer, hint, follow-up, or learning-unit prose before an attempt.
+
+```
+virtuoso --workspace PATH compose [--focus FOCUS] [--json]
+```
+
+Output schema: `virtuoso/focus-proposal@0.1`. The proposal contains `proposal_id`, `focus_scope`, `action` (`learn` or `practice`), `primary` (item id, title, focus, item content hash, learning unit hash, prompt for practice or null for learn), `source_event_ids`, `skipped` (each with `item_id`, `item_content_hash`, `reason`, `source_event_ids`), `alternatives`, `uncertainty`, `rationale`, and `occurred_at`.
+
+Selection policy: a pending learn-first item (no matching current study event) produces a `learn` proposal in deterministic item-id order. Otherwise the composition reads current schedules and attempt evidence: it targets the newest recorded gap (non-demonstrated result or attributable assistance such as a hint, worked feedback, follow-up, or administered attempt) across due, new, and scheduled items; otherwise it falls back to the deterministic due-then-new order used by `next`. A demonstrated item is skipped only with a traceable reason and cited attempt. Missing evidence produces the deterministic selection with an explicit `uncertainty` note. The same workspace snapshot, clock, and request produce the same proposal.
+
+Record the learner's decision before practicing from a proposal:
+
+```
+virtuoso --workspace PATH compose decide --id PROPOSAL_ID --decision accept|change|reject [--chosen-item ID] [--reason TEXT] [--json]
+virtuoso --workspace PATH compose show --id PROPOSAL_ID [--json]
+virtuoso --workspace PATH compose list [--status pending|decided|all] [--limit N] [--json]
+```
+
+`compose decide` output schema: `virtuoso/learner-decision@0.1`. `accept` uses the proposal primary; `change` requires a chosen active item from the same focus; `reject` takes no chosen item. One decision per proposal: a second decision fails with exit 2. At decide time the proposal's cited item hashes are revalidated against current workspace state; a stale hash fails closed and writes nothing. A decision appends only its own record: no attempt, scheduler, transfer, review-skip, capability, or mastery evidence. Practice from a proposal means invoking the existing `practice --item ID` with the decided item id.
+
 ### `learn`
 
 Read and explicitly finish one current learn-first item version.

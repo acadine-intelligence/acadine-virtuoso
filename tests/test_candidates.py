@@ -552,7 +552,7 @@ class StructuralCandidateTests(unittest.TestCase):
                 ).fetchall()
             }
             sources_after = db.execute("SELECT * FROM sources ORDER BY source_id").fetchall()
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
         self.assertTrue(
             {"candidate_runs", "review_candidates", "candidate_source_refs"}.issubset(tables)
         )

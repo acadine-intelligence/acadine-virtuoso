@@ -2,6 +2,12 @@
 
 Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased session composition
+
+`compose` returns an evidence-aware `virtuoso/focus-proposal@0.1`: one primary challenge with cited source events, item hashes, skipped material with traceable reasons, alternatives, uncertainty, and rationale. It targets the newest recorded gap before falling back to the deterministic due-then-new selection, and never exposes an answer before an attempt.
+
+`compose decide` records one append-only `virtuoso/learner-decision@0.1` per proposal with hash revalidation at decide time. A decision creates no attempt, scheduler, capability, or mastery evidence; practice from a proposal uses the existing `practice --item ID` command with the decided item.
+
 ## Unreleased learn-first workflow
 
 Learn-first items use `virtuoso/item@0.2` and carry a bounded learning unit before their prompt and hidden answer. `next --json` returns a typed `virtuoso/next-action@0.1` envelope. The local `learn` command records explicit completion as a hash-bound study event. Study does not start FSRS or create recall, transfer, capability, or mastery evidence. Existing `virtuoso/item@0.1` files remain recall-first.

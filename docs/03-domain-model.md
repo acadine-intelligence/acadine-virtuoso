@@ -41,8 +41,11 @@
 `ModuleReceipt`
 : Invocation metadata, validated response hash, duration, exit status, and error. It excludes secrets and private prompt content unless explicitly required by the module projection.
 
-`FocusProposal` and `LearnerDecision`
-: Future selection output and the explicit accept/change/reject event. A proposal never becomes a commitment by itself.
+`FocusProposal`
+: One evidence-aware session proposal: primary item, action, cited source events and item hashes, skipped material with traceable reasons, alternatives, uncertainty, and rationale. A proposal never becomes a commitment by itself.
+
+`LearnerDecision`
+: Append-only learner accept, change, or reject of one `FocusProposal`. It binds the chosen item to its current content hash at decide time and creates no attempt, scheduler, capability, or mastery evidence.
 
 ## Ownership
 
