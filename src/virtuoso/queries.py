@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .errors import VirtuosoError
+from .workload import WorkloadDataError, current_schedules, summarize_workload
 
 
 class QueryError(VirtuosoError):
@@ -173,44 +175,38 @@ def item_history(db_path: Path | str, item_id: str) -> list[ItemAttempt]:
     ]
 
 
-def workload_by_focus(db_path: Path | str) -> list[dict[str, Any]]:
+def workload_by_focus(
+    db_path: Path | str,
+    *,
+    now: datetime | None = None,
+    algorithm: str = "fsrs",
+    learning_context: str = "atomic-recall",
+) -> list[dict[str, Any]]:
     """Due-now and scheduled counts per focus (mirrors doctor workload:
-    each item's latest scheduler proposal decides due-now)."""
+    each item's current scheduler state decides due-now)."""
+    observed_at = now or datetime.now(timezone.utc)
     db = _connect_read_only(Path(db_path))
     try:
-        rows = db.execute(
-            """
-            SELECT i.focus AS focus,
-                   COUNT(DISTINCT i.item_id) AS items,
-                   COUNT(p.due_at) AS scheduled,
-                   SUM(CASE WHEN p.due_at <= datetime('now') THEN 1 ELSE 0 END) AS due_now
-            FROM items AS i
-            LEFT JOIN (
-                SELECT p.item_id, p.due_at
-                FROM scheduler_proposals AS p
-                WHERE p.created_at = (
-                    SELECT MAX(p2.created_at)
-                    FROM scheduler_proposals AS p2
-                    WHERE p2.item_id = p.item_id
-                )
-            ) AS p ON p.item_id = i.item_id
-            WHERE i.retired_at IS NULL
-            GROUP BY i.focus
-            ORDER BY i.focus
-            """
-        ).fetchall()
+        schedules = current_schedules(
+            db,
+            algorithm=algorithm,
+            learning_context=learning_context,
+        )
+        summary = summarize_workload(schedules, now=observed_at)
     except sqlite3.Error as exc:
         raise QueryError(f"workload query failed: {exc}") from exc
+    except WorkloadDataError as exc:
+        raise QueryError(str(exc)) from exc
     finally:
         db.close()
     return [
         {
-            "focus": row["focus"],
-            "items": row["items"],
-            "due_now": row["due_now"] or 0,
-            "scheduled": row["scheduled"] or 0,
+            "focus": entry.focus,
+            "items": entry.items,
+            "due_now": entry.due_now,
+            "scheduled": entry.scheduled,
         }
-        for row in rows
+        for entry in summary.focuses
     ]
 
 

@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from .errors import VirtuosoError
+from .workload import (
+    WorkloadDataError,
+    current_schedules,
+    require_aware_utc,
+    summarize_workload,
+)
 
 
 WORKSPACE_SCHEMA = "virtuoso/workspace@0.1"
@@ -3938,11 +3944,12 @@ class WorkspaceService:
         )
 
     def select_next(self, now: datetime, focus: str | None = None) -> SelectionResult:
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise WorkspaceError("selection timestamp must be timezone-aware")
+        try:
+            now_utc = require_aware_utc(now, label="selection timestamp")
+        except WorkloadDataError as exc:
+            raise WorkspaceError(str(exc)) from exc
         if focus is not None and not focus.strip():
             raise WorkspaceError("focus filter must be a non-empty string")
-        now_utc = now.astimezone(timezone.utc)
         scheduler = self.configuration().get("scheduler")
         if not isinstance(scheduler, dict):
             raise WorkspaceError("workspace scheduler configuration is missing")
@@ -3952,42 +3959,25 @@ class WorkspaceService:
             raise WorkspaceError("scheduler algorithm must be a non-empty string")
         if not isinstance(learning_context, str) or not learning_context:
             raise WorkspaceError("scheduler context must be a non-empty string")
-        query = """
-                SELECT i.item_id, p.due_at
-                FROM items AS i
-                LEFT JOIN scheduler_state AS s
-                  ON s.item_id = i.item_id
-                 AND s.algorithm = ?
-                 AND s.learning_context = ?
-                LEFT JOIN scheduler_proposals AS p
-                  ON p.source_event_id = s.source_event_id
-                """
-        params: list[object] = [algorithm, learning_context]
-        query += " WHERE i.retired_at IS NULL"
-        if focus is not None:
-            query += " AND i.focus = ?"
-            params.append(focus)
-        query += " ORDER BY i.item_id"
-        with self._connect() as db:
-            rows = db.execute(query, params).fetchall()
+        try:
+            with self._connect() as db:
+                schedules = current_schedules(
+                    db,
+                    algorithm=algorithm,
+                    learning_context=learning_context,
+                    focus=focus,
+                )
+        except WorkloadDataError as exc:
+            raise WorkspaceError(str(exc)) from exc
 
         due: list[tuple[datetime, str]] = []
         new: list[str] = []
-        for row in rows:
-            if row["due_at"] is None:
-                new.append(row["item_id"])
+        for schedule in schedules:
+            if schedule.due_at is None:
+                new.append(schedule.item_id)
                 continue
-            try:
-                due_at = self._parse_aware_datetime(
-                    row["due_at"], label="scheduler due timestamp"
-                )
-            except WorkspaceError as exc:
-                raise WorkspaceError(
-                    "invalid scheduler due timestamp for "
-                    f"item {row['item_id']}: {row['due_at']!r}"
-                ) from exc
-            if due_at <= now_utc:
-                due.append((due_at, row["item_id"]))
+            if schedule.due_at <= now_utc:
+                due.append((schedule.due_at, schedule.item_id))
 
         due.sort(key=lambda value: (value[0], value[1]))
         new.sort()
@@ -4054,36 +4044,24 @@ class WorkspaceService:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
-    def _workload_counts(self, now: datetime) -> dict[str, int]:
-        """Due-now / scheduled / new-item counts used by doctor and selection."""
-        now_utc = now.astimezone(timezone.utc)
-        with self._connect() as db:
-            rows = db.execute(
-                """
-                SELECT p.due_at FROM scheduler_proposals AS p
-                JOIN items AS i ON i.item_id = p.item_id
-                WHERE i.retired_at IS NULL
-                """
-            ).fetchall()
-            total_items = db.execute(
-                "SELECT COUNT(*) FROM items WHERE retired_at IS NULL"
-            ).fetchone()[0]
-        scheduled_total = 0
-        due_now = 0
-        for row in rows:
-            try:
-                due_at = self._parse_aware_datetime(
-                    row["due_at"], label="scheduler due timestamp"
+    def _workload_counts(
+        self, now: datetime, *, algorithm: str, learning_context: str
+    ) -> dict[str, int]:
+        """Doctor counts from the same current schedule projection as selection."""
+        try:
+            with self._connect() as db:
+                schedules = current_schedules(
+                    db,
+                    algorithm=algorithm,
+                    learning_context=learning_context,
                 )
-            except WorkspaceError:
-                continue
-            scheduled_total += 1
-            if due_at <= now_utc:
-                due_now += 1
+            summary = summarize_workload(schedules, now=now)
+        except WorkloadDataError as exc:
+            raise WorkspaceError(str(exc)) from exc
         return {
-            "due_now": due_now,
-            "scheduled_total": scheduled_total,
-            "new_items": max(total_items - scheduled_total, 0),
+            "due_now": summary.due_now,
+            "scheduled_total": summary.scheduled_total,
+            "new_items": summary.new_items,
         }
 
     _LEGACY_FILES = {
@@ -4101,7 +4079,7 @@ class WorkspaceService:
                 findings.append({"path": name, "reason": reason})
         return findings
 
-    def doctor(self) -> dict[str, Any]:
+    def doctor(self, now: datetime | None = None) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
         legacy_files = self._legacy_file_findings()
         config = self.configuration()
@@ -4189,7 +4167,12 @@ class WorkspaceService:
             and not stale_source_links
             and not legacy_files
         )
-        workload = self._workload_counts(datetime.now(timezone.utc))
+        scheduler = config["scheduler"]
+        workload = self._workload_counts(
+            now or datetime.now(timezone.utc),
+            algorithm=scheduler["algorithm"],
+            learning_context=scheduler["context"],
+        )
         return {
             "status": "healthy" if healthy else "needs-attention",
             "workspace_schema": config.get("schema"),

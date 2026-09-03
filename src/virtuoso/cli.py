@@ -563,11 +563,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if args.query_command == "workload":
+                scheduler = workspace.configuration()["scheduler"]
                 _emit(
                     {
                         "schema": "virtuoso/workload-by-focus@0.1",
                         "focuses": queries_module.workload_by_focus(
-                            workspace.db_path
+                            workspace.db_path,
+                            algorithm=scheduler["algorithm"],
+                            learning_context=scheduler["context"],
                         ),
                     },
                     as_json=args.json,

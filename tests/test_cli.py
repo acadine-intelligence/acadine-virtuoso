@@ -223,6 +223,48 @@ class CliJourneyTests(unittest.TestCase):
         self.assertEqual(administered["agent_help"], "light")
         self.assertTrue(administered["administered"])
 
+    def test_workload_query_uses_active_scheduler_context(self) -> None:
+        self._run("init", "--json")
+        self._add_testing_effect_item()
+        self._run(
+            "practice",
+            "--item",
+            "testing-effect",
+            "--administer",
+            "--response",
+            "Synthetic recalled answer.",
+            "--result",
+            "demonstrated",
+            "--confidence",
+            "4",
+            "--json",
+        )
+        config_path = self.workspace / "virtuoso.json"
+        config = json.loads(config_path.read_text())
+        config["scheduler"]["context"] = "project-transfer"
+        config_path.write_text(json.dumps(config))
+
+        doctor = json.loads(self._run("doctor", "--json").stdout)
+        workload = json.loads(
+            self._run("queries", "workload", "--json").stdout
+        )
+
+        self.assertEqual(
+            doctor["workload"],
+            {"due_now": 0, "scheduled_total": 0, "new_items": 1},
+        )
+        self.assertEqual(
+            workload["focuses"],
+            [
+                {
+                    "focus": "learning-science",
+                    "items": 1,
+                    "due_now": 0,
+                    "scheduled": 0,
+                }
+            ],
+        )
+
     def test_administered_practice_requires_transcription_flags(self) -> None:
         self._run("init", "--json")
         self._add_testing_effect_item()
