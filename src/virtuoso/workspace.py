@@ -45,7 +45,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 13
+_CURRENT_MIGRATION_VERSION = 14
 
 
 class WorkspaceError(VirtuosoError):
@@ -1096,6 +1096,91 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'study_events is append-only');
                 END""",
+            # Migration 14: session composition proposals and learner decisions.
+            """CREATE TABLE IF NOT EXISTS composition_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                focus_scope TEXT,
+                action TEXT NOT NULL CHECK(action IN ('learn', 'practice')),
+                primary_item_id TEXT NOT NULL
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                payload_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS composition_proposal_items (
+                proposal_id TEXT NOT NULL
+                    REFERENCES composition_proposals(proposal_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                item_id TEXT NOT NULL
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                item_content_hash TEXT NOT NULL CHECK(length(item_content_hash) = 64),
+                PRIMARY KEY (proposal_id, item_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS composition_decisions (
+                decision_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL UNIQUE
+                    REFERENCES composition_proposals(proposal_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                decision TEXT NOT NULL CHECK(decision IN ('accept', 'change', 'reject')),
+                chosen_item_id TEXT
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                chosen_item_content_hash TEXT CHECK(
+                    chosen_item_content_hash IS NULL OR length(chosen_item_content_hash) = 64
+                ),
+                reason TEXT,
+                occurred_at TEXT NOT NULL,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (decision = 'accept'
+                     AND chosen_item_id IS NOT NULL
+                     AND chosen_item_content_hash IS NOT NULL)
+                    OR (decision = 'change'
+                        AND chosen_item_id IS NOT NULL
+                        AND chosen_item_content_hash IS NOT NULL)
+                    OR (decision = 'reject'
+                        AND chosen_item_id IS NULL
+                        AND chosen_item_content_hash IS NULL)
+                )
+            )""",
+            """CREATE TRIGGER composition_proposals_reject_update
+                BEFORE UPDATE ON composition_proposals
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_proposals is append-only');
+                END""",
+            """CREATE TRIGGER composition_proposals_reject_delete
+                BEFORE DELETE ON composition_proposals
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_proposals is append-only');
+                END""",
+            """CREATE TRIGGER composition_proposal_items_reject_update
+                BEFORE UPDATE ON composition_proposal_items
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_proposal_items is append-only');
+                END""",
+            """CREATE TRIGGER composition_proposal_items_reject_delete
+                BEFORE DELETE ON composition_proposal_items
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_proposal_items is append-only');
+                END""",
+            """CREATE TRIGGER composition_decisions_reject_update
+                BEFORE UPDATE ON composition_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_decisions is append-only');
+                END""",
+            """CREATE TRIGGER composition_decisions_reject_delete
+                BEFORE DELETE ON composition_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'composition_decisions is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1109,6 +1194,9 @@ class WorkspaceService:
         # Migration 13 adds derived item learning metadata and an append-only
         # study ledger. Existing item rows become recall-first and no study
         # evidence is invented.
+        # Migration 14 adds append-only session composition proposals and
+        # learner decisions. Existing workspaces gain empty tables and no
+        # proposal or decision evidence is invented.
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             objects = {
@@ -1173,7 +1261,8 @@ class WorkspaceService:
                 10: statements[31:48],
                 11: statements[48:52],
                 12: statements[52:55],
-                13: statements[55:],
+                13: statements[55:60],
+                14: statements[60:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:

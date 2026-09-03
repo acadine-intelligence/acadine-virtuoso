@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .candidates import CandidateService
+from .composition import CompositionError, SessionComposer
 from .errors import VirtuosoError
 from .learning import LearningService
 from .practice import PracticeIO, PracticeService
@@ -79,6 +80,29 @@ def _parser() -> argparse.ArgumentParser:
     next_command = commands.add_parser("next", help="recommend the next item")
     next_command.add_argument("--focus", help="restrict selection to one focus track")
     next_command.add_argument("--json", action="store_true")
+
+    compose = commands.add_parser(
+        "compose", help="compose one evidence-aware practice proposal"
+    )
+    compose_commands = compose.add_subparsers(dest="compose_command")
+    compose_commands.add_parser("decide", help="record a learner decision on a proposal")
+    compose_decide = compose_commands.choices["decide"]
+    compose_decide.add_argument("--id", required=True)
+    compose_decide.add_argument("--decision", choices=("accept", "change", "reject"), required=True)
+    compose_decide.add_argument("--chosen-item")
+    compose_decide.add_argument("--reason")
+    compose_decide.add_argument("--json", action="store_true")
+    compose_commands.add_parser("show", help="show one proposal and its decision")
+    compose_show = compose_commands.choices["show"]
+    compose_show.add_argument("--id", required=True)
+    compose_show.add_argument("--json", action="store_true")
+    compose_commands.add_parser("list", help="list composition proposals")
+    compose_list = compose_commands.choices["list"]
+    compose_list.add_argument("--status", choices=("pending", "decided", "all"), default="pending")
+    compose_list.add_argument("--limit", type=int, default=10)
+    compose_list.add_argument("--json", action="store_true")
+    compose.add_argument("--focus", help="restrict composition to one focus track")
+    compose.add_argument("--json", action="store_true")
 
     learn = commands.add_parser(
         "learn", help="read and explicitly finish one learn-first item"
@@ -456,6 +480,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 as_json=args.json,
             )
+            return 0
+        if args.command == "compose":
+            composer = SessionComposer(workspace)
+            if args.compose_command == "decide":
+                decision = composer.decide(
+                    proposal_id=args.id,
+                    decision=args.decision,
+                    chosen_item_id=args.chosen_item,
+                    reason=args.reason,
+                    now=datetime.now(timezone.utc),
+                    surface="cli",
+                )
+                _emit(decision.to_dict(), as_json=args.json)
+                return 0
+            if args.compose_command == "show":
+                _emit(composer.show(proposal_id=args.id), as_json=args.json)
+                return 0
+            if args.compose_command == "list":
+                _emit(
+                    composer.list(status=args.status, limit=args.limit),
+                    as_json=args.json,
+                )
+                return 0
+            proposal = composer.compose(
+                now=datetime.now(timezone.utc), focus=args.focus
+            )
+            _emit(proposal.to_dict(), as_json=args.json)
             return 0
         if args.command == "learn":
             LearningService(workspace).run(

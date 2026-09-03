@@ -81,8 +81,26 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_composition_to_v13(db: sqlite3.Connection) -> None:
+    """Remove migration 14 composition state from a fresh test database."""
+    for trigger in (
+        "composition_proposals_reject_update",
+        "composition_proposals_reject_delete",
+        "composition_proposal_items_reject_update",
+        "composition_proposal_items_reject_delete",
+        "composition_decisions_reject_update",
+        "composition_decisions_reject_delete",
+    ):
+        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    db.execute("DROP TABLE IF EXISTS composition_decisions")
+    db.execute("DROP TABLE IF EXISTS composition_proposal_items")
+    db.execute("DROP TABLE IF EXISTS composition_proposals")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 14")
+
+
 def downgrade_learning_to_v12(db: sqlite3.Connection) -> None:
     """Remove migration 13 learning state from a fresh test database."""
+    downgrade_composition_to_v13(db)
     db.execute("DROP TRIGGER IF EXISTS study_events_reject_update")
     db.execute("DROP TRIGGER IF EXISTS study_events_reject_delete")
     db.execute("DROP TABLE IF EXISTS study_events")
