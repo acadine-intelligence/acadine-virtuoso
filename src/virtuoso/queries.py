@@ -63,10 +63,14 @@ class ItemAttempt:
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         raise QueryError(f"workspace database not found: {db_path}")
-    uri = f"file:{db_path}?mode=ro"
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    db: sqlite3.Connection | None = None
     try:
         db = sqlite3.connect(uri, uri=True)
+        db.execute("PRAGMA query_only = 1")
     except sqlite3.Error as exc:
+        if db is not None:
+            db.close()
         raise QueryError(f"cannot open workspace database read-only: {exc}") from exc
     db.row_factory = sqlite3.Row
     return db
