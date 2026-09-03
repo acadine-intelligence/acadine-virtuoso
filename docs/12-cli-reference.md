@@ -132,6 +132,7 @@ virtuoso --workspace PATH practice --item ID [--agent-help none|light|substantia
 
 Interactive protocol (stdout prompts, stdin answers, in order):
 
+0. Context lines before the first interaction: `Focus: <focus>` (when the item has a focus), `Projects: <ids>` (only from explicit transfer records), and `Why now: <reason>` (when a reason is available). The reason mirrors the review queue rule when the item is the queue's first entry (`Selected the earliest due item; ties use item id.` or `Selected a new item in deterministic item-id order.`) and reads `Selected by explicit item request.` otherwise. Display only: no state changes.
 1. `Notes open? [y/N]:`: `y` or `n` (default n).
 2. The challenge title and prompt are shown. The answer is not.
 3. `Your recall:`: free-text attempt. The time to first answer is recorded as `initial_latency_ms`.

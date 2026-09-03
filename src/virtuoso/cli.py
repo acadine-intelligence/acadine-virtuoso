@@ -14,7 +14,7 @@ from .composition import CompositionError, SessionComposer
 from .errors import VirtuosoError
 from .learning import LearningService
 from .practice import PracticeIO, PracticeService
-from .review import ReviewError
+from .review import ReviewError, ReviewService
 from .workspace import WorkspaceError, WorkspaceService
 
 
@@ -32,6 +32,38 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         return
     for key, value in payload.items():
         print(f"{key}: {value}")
+
+
+def _practice_display_context(
+    workspace: WorkspaceService, item_id: str
+) -> dict[str, Any]:
+    """Derive display-only practice context from the review queue rule.
+
+    Reads state only. The reason mirrors the review queue's deterministic
+    wording when the item is the queue's first entry and names an explicit
+    request otherwise. Project identifiers come only from transfer records.
+    """
+    reason: str | None = None
+    try:
+        queue = ReviewService(workspace).due()
+    except VirtuosoError:
+        queue = []
+    if queue:
+        first = queue[0]
+        if first.item_id == item_id:
+            reason = first.selection_reason
+        else:
+            reason = "Selected by explicit item request."
+    project_ids = tuple(
+        event.project_id
+        for event in workspace.list_transfer_events()
+        if event.item_id == item_id
+    )
+    seen: list[str] = []
+    for project_id in project_ids:
+        if project_id not in seen:
+            seen.append(project_id)
+    return {"selection_reason": reason, "project_ids": tuple(seen)}
 
 
 def _parse_cli_timestamp(value: str, *, field: str) -> datetime:
@@ -567,10 +599,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ", ".join(supplied)
                     + " only apply to agent-administered practice; add --administer"
                 )
+            context = _practice_display_context(workspace, args.item)
             PracticeService(workspace).run(
                 item_id=args.item,
                 io=ConsoleIO(),
                 agent_help=args.agent_help or "none",
+                selection_reason=context["selection_reason"],
+                project_ids=context["project_ids"],
             )
             return 0
         if args.command == "attempts":
