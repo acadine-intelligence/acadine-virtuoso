@@ -32,12 +32,6 @@ coverage/
 *.backup
 *.orig
 *.pre-*
-.buildos/verification/*.json
-.buildos/verification/logs/
-.buildos/reviews/*.json
-!.buildos/verification/.gitkeep
-!.buildos/reviews/.gitkeep
-
 # Editor and OS
 .DS_Store
 .idea/

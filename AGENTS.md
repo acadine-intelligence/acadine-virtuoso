@@ -1,22 +1,30 @@
-# Acadine Virtuoso — agent execution contract
+# Virtuoso agent instructions
 
-## Reality rule
-This project is not complete because code exists, a page renders, or a demo was shown. `product.json` and Build OS verification evidence define its actual state.
+## Start here
 
-## Canonical entry
-1. Read `product.json`.
-2. Set `BUILDOS_HOME` to the local Build OS checkout (default: `$HOME/projects/acadine-build-os`).
-3. Run `python3 "$BUILDOS_HOME/scripts/buildos.py" check . --target architecture` before substantial implementation.
-4. Work in a dedicated Git branch/worktree after a reviewed baseline.
-5. Implement vertical, user-visible slices with tests written first.
-6. Run all declared commands with `python3 "$BUILDOS_HOME/scripts/buildos.py" verify .`.
-7. Run an independent review of the exact Git commit, record its JSON verdict with `python3 "$BUILDOS_HOME/scripts/buildos.py" review . --file /path/to/review.json`, and execute a representative end-to-end user journey; use authenticated browser evidence only when `experience.surfaces` declares a visual interface.
+1. Read `README.md`, `CONTRIBUTING.md`, `product.json`, and the relevant GitHub issue.
+2. Compare the issue contract with current `main`. Record any conflict before changing code.
+3. Check open pull requests and branches for overlapping work.
+4. Create a dedicated branch or worktree from current `main`.
+5. Write a failing regression test before changing behavior.
+6. Use synthetic temporary workspaces. Keep private learner content, credentials, local paths, and runtime databases outside the repository.
+7. Run every applicable command in `CONTRIBUTING.md` and `.github/workflows/ci.yml`.
+8. Run a representative local journey for the changed surface.
+9. Ask a reviewer who did not implement the change to inspect the exact commit.
 
-## Stop conditions
-- Do not build when value, research, product, experience, or architecture gates are blocked.
-- Do not use placeholders, invented evidence, generic demo data, or claims unsupported by a real run.
-- Do not call a demo `released`.
-- Do not push, publish, spend money, send messages, or use private data externally without explicit approval.
+The repository files and public CI define the reproducible workflow. Historical verification records describe earlier revisions and do not add current contributor requirements.
+
+## Completion
+
+A change is ready for human review when its issue acceptance cases pass, the applicable public checks pass, and the diff contains only intended files. Record the exact commit and any remaining risk. Keep a pull request as a draft until its required review and CI checks pass.
+
+## Authority boundaries
+
+- The CLI owns scheduler changes and learning evidence writes.
+- Markdown owns learner-authored prose. SQLite owns derived state and append-only evidence.
+- Optional Obsidian and Hermes adapters must preserve the standalone CLI path.
+- External actions and use of private data require explicit approval.
 
 ## Product boundary
-Kind: `standalone`. Define the Hermes/product ownership boundary in `docs/04-architecture.md` and `product.json` before integration work.
+
+Virtuoso is a standalone local tool. `docs/04-architecture.md` and `product.json` define the ownership boundary between the core, adapters, and user-controlled workspaces.

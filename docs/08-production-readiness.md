@@ -16,7 +16,7 @@ SQLite migrations run transactionally. Before any future destructive migration, 
 
 ## Release evidence
 
-Required before release: clean-environment installation, public CI, Build OS verification, representative journeys, exact-commit independent review, migration and restore proof, user acceptance, known limitations, and an approved distribution decision.
+Required before release: clean-environment installation, public CI, reproducible repository checks, representative journeys, exact-commit independent review, migration and restore proof, user acceptance, known limitations, and an approved distribution decision.
 
 ## Distribution boundary
 
