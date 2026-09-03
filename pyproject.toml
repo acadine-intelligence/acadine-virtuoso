@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acadine-virtuoso"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Local-first active-recall and adaptive-practice CLI"
 readme = "README.md"
 requires-python = ">=3.11"

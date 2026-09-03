@@ -2,7 +2,7 @@
 
 Hermes agent tools wrapping the installed `virtuoso` CLI (`acadine-virtuoso`
 package). The plugin shells out with `--json`; it holds no scheduling logic of
-its own.
+its own. This is an optional adapter. The CLI remains the canonical interface.
 
 ## Tools
 
@@ -43,6 +43,8 @@ plugins:
 
 Default workspace: `~/.virtuoso/workspace`. Override it with the `workspace:`
 plugin setting.
+
+The plugin and Python package follow the same `0.1.0` release version.
 
 ## Result and argument contract
 

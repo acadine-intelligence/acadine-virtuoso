@@ -1,0 +1,167 @@
+name: Prepare draft release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Require main
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reject any other ref
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: test "$WORKFLOW_REF" = "refs/heads/main"
+
+  required-ci:
+    name: Required CI
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Build verified assets
+    needs: required-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare fixed build directories
+        run: |
+          set -euo pipefail
+          test ! -L dist
+          test ! -L build
+          test ! -L plugins/obsidian/main.js
+          rm -rf dist build
+          rm -f plugins/obsidian/main.js
+          mkdir -p dist/python
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: plugins/obsidian/package-lock.json
+
+      - name: Install Python build tools
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e . "build==1.6.0"
+
+      - name: Validate source versions
+        run: .venv/bin/python scripts/release_artifacts.py version
+
+      - name: Build Python distributions
+        run: .venv/bin/python -m build --sdist --wheel --outdir dist/python
+
+      - name: Install plugin dependencies
+        working-directory: plugins/obsidian
+        run: npm ci
+
+      - name: Type-check plugin
+        working-directory: plugins/obsidian
+        run: npm run typecheck
+
+      - name: Test plugin
+        working-directory: plugins/obsidian
+        run: npm test
+
+      - name: Build plugin
+        working-directory: plugins/obsidian
+        run: npm run build
+
+      - name: Assemble release assets
+        run: .venv/bin/python scripts/release_artifacts.py assemble
+
+      - name: Verify release assets
+        run: .venv/bin/python scripts/release_artifacts.py verify
+
+      - name: Upload exact release directory
+        uses: actions/upload-artifact@v7
+        with:
+          name: virtuoso-release-${{ github.sha }}
+          path: dist/release
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    name: Create draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out exact workflow commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Download exact release directory
+        uses: actions/download-artifact@v8
+        with:
+          name: virtuoso-release-${{ github.sha }}
+          path: dist/release
+
+      - name: Reverify downloaded assets
+        run: python scripts/release_artifacts.py verify
+
+      - name: Refuse an existing tag or release
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(python scripts/release_artifacts.py version)
+          if git rev-parse --verify --quiet "refs/tags/v$VERSION"; then
+            echo "Tag v$VERSION already exists" >&2
+            exit 1
+          fi
+
+          RELEASE_TAGS=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[].tag_name')
+          if printf '%s\n' "$RELEASE_TAGS" | grep -Fxq "v$VERSION"; then
+            echo "Release v$VERSION already exists" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          gh release create "v$VERSION" dist/release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --draft \
+            --latest=false \
+            --title "v$VERSION" \
+            --notes-file "docs/releases/v$VERSION.md"

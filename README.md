@@ -88,7 +88,7 @@ Offline here means Obsidian, the installed CLI, and the local workspace work wit
 
 ## Extension boundary
 
-External modules use a JSON-over-stdin/stdout protocol with explicit per-call consent, no shell indirection, bounded output, and fail-closed process limits. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. They are trusted local executables and should be reviewed before use.
+External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. Calling code must opt in for each run with `allow_trusted=True`. There is no public CLI command for module execution and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use.
 
 ## What Virtuoso does not do
 
@@ -100,6 +100,7 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 
 ## Documentation
 
+- [Documentation index](docs/README.md): current guides and supporting records
 - `docs/12-cli-reference.md`: every command, flag, JSON shape and exit code
 - `docs/13-agent-usage.md`: how agents drive the CLI
 - `docs/10-learning-research.md`: the research basis and its limits
@@ -111,7 +112,7 @@ External modules use a JSON-over-stdin/stdout protocol with explicit per-call co
 
 ## Status
 
-Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the implemented behavior.
+Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the implemented behavior. A maintainer can manually run the release workflow after required CI to prepare a draft `v0.1.0` GitHub Release. The workflow does not publish to a package registry or deploy the product.
 
 ## Verify
 

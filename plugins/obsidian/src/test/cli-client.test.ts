@@ -177,7 +177,7 @@ describe("VirtuosoCliClient", () => {
 		runner.results.push(
 			{
 				exitCode: 0,
-				stdout: "0.1.0.dev0\n",
+				stdout: "0.1.0\n",
 				stderr: "",
 			},
 			{
@@ -198,7 +198,7 @@ describe("VirtuosoCliClient", () => {
 		);
 
 		await expect(client.checkSetup()).resolves.toEqual({
-			version: "0.1.0.dev0",
+			version: "0.1.0",
 			workspaceStatus: "healthy",
 			workspaceSchema: "virtuoso/workspace@0.1",
 			database: "ok",
@@ -220,7 +220,7 @@ describe("VirtuosoCliClient", () => {
 	it("fails the setup check on an unsupported workspace schema", async () => {
 		const runner = new FakeRunner();
 		runner.results.push(
-			{ exitCode: 0, stdout: "0.1.0.dev0\n", stderr: "" },
+			{ exitCode: 0, stdout: "0.1.0\n", stderr: "" },
 			{
 				exitCode: 0,
 				stdout: JSON.stringify({

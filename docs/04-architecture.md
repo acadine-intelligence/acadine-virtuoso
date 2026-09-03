@@ -8,21 +8,34 @@ Virtuoso is a standalone Python 3.11 CLI and importable library. A learner point
 learner / harness
       |
       v
-CLI -> application services -> domain ports
-                     |-> Markdown item repository
-                     |-> SQLite evidence and scheduler store
-                     |-> built-in FSRS adapter
-                     `-> external command module runner
+cli.py -> workspace, practice, candidate, review, query, and search services
+             |-> Markdown item files
+             |-> SQLite evidence, scheduler state, and derived search index
+             |-> built-in FSRS adapter
+             `-> external command module runner
 
-optional read projections: Obsidian vault, Hermes context, project systems
+optional local interfaces: Obsidian plugin and Hermes plugin
 ```
 
-## Package boundaries
+## Current Python modules
 
-- `domain`: immutable values, evidence semantics, scheduler and module contracts. No filesystem or SQLite imports.
-- `application`: initialize, add item, select, practise, record recall and project-transfer events, and append delayed transfer-check predictions/completions.
-- `infrastructure`: Markdown, SQLite, FSRS serialization, clock, external process runner.
-- `cli`: argument parsing, prompts, JSON output, exit codes.
+The package is flat. These files are the implemented boundaries:
+
+- `__init__.py`: installed package version lookup.
+- `candidates.py`: source-backed candidate generation and review decisions.
+- `cli.py`: argument parsing, prompts, JSON output, and exit codes.
+- `errors.py`: the shared public error family.
+- `modules.py`: trusted external command manifests and execution.
+- `practice.py`: active-recall sessions and FSRS proposals.
+- `queries.py`: read-only evidence and workload projections.
+- `review.py`: versioned review contracts for local interfaces.
+- `search.py`: lexical and caller-supplied-vector retrieval.
+- `workload.py`: shared current-schedule workload projection.
+- `workspace.py`: workspace files, SQLite schema, sources, evidence, and transfers.
+
+## Target design
+
+The future package design may separate domain and application layers. It may also isolate infrastructure. These layers do not exist as Python packages in v0.1.0. A later split must preserve the current CLI behavior, storage ownership, and versioned JSON contracts.
 
 ## Obsidian review boundary
 
@@ -62,7 +75,7 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables; this boundary is not an OS sandbox. They run with the invoking user's permissions and require explicit consent. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables; this boundary is not an OS sandbox. They run with the invoking user's permissions. Calling code must opt in for each run with `allow_trusted=True`. There is no public CLI command for module execution and no consent dialog. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
 
 Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 

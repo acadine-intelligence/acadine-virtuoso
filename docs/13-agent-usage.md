@@ -1,6 +1,6 @@
 # Agent usage guide
 
-How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Virtuoso. No MCP server, no plugin: the CLI with `--json` is the integration surface. This document is written to be pasted into an agent's context or linked from an `AGENTS.md`.
+How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Virtuoso. The CLI with `--json` is the canonical integration surface. The optional Hermes plugin wraps four common CLI journeys. The optional Obsidian plugin provides a local review interface. This document can be pasted into an agent's context or linked from an `AGENTS.md`.
 
 ## The five rules
 
@@ -24,6 +24,14 @@ Translate learner intent into commands like this:
 | "Quiz me in chat" / learner answered out-of-band | `practice --item X --administer --response "..." --result ... --confidence N --json` (agent transcribes; latency stored as unknown) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |
 | "Is my workspace healthy?" | `doctor --json` |
+| "Compare outcomes by focus" | `queries focus --json` |
+| "Show the history for this item" | `queries history --item ITEM --json` |
+| "How much is due in each focus?" | `queries workload --json` |
+| "Which source links are stale?" | `queries stale-links --json` |
+| "Find items containing these words" | `search lex --query TEXT --limit N --json` |
+| "Store this item's embedding" | `search embed --item ITEM --model MODEL --vector JSON --json` |
+| "Find semantically similar items" | `search sem --model MODEL --vector JSON --limit N --json` |
+| "Is the retrieval index current?" | `search status --json` |
 | "Connect my Obsidian vault / notes folder" | `source add --id ... --kind obsidian|markdown --path ROOT --json` |
 | "Re-index my notes" | `source scan --id ... --json` |
 | "What notes do you see?" | `source notes --id ... --json` |

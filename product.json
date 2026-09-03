@@ -75,7 +75,7 @@
       "Given a manually authored recall item, when the learner starts practice, then the prompt appears before answer or feedback, elapsed recall time is captured by the program, and the answer is revealed only after an explicit attempt.",
       "Given a failed or partial attempt, when the learner requests support, then Virtuoso follows retry unaided, optional hint, worked feedback, and smaller follow-up challenge while recording exactly which support was used.",
       "Given a completed attempt, when it is recorded, then correctness, latency, confidence, context, open-notes state, and help attribution are appended to SQLite evidence without claiming competence, and the scheduler proposal records algorithm, version, configuration, and learning context.",
-      "Given a declared trusted local executable, when Virtuoso loads and explicitly invokes it, then unknown fields or schema versions, undeclared capabilities, shell commands, missing consent, malformed or oversized output, timeout, and private-state projections fail closed while a valid typed proposal is hash-bound to the manifest bytes loaded before execution.",
+      "Given a declared trusted local executable, when calling code invokes it with allow_trusted=True, then unknown fields or schema versions, undeclared capabilities, shell commands, missing calling-code opt-in, malformed or oversized output, timeout, and private-state projections fail closed while a valid typed proposal is hash-bound to the manifest bytes loaded before execution. There is no public CLI command for module execution.",
       "Given the same fixture workspace, intent, and clock, when selection runs twice, then it returns the same ranked action and explanation; missing inputs produce explicit uncertainty rather than invented readiness.",
       "Given an explicit Markdown or Obsidian source root, when the learner connects and scans it, then Virtuoso stores only bounded note metadata, hashes, and wikilinks, never writes to the source, never copies note bodies into SQLite, and rejects Markdown symlinks.",
       "Given a learning item linked to an indexed note hash, when that note changes or disappears, then doctor reports the stale provenance link without deleting the learning item or source prose.",
@@ -164,7 +164,7 @@
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
   },
   "release": {
-    "version": "0.1.0-dev",
+    "version": "0.1.0",
     "user_acceptance": {
       "status": "pending",
       "evidence": ""
@@ -172,7 +172,7 @@
     "known_limitations": [
       "The active-recall CLI, read-only Markdown/Obsidian source index, reviewed curriculum and item import, project-transfer evidence, delayed transfer checks, local analytics, and item retrieval are implemented. A real two-week dogfood run remains pending.",
       "Connected sources provide path-scoped metadata, wikilinks, hash provenance, stale-link detection, and reviewed imports. Delayed transfer checks remain manually authored. Explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization remain future work.",
-      "The repository is public and source-checkout installation works. A package registry release and end-user upgrade path remain pending."
+      "The repository is public and source-checkout installation works. A manual workflow can prepare a draft v0.1.0 GitHub Release after required CI. No package registry release or end-user upgrade path exists yet."
     ]
   },
   "adoption": {
