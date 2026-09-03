@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .errors import VirtuosoError
+from .learning_state import (
+    LearningActionState,
+    LearningStateDataError,
+    current_learning_states,
+)
 from .workload import (
     WorkloadDataError,
     current_schedules,
@@ -25,6 +30,7 @@ from .workload import (
 
 WORKSPACE_SCHEMA = "virtuoso/workspace@0.1"
 ITEM_SCHEMA = "virtuoso/item@0.1"
+LEARN_FIRST_ITEM_SCHEMA = "virtuoso/item@0.2"
 _ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
@@ -39,7 +45,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 12
+_CURRENT_MIGRATION_VERSION = 13
 
 
 class WorkspaceError(VirtuosoError):
@@ -53,6 +59,8 @@ class ItemSummary:
     focus: str
     path: Path
     content_hash: str
+    entry_mode: str = "recall-first"
+    learning_unit_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,11 +75,15 @@ class LearningItem:
     hint: str | None
     follow_up: str | None
     learning_context: str = "atomic-recall"
+    entry_mode: str = "recall-first"
+    learning_unit: str | None = None
+    learning_unit_hash: str | None = None
 
 
 @dataclass(frozen=True)
 class SelectionResult:
     item: LearningItem
+    action: str
     rationale: str
     alternatives: tuple[str, ...]
     uncertainty: str | None = None
@@ -1048,6 +1060,42 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'review_skips is append-only');
                 END""",
+            """ALTER TABLE items ADD COLUMN entry_mode TEXT NOT NULL
+                DEFAULT 'recall-first'
+                CHECK(entry_mode IN ('recall-first', 'learn-first'))""",
+            """ALTER TABLE items ADD COLUMN learning_unit_hash TEXT
+                CHECK(
+                    (entry_mode = 'recall-first' AND learning_unit_hash IS NULL)
+                    OR
+                    (
+                        entry_mode = 'learn-first'
+                        AND learning_unit_hash IS NOT NULL
+                        AND length(learning_unit_hash) = 64
+                    )
+                )""",
+            """CREATE TABLE IF NOT EXISTS study_events (
+                event_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                item_content_hash TEXT NOT NULL CHECK(length(item_content_hash) = 64),
+                learning_unit_hash TEXT NOT NULL CHECK(length(learning_unit_hash) = 64),
+                occurred_at TEXT NOT NULL,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(item_id, item_content_hash, learning_unit_hash)
+            )""",
+            """CREATE TRIGGER study_events_reject_update
+                BEFORE UPDATE ON study_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'study_events is append-only');
+                END""",
+            """CREATE TRIGGER study_events_reject_delete
+                BEFORE DELETE ON study_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'study_events is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1058,6 +1106,9 @@ class WorkspaceService:
         # rebuild copies rows verbatim, backfills administered = 0 for all
         # pre-existing evidence, and renames tables in place so fresh and
         # migrated databases produce identical schema text.
+        # Migration 13 adds derived item learning metadata and an append-only
+        # study ledger. Existing item rows become recall-first and no study
+        # evidence is invented.
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             objects = {
@@ -1121,7 +1172,8 @@ class WorkspaceService:
                 9: statements[28:31],
                 10: statements[31:48],
                 11: statements[48:52],
-                12: statements[52:],
+                12: statements[52:55],
+                13: statements[55:],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -3288,6 +3340,8 @@ class WorkspaceService:
         answer: str,
         hint: str | None = None,
         follow_up: str | None = None,
+        entry_mode: str = "recall-first",
+        learning_unit: str | None = None,
     ) -> ItemSummary:
         self._validate_owned_paths(require_database=True)
         if not _ITEM_ID.fullmatch(item_id):
@@ -3303,7 +3357,24 @@ class WorkspaceService:
         empty = [name for name, value in required.items() if not value.strip()]
         if empty:
             raise WorkspaceError(f"required item fields are empty: {', '.join(empty)}")
-        authored = [title, focus, prompt, answer, hint or "", follow_up or ""]
+        if entry_mode not in {"recall-first", "learn-first"}:
+            raise WorkspaceError("entry mode must be recall-first or learn-first")
+        normalized_learning_unit = (
+            learning_unit.strip() if learning_unit and learning_unit.strip() else None
+        )
+        if entry_mode == "learn-first" and normalized_learning_unit is None:
+            raise WorkspaceError("learn-first items require a non-empty learning unit")
+        if entry_mode == "recall-first" and normalized_learning_unit is not None:
+            raise WorkspaceError("recall-first items must not declare a learning unit")
+        authored = [
+            title,
+            focus,
+            prompt,
+            answer,
+            hint or "",
+            follow_up or "",
+            normalized_learning_unit or "",
+        ]
         if any(re.search(r"(?m)^# ", value) for value in authored):
             raise WorkspaceError(
                 "item fields must not contain top-level Markdown headings; use ## or plain text"
@@ -3323,8 +3394,15 @@ class WorkspaceService:
             answer=answer.strip(),
             hint=hint.strip() if hint and hint.strip() else None,
             follow_up=follow_up.strip() if follow_up and follow_up.strip() else None,
+            entry_mode=entry_mode,
+            learning_unit=normalized_learning_unit,
         )
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        learning_unit_hash = (
+            hashlib.sha256(normalized_learning_unit.encode("utf-8")).hexdigest()
+            if normalized_learning_unit is not None
+            else None
+        )
         file_identity: tuple[int, int] | None = None
         try:
             with self._connect() as db:
@@ -3338,10 +3416,20 @@ class WorkspaceService:
                 )
                 db.execute(
                     """
-                    INSERT INTO items(item_id, title, focus, relative_path, content_hash)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO items(
+                        item_id, title, focus, relative_path, content_hash,
+                        entry_mode, learning_unit_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (item_id, title.strip(), focus.strip(), f"items/{path.name}", content_hash),
+                    (
+                        item_id,
+                        title.strip(),
+                        focus.strip(),
+                        f"items/{path.name}",
+                        content_hash,
+                        entry_mode,
+                        learning_unit_hash,
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
             if file_identity is not None:
@@ -3362,6 +3450,8 @@ class WorkspaceService:
             focus=focus.strip(),
             path=path,
             content_hash=content_hash,
+            entry_mode=entry_mode,
+            learning_unit_hash=learning_unit_hash,
         )
 
     def retire_item(self, item_id: str) -> str:
@@ -3387,11 +3477,55 @@ class WorkspaceService:
             )
         return "retired"
 
+    @classmethod
+    def _learning_contract_from_text(
+        cls, text: str
+    ) -> tuple[str, str | None, str | None]:
+        lines = text.splitlines()
+        if not lines or lines[0] != "---":
+            raise WorkspaceError("learning item is missing YAML frontmatter")
+        try:
+            frontmatter_end = lines.index("---", 1)
+        except ValueError as exc:
+            raise WorkspaceError("learning item has incomplete YAML frontmatter") from exc
+        fields: dict[str, str] = {}
+        for line in lines[1:frontmatter_end]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            key, separator, value = line.partition(":")
+            if not separator or not key.strip() or key.strip() in fields:
+                raise WorkspaceError("learning item frontmatter is malformed")
+            fields[key.strip()] = value.strip()
+
+        schema = fields.get("schema")
+        learning_headings = len(re.findall(r"(?m)^# Learning unit\s*$", text))
+        if schema == ITEM_SCHEMA:
+            if "entry-mode" in fields or learning_headings:
+                raise WorkspaceError(
+                    "virtuoso/item@0.1 must not declare learn-first metadata"
+                )
+            return "recall-first", None, None
+        if schema != LEARN_FIRST_ITEM_SCHEMA:
+            raise WorkspaceError(f"unsupported learning item schema: {schema!r}")
+        if fields.get("entry-mode") != "learn-first":
+            raise WorkspaceError(
+                "virtuoso/item@0.2 requires entry-mode: learn-first"
+            )
+        if learning_headings != 1:
+            raise WorkspaceError(
+                "learn-first item must contain exactly one Learning unit section"
+            )
+        learning_unit = cls._section(text, "Learning unit", required=True)
+        assert learning_unit is not None
+        learning_unit_hash = hashlib.sha256(learning_unit.encode("utf-8")).hexdigest()
+        return "learn-first", learning_unit, learning_unit_hash
+
     def load_item(self, item_id: str) -> LearningItem:
         self._validate_owned_paths(require_database=True)
         with self._connect() as db:
             row = db.execute(
-                "SELECT item_id, title, focus, relative_path, content_hash "
+                "SELECT item_id, title, focus, relative_path, content_hash, "
+                "entry_mode, learning_unit_hash "
                 "FROM items WHERE item_id = ?",
                 (item_id,),
             ).fetchone()
@@ -3415,6 +3549,16 @@ class WorkspaceService:
             raise WorkspaceError(
                 f"item is stale because its Markdown changed: {item_id}; sync it before practice"
             )
+        entry_mode, learning_unit, learning_unit_hash = self._learning_contract_from_text(
+            text
+        )
+        if (
+            row["entry_mode"] != entry_mode
+            or row["learning_unit_hash"] != learning_unit_hash
+        ):
+            raise WorkspaceError(
+                f"item learning metadata does not match the workspace index: {item_id}"
+            )
 
         return LearningItem(
             item_id=row["item_id"],
@@ -3426,7 +3570,166 @@ class WorkspaceService:
             answer=self._section(text, "Answer", required=True),
             hint=self._section(text, "Hint", required=False),
             follow_up=self._section(text, "Follow-up challenge", required=False),
+            entry_mode=entry_mode,
+            learning_unit=learning_unit,
+            learning_unit_hash=learning_unit_hash,
         )
+
+    def learning_states(self, *, focus: str | None = None) -> tuple[LearningActionState, ...]:
+        try:
+            with self._connect() as db:
+                return current_learning_states(db, focus=focus)
+        except (LearningStateDataError, sqlite3.Error) as exc:
+            raise WorkspaceError(f"learning state is unavailable: {exc}") from exc
+
+    def learning_state(self, item_id: str) -> LearningActionState:
+        try:
+            with self._connect() as db:
+                states = current_learning_states(db, item_id=item_id)
+                if states:
+                    return states[0]
+                row = db.execute(
+                    "SELECT retired_at FROM items WHERE item_id = ?", (item_id,)
+                ).fetchone()
+        except (LearningStateDataError, sqlite3.Error) as exc:
+            raise WorkspaceError(f"learning state is unavailable: {exc}") from exc
+        if row is None:
+            raise WorkspaceError(f"no learning item with id: {item_id}")
+        raise WorkspaceError(f"learning item is retired: {item_id}")
+
+    def require_practice_ready(self, item_id: str) -> LearningActionState:
+        state = self.learning_state(item_id)
+        if state.action != "practice":
+            raise WorkspaceError(
+                f"item requires learning before practice: {item_id}; run the learn command first"
+            )
+        return state
+
+    @staticmethod
+    def _require_practice_ready_row(
+        db: sqlite3.Connection, row: sqlite3.Row, *, item_id: str
+    ) -> None:
+        if row["entry_mode"] == "recall-first":
+            return
+        if row["entry_mode"] != "learn-first" or row["learning_unit_hash"] is None:
+            raise WorkspaceError(f"invalid learning state for item: {item_id}")
+        studied = db.execute(
+            """SELECT 1 FROM study_events
+               WHERE item_id = ?
+                 AND item_content_hash = ?
+                 AND learning_unit_hash = ?""",
+            (item_id, row["content_hash"], row["learning_unit_hash"]),
+        ).fetchone()
+        if studied is None:
+            raise WorkspaceError(
+                f"item requires learning before practice: {item_id}; run the learn command first"
+            )
+
+    def record_study_completion(
+        self,
+        *,
+        item_id: str,
+        item_content_hash: str,
+        learning_unit_hash: str | None,
+        occurred_at: datetime,
+        surface: str,
+    ) -> dict[str, object]:
+        if not isinstance(item_content_hash, str) or re.fullmatch(
+            r"[0-9a-f]{64}", item_content_hash
+        ) is None:
+            raise WorkspaceError("study item content hash must be a SHA-256 value")
+        if not isinstance(learning_unit_hash, str) or re.fullmatch(
+            r"[0-9a-f]{64}", learning_unit_hash
+        ) is None:
+            raise WorkspaceError("study learning-unit hash must be a SHA-256 value")
+        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            raise WorkspaceError("study completion timestamp must be timezone-aware")
+        if not isinstance(surface, str) or not 1 <= len(surface) <= 64:
+            raise WorkspaceError("study surface must contain 1 to 64 characters")
+        current = self.load_item(item_id)
+        if (
+            current.entry_mode != "learn-first"
+            or current.content_hash != item_content_hash
+            or current.learning_unit_hash != learning_unit_hash
+        ):
+            raise WorkspaceError(
+                f"stale learning content; reload the item before completing study: {item_id}"
+            )
+        event = {
+            "event_id": f"study-{uuid.uuid4().hex}",
+            "item_id": item_id,
+            "item_content_hash": item_content_hash,
+            "learning_unit_hash": learning_unit_hash,
+            "occurred_at": occurred_at.astimezone(timezone.utc).isoformat(),
+            "surface": surface,
+        }
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    """SELECT content_hash, relative_path, entry_mode,
+                              learning_unit_hash, retired_at
+                       FROM items WHERE item_id = ?""",
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(f"no learning item with id: {item_id}")
+                if row["retired_at"] is not None:
+                    raise WorkspaceError(f"learning item is retired: {item_id}")
+                if (
+                    row["entry_mode"] != "learn-first"
+                    or row["content_hash"] != item_content_hash
+                    or row["learning_unit_hash"] != learning_unit_hash
+                ):
+                    raise WorkspaceError(
+                        f"stale learning content; reload the item before completing study: {item_id}"
+                    )
+                self._require_current_item_content_hash(
+                    item_id=item_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=item_content_hash,
+                    action="completing study",
+                )
+                exists = db.execute(
+                    """SELECT 1 FROM study_events
+                       WHERE item_id = ?
+                         AND item_content_hash = ?
+                         AND learning_unit_hash = ?""",
+                    (item_id, item_content_hash, learning_unit_hash),
+                ).fetchone()
+                if exists is not None:
+                    raise WorkspaceError(
+                        f"learning already completed for current item version: {item_id}"
+                    )
+                db.execute(
+                    """INSERT INTO study_events(
+                           event_id, item_id, item_content_hash,
+                           learning_unit_hash, occurred_at, surface
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    tuple(event.values()),
+                )
+                self._require_current_item_content_hash(
+                    item_id=item_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=item_content_hash,
+                    action="completing study",
+                )
+        except sqlite3.IntegrityError as exc:
+            raise WorkspaceError(
+                f"learning already completed for current item version: {item_id}"
+            ) from exc
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"study event could not be appended: {exc}") from exc
+        return {**event, "claims_mastery": False}
+
+    def list_study_events(self) -> list[dict[str, object]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT event_id, item_id, item_content_hash,
+                          learning_unit_hash, occurred_at, surface
+                   FROM study_events ORDER BY occurred_at, event_id"""
+            ).fetchall()
+        return [{**dict(row), "claims_mastery": False} for row in rows]
 
     def scheduler_snapshot(
         self, *, item_id: str, algorithm: str, learning_context: str
@@ -3604,7 +3907,9 @@ class WorkspaceService:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             item_row = db.execute(
-                "SELECT content_hash, relative_path FROM items WHERE item_id = ?",
+                """SELECT content_hash, relative_path, entry_mode,
+                          learning_unit_hash
+                   FROM items WHERE item_id = ?""",
                 (attempt["item_id"],),
             ).fetchone()
             if item_row is None:
@@ -3620,6 +3925,9 @@ class WorkspaceService:
                 relative_path=item_row["relative_path"],
                 expected_hash=attempt["item_content_hash"],
                 action="recording",
+            )
+            self._require_practice_ready_row(
+                db, item_row, item_id=attempt["item_id"]
             )
             row = db.execute(
                 "SELECT source_event_id, state_json, algorithm_version, configuration_json "
@@ -3805,7 +4113,9 @@ class WorkspaceService:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute(
-                    "SELECT content_hash, relative_path FROM items WHERE item_id = ?",
+                    """SELECT content_hash, relative_path, entry_mode,
+                              learning_unit_hash
+                       FROM items WHERE item_id = ?""",
                     (item_id,),
                 ).fetchone()
                 if row is None:
@@ -3820,6 +4130,7 @@ class WorkspaceService:
                     expected_hash=item_content_hash,
                     action="skipping",
                 )
+                self._require_practice_ready_row(db, row, item_id=item_id)
                 db.execute(
                     """
                     INSERT INTO review_skips(
@@ -4032,12 +4343,21 @@ class WorkspaceService:
         selected_id = candidates[0]
         scope = f" within focus '{focus}'" if focus is not None else ""
         if due and selected_id == due[0][1]:
-            rationale = f"Selected the earliest due item{scope}; ties use item id."
+            ranking_rationale = f"Selected the earliest due item{scope}; ties use item id."
         else:
-            rationale = f"Selected a new item in deterministic item-id order{scope}."
+            ranking_rationale = (
+                f"Selected a new item in deterministic item-id order{scope}."
+            )
+        item = self.load_item(selected_id)
+        learning_state = self.learning_state(selected_id)
         return SelectionResult(
-            item=self.load_item(selected_id),
-            rationale=rationale,
+            item=item,
+            action=learning_state.action,
+            rationale=(
+                ranking_rationale
+                if item.entry_mode == "recall-first"
+                else f"{ranking_rationale} {learning_state.rationale}"
+            ),
             alternatives=tuple(candidates[1:]),
         )
 
@@ -4136,6 +4456,13 @@ class WorkspaceService:
             transfer_count = db.execute(
                 "SELECT COUNT(*) FROM transfer_events"
             ).fetchone()[0]
+            study_event_count = db.execute(
+                "SELECT COUNT(*) FROM study_events"
+            ).fetchone()[0]
+            try:
+                learning_states = current_learning_states(db)
+            except LearningStateDataError as exc:
+                raise WorkspaceError(f"learning state is unavailable: {exc}") from exc
             source_links = db.execute(
                 """
                 SELECT l.item_id, l.source_id, l.source_relative_path,
@@ -4220,6 +4547,15 @@ class WorkspaceService:
             "attempts": attempt_count,
             "proposals": proposal_count,
             "transfer_events": transfer_count,
+            "study_events": study_event_count,
+            "learning": {
+                "waiting_for_learning": sum(
+                    state.action == "learn" for state in learning_states
+                ),
+                "ready_for_practice": sum(
+                    state.action == "practice" for state in learning_states
+                ),
+            },
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
             "legacy_files": legacy_files,
@@ -4246,25 +4582,25 @@ class WorkspaceService:
         answer: str,
         hint: str | None,
         follow_up: str | None,
+        entry_mode: str = "recall-first",
+        learning_unit: str | None = None,
     ) -> str:
+        schema = LEARN_FIRST_ITEM_SCHEMA if entry_mode == "learn-first" else ITEM_SCHEMA
         lines = [
             "---",
-            f"schema: {ITEM_SCHEMA}",
+            f"schema: {schema}",
             f"id: {json.dumps(item_id)}",
             f"title: {json.dumps(title, ensure_ascii=False)}",
             f"focus: {json.dumps(focus, ensure_ascii=False)}",
             "practice-format: active-recall",
             "learning-context: atomic-recall",
-            "---",
-            "",
-            "# Prompt",
-            "",
-            prompt,
-            "",
-            "# Answer",
-            "",
-            answer,
         ]
+        if entry_mode == "learn-first":
+            lines.append("entry-mode: learn-first")
+        lines.extend(["---", ""])
+        if learning_unit is not None:
+            lines.extend(["# Learning unit", "", learning_unit, ""])
+        lines.extend(["# Prompt", "", prompt, "", "# Answer", "", answer])
         if hint:
             lines.extend(["", "# Hint", "", hint])
         if follow_up:

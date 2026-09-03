@@ -79,9 +79,11 @@ class PublicRepositoryContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         commands = (
+            "virtuoso --workspace PATH learn --item ID",
             "virtuoso --workspace PATH queries focus [--json]",
             "virtuoso --workspace PATH queries history --item ITEM [--json]",
             "virtuoso --workspace PATH queries workload [--json]",
+            "virtuoso --workspace PATH queries learning [--json]",
             "virtuoso --workspace PATH queries stale-links [--json]",
             "virtuoso --workspace PATH search lex --query TEXT [--limit N] [--json]",
             "virtuoso --workspace PATH search embed --item ITEM --model MODEL",
@@ -93,6 +95,9 @@ class PublicRepositoryContractTests(unittest.TestCase):
             "virtuoso --workspace PATH review skip --json",
         )
         schemas = (
+            "virtuoso/item@0.2",
+            "virtuoso/next-action@0.1",
+            "virtuoso/learning-state@0.1",
             "virtuoso/focus-performance@0.1",
             "virtuoso/item-history@0.1",
             "virtuoso/workload-by-focus@0.1",
@@ -122,6 +127,8 @@ class PublicRepositoryContractTests(unittest.TestCase):
             "candidates.py",
             "cli.py",
             "errors.py",
+            "learning.py",
+            "learning_state.py",
             "modules.py",
             "practice.py",
             "queries.py",

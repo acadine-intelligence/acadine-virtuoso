@@ -2,6 +2,12 @@
 
 Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased learn-first workflow
+
+Learn-first items use `virtuoso/item@0.2` and carry a bounded learning unit before their prompt and hidden answer. `next --json` returns a typed `virtuoso/next-action@0.1` envelope. The local `learn` command records explicit completion as a hash-bound study event. Study does not start FSRS or create recall, transfer, capability, or mastery evidence. Existing `virtuoso/item@0.1` files remain recall-first.
+
+The Obsidian review queue omits pending learn-first items. The learning step remains CLI-only in this slice.
+
 ## v0.1.0 release candidate
 
 Date: 2026-09-03

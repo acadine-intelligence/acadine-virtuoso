@@ -81,8 +81,24 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_learning_to_v12(db: sqlite3.Connection) -> None:
+    """Remove migration 13 learning state from a fresh test database."""
+    db.execute("DROP TRIGGER IF EXISTS study_events_reject_update")
+    db.execute("DROP TRIGGER IF EXISTS study_events_reject_delete")
+    db.execute("DROP TABLE IF EXISTS study_events")
+    columns = {
+        row[1] for row in db.execute("PRAGMA table_info(items)").fetchall()
+    }
+    if "learning_unit_hash" in columns:
+        db.execute("ALTER TABLE items DROP COLUMN learning_unit_hash")
+    if "entry_mode" in columns:
+        db.execute("ALTER TABLE items DROP COLUMN entry_mode")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 13")
+
+
 def downgrade_candidate_decisions_to_v10(db: sqlite3.Connection) -> None:
     """Restore the candidate decision table to its pre-migration-11 shape."""
+    downgrade_learning_to_v12(db)
     db.execute("DROP TRIGGER IF EXISTS review_skips_reject_update")
     db.execute("DROP TRIGGER IF EXISTS review_skips_reject_delete")
     db.execute("DROP TABLE IF EXISTS review_skips")

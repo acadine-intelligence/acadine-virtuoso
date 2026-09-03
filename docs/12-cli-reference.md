@@ -17,7 +17,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. |
+| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `LearningError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. |
 
 Commands either complete and return 0 or return 2 without a partial state change.
 
@@ -47,17 +47,18 @@ Check workspace health: database integrity, item freshness, source-link stalenes
 virtuoso --workspace PATH doctor [--json]
 ```
 
-JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `stale_items`, `stale_source_links`, `legacy_files`, `workspace_schema`, `workload`. Each `legacy_files` entry has `path`, `reason`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) answers "how much is left today": items whose current scheduler proposal is due, items with a current schedule, and items never attempted (the new pool `next` draws from). Read-only: never mutates evidence and never silently repairs missing schema objects.
+JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `study_events`, `learning`, `stale_items`, `stale_source_links`, `legacy_files`, `workspace_schema`, `workload`. Each `legacy_files` entry has `path`, `reason`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) reports current scheduler state. The `learning` object reports `waiting_for_learning` and `ready_for_practice` across active items. `study_events` counts all retained study history. The command is read-only. It never repairs missing schema objects or changes evidence.
 
 ## Items
 
 ### `add`
 
-Add one active-recall item. Writes human-owned Markdown under `workspace/items/` and indexes it.
+Add one recall-first or learn-first item. Virtuoso writes human-owned Markdown under `workspace/items/` and indexes it.
 
 ```
 virtuoso --workspace PATH add --id ID --title TITLE --focus FOCUS \
-  --prompt PROMPT --answer ANSWER [--hint HINT] [--follow-up FOLLOW_UP] [--json]
+  --prompt PROMPT --answer ANSWER [--hint HINT] [--follow-up FOLLOW_UP] \
+  [--entry-mode recall-first|learn-first] [--learning-unit TEXT] [--json]
 ```
 
 Retire an item when it no longer earns its place: removed from selection and workload counts, Markdown and evidence untouched, reversible only by direct database edit.
@@ -74,22 +75,34 @@ JSON output keys: `item_id`, `status` (`retired` on first call, `already-retired
 - `--answer`: the reference answer, hidden until reveal.
 - `--hint`: optional nudge shown only on request.
 - `--follow-up`: optional smaller challenge offered after a non-demonstrated result.
+- `--entry-mode`: defaults to `recall-first`. Use `learn-first` when the material is unfamiliar and needs explicit study before recall.
+- `--learning-unit`: required with `learn-first` and rejected with `recall-first`. It contains the explanation and examples shown by `learn`.
 
-JSON output: `{"item_id", "title", "focus", "path"}`.
+Recall-first items retain `virtuoso/item@0.1`. Learn-first items use `virtuoso/item@0.2`, add `entry-mode: learn-first`, and require `# Learning unit`, `# Prompt`, and `# Answer` sections. The learning-unit hash covers the parsed, trimmed learning prose. JSON output: `{"item_id", "title", "focus", "path", "content_hash", "entry_mode", "learning_unit_hash"}`.
 
 ### `next`
 
-Recommend the next item to practice. Deterministic and explained.
+Recommend the next learning or practice action. Selection is deterministic and explained.
 
 ```
 virtuoso --workspace PATH next [--focus FOCUS] [--json]
 ```
 
-JSON output: `{"item_id", "title", "focus", "prompt", "rationale", "alternatives", "uncertainty"}`. The `prompt` is included so a session can start immediately; the answer is never included. `rationale` states why this item was selected; `alternatives` lists the remaining candidates in order. `--focus` restricts the candidate set to one focus track (e.g. `next --focus languages-go`); the rationale names the scope, and a focus with no due or new items fails closed with `Error: no learning item is due in focus '<name>'`.
+Output schema: `virtuoso/next-action@0.1`. The flat envelope contains `action` (`learn` or `practice`), `item_id`, `title`, `focus`, `item_content_hash`, `learning_unit_hash`, `prompt`, `rationale`, `alternatives`, and `uncertainty`. A learn action returns `prompt: null`. A practice action returns the prompt so recall can begin. The answer and learning prose are never returned by `next`. `alternatives` retains the remaining item ids in rank order. `--focus` restricts the candidate set to one focus track. A focus with no due or new items fails closed with `Error: no learning item is due in focus '<name>'`.
+
+### `learn`
+
+Read and explicitly finish one current learn-first item version.
+
+```
+virtuoso --workspace PATH learn --item ID
+```
+
+The command displays the exact learning unit. It does not show the recall prompt or answer and does not start a recall timer. At `Finish this learning step? [finish / stop]:`, `finish` appends one hash-bound study event. Read output carries `claims_mastery: false` as a constant semantic boundary. `stop` exits 0 without writing an event. EOF or keyboard interruption returns exit 2 without writing an event. A completed study event changes no attempt, scheduler, transfer, capability, or mastery state. Running `learn` again for the same exact version fails clearly. A changed item or learning-unit hash requires a new learning completion while preserving old history.
 
 ### `practice`
 
-Run one interactive active-recall session for an item.
+Run one interactive active-recall session for an item. A pending learn-first item is rejected before the prompt loop begins.
 
 ```
 virtuoso --workspace PATH practice --item ID [--agent-help none|light|substantial|unknown]
@@ -141,7 +154,7 @@ List due and new items without answer content:
 virtuoso --workspace PATH review due --json
 ```
 
-Output schema: `virtuoso/review-queue@0.1`. Each item has `item_id`, `content_hash`, `focus`, `project_ids`, `selection_reason`, `status` (`due` or `new`), and `due_at`. The selection reason uses the same scheduler rule as `next`. Project IDs come from explicit transfer records. New items use `null` for `due_at`. Future items stay outside the queue.
+Output schema: `virtuoso/review-queue@0.1`. Each item has `item_id`, `content_hash`, `focus`, `project_ids`, `selection_reason`, `status` (`due` or `new`), and `due_at`. The selection reason uses the same scheduler rule as `next`. Project IDs come from explicit transfer records. New items use `null` for `due_at`. Future items and learn-first items waiting for study stay outside the queue.
 
 Load one content snapshot:
 
@@ -181,7 +194,7 @@ printf '%s' "$SKIP_JSON" | \
 
 Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
 
-Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
+Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. They reject a learn-first item that has no matching study event. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
 
 JSON failures use `virtuoso/review-error@0.1` on stderr:
 
@@ -199,7 +212,7 @@ Show recorded evidence and scheduler proposals.
 virtuoso --workspace PATH attempts [--json]
 ```
 
-JSON output: `{"attempts": [...], "proposals": [...], "skips": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`. Skips carry the item hash, timestamp, and source surface. A skip never changes scheduler state.
+JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
 
 ## Read-only analytics
 
@@ -228,6 +241,14 @@ virtuoso --workspace PATH queries workload [--json]
 ```
 
 Output schema: `virtuoso/workload-by-focus@0.1`. The top-level `focuses` array contains `focus`, `items`, `scheduled`, and `due_now`. Workload uses the configured scheduler algorithm and learning context. It counts only the proposal selected by current scheduler state, so proposal history cannot inflate the result.
+
+### `queries learning`
+
+```
+virtuoso --workspace PATH queries learning [--json]
+```
+
+Output schema: `virtuoso/learning-state@0.1`. The top-level `items` array contains each active item's `item_id`, `focus`, `entry_mode`, `item_content_hash`, `learning_unit_hash`, typed `action`, `reason_code`, `rationale`, and matching `study_completed_at`. A study event counts only when both current hashes match. This command opens SQLite read-only.
 
 ### `queries stale-links`
 

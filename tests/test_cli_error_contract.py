@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from virtuoso import VirtuosoError
 from virtuoso.cli import main
+from virtuoso.learning import LearningError
 from virtuoso.modules import ModuleError
 from virtuoso.practice import PracticeError
 from virtuoso.queries import QueryError
@@ -53,6 +54,7 @@ class CliErrorContractTests(unittest.TestCase):
     def test_public_error_family_covers_every_domain_error(self) -> None:
         for error_type in (
             WorkspaceError,
+            LearningError,
             PracticeError,
             ModuleError,
             SearchError,

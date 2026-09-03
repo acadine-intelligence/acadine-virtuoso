@@ -15,6 +15,7 @@ Queries answer the questions a learner or agent actually asks:
 - focus performance (per-focus attempt counts, results, confidence mean)
 - item history (every attempt for one item, newest first)
 - due workload per focus
+- typed learning action state for every active item
 - stale source links (the same finding ``doctor`` reports, queryable)
 
 Honesty rules carried over from the CLI: administered attempts are
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import VirtuosoError
+from .learning_state import LearningStateDataError, current_learning_states
 from .workload import WorkloadDataError, current_schedules, summarize_workload
 
 
@@ -208,6 +210,20 @@ def workload_by_focus(
         }
         for entry in summary.focuses
     ]
+
+
+def learning_state(db_path: Path | str) -> list[dict[str, Any]]:
+    """Typed next action and exact study identity for each active item."""
+    db = _connect_read_only(Path(db_path))
+    try:
+        states = current_learning_states(db)
+    except sqlite3.Error as exc:
+        raise QueryError(f"learning-state query failed: {exc}") from exc
+    except LearningStateDataError as exc:
+        raise QueryError(str(exc)) from exc
+    finally:
+        db.close()
+    return [state.to_dict() for state in states]
 
 
 def stale_links(db_path: Path | str) -> list[dict[str, str]]:

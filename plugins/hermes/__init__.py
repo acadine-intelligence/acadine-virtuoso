@@ -122,7 +122,7 @@ def virtuoso_due(ctx, focus: str | None = None) -> str:
 
 
 def virtuoso_next(ctx, focus: str | None = None) -> str:
-    """The single recommended practice item (Virtuoso recommendation policy)."""
+    """The single recommended learning or practice action."""
     focus_option, focus_error = _focus_option(focus)
     if focus_error:
         return focus_error
@@ -176,7 +176,7 @@ _TOOLS = (
         "virtuoso_due",
         {
             "name": "virtuoso_due",
-            "description": "Show Virtuoso work due now: recommended next recall item plus delayed transfer checks. Read-only.",
+            "description": "Show Virtuoso work due now: typed next learning or practice action plus delayed transfer checks. Read-only.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -191,7 +191,7 @@ _TOOLS = (
         "virtuoso_next",
         {
             "name": "virtuoso_next",
-            "description": "Get the single recommended Virtuoso practice item per the recommendation policy (due retention first, then transfer, then new material). Read-only.",
+            "description": "Get the single typed Virtuoso learning or practice action with its selection reason. Read-only.",
             "parameters": {
                 "type": "object",
                 "properties": {

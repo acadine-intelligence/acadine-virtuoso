@@ -18,6 +18,7 @@ from conftest import (
     V9_SCHEDULER_STATE,
     downgrade_attempt_chain_to_v9,
     downgrade_candidate_decisions_to_v10,
+    downgrade_learning_to_v12,
 )
 from virtuoso.workspace import WorkspaceError, WorkspaceService
 
@@ -140,7 +141,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (12,))
+            self.assertEqual(migration, (13,))
 
     def test_v11_to_v12_migration_preserves_items_and_adds_skip_ledger(self) -> None:
         service = WorkspaceService.init(self.root)
@@ -152,7 +153,11 @@ class WorkspaceServiceTests(unittest.TestCase):
             answer="Every existing item.",
         )
         with sqlite3.connect(service.db_path) as db:
-            before = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            before = db.execute(
+                """SELECT item_id, title, focus, relative_path, content_hash, created_at
+                   FROM items ORDER BY item_id"""
+            ).fetchall()
+            downgrade_learning_to_v12(db)
             db.execute("DROP TRIGGER IF EXISTS review_skips_reject_update")
             db.execute("DROP TRIGGER IF EXISTS review_skips_reject_delete")
             db.execute("DROP TABLE IF EXISTS review_skips")
@@ -161,7 +166,10 @@ class WorkspaceServiceTests(unittest.TestCase):
         reopened = WorkspaceService.open(self.root)
 
         with sqlite3.connect(reopened.db_path) as db:
-            after = db.execute("SELECT * FROM items ORDER BY item_id").fetchall()
+            after = db.execute(
+                """SELECT item_id, title, focus, relative_path, content_hash, created_at
+                   FROM items ORDER BY item_id"""
+            ).fetchall()
             versions = [
                 row[0]
                 for row in db.execute(
@@ -179,7 +187,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ).fetchall()
             }
         self.assertEqual(after, before)
-        self.assertEqual(versions, list(range(1, 13)))
+        self.assertEqual(versions, list(range(1, 14)))
         self.assertEqual(review_table, ("table",))
         self.assertEqual(
             review_triggers,
@@ -213,7 +221,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 13)),
+                list(range(1, 14)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -547,7 +555,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -886,7 +894,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             state = db.execute(
                 "SELECT source_event_id, state_json FROM scheduler_state"
             ).fetchall()
-        self.assertEqual(versions, list(range(1, 13)))
+        self.assertEqual(versions, list(range(1, 14)))
         self.assertEqual(
             attempt,
             [

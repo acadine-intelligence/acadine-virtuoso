@@ -68,7 +68,10 @@ class CliJourneyTests(unittest.TestCase):
         self.assertEqual(added["item_id"], "testing-effect")
 
         next_item = json.loads(self._run("next", "--json").stdout)
+        self.assertEqual(next_item["schema"], "virtuoso/next-action@0.1")
+        self.assertEqual(next_item["action"], "practice")
         self.assertEqual(next_item["item_id"], "testing-effect")
+        self.assertIsNone(next_item["learning_unit_hash"])
         self.assertNotIn("answer", next_item)
 
         practised = self._run(

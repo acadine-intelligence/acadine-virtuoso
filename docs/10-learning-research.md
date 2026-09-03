@@ -6,15 +6,25 @@ This note records the evidence used to shape Virtuoso. It is a design input, not
 
 ## Supported design choices
 
-### Test before teaching
+### Attempt recall before feedback
 
-Practice should require an attempted retrieval before revealing the answer. Meta-analyses report a reliable testing effect in laboratory and classroom settings, although effect size depends on test format, feedback, delay, and the final assessment.
+Once material is ready for practice, the learner should attempt retrieval before seeing the answer. Meta-analyses report a reliable testing effect in laboratory and classroom settings, although effect size depends on test format, feedback, delay, and the final assessment.
 
 Design consequence: the prompt appears before feedback; blank recall cannot be marked demonstrated; hints, open notes, and agent help stay attached to the attempt.
 
 Sources:
 - Yang et al. (2021), “Testing (quizzing) boosts classroom learning,” systematic review and meta-analysis. https://doi.org/10.1037/bul0000309
 - Adesope, Trevisan, and Sundararajan (2017), “Rethinking the Use of Tests,” meta-analysis. https://doi.org/10.3102/0034654316689306
+
+### Keep first exposure separate from scored recall
+
+Retrieval practice concerns information the learner has studied. Pretesting can improve later learning even when the learner initially answers incorrectly, yet the pretest and later study remain distinct events. A beginner also needs a direct path to read and encode unfamiliar material before Virtuoso treats a response as recall evidence.
+
+Design consequence: an item can declare `learn-first`. The learning unit appears before any recall attempt, and explicit completion records exposure only. FSRS begins after the first real practice attempt. A later diagnostic pretest would need its own event type.
+
+Sources:
+- Kornell, Hays, and Bjork (2009), “Unsuccessful retrieval attempts enhance subsequent learning.” https://pubmed.ncbi.nlm.nih.gov/19751074
+- Pastötter and Bäuml (2014), “Retrieval practice enhances new learning.” https://pmc.ncbi.nlm.nih.gov/articles/PMC3983480
 
 ### Space retrieval and adapt cautiously
 
