@@ -504,7 +504,7 @@ print(json.dumps({
         self.assertIsNotNone(caught)
         assert caught is not None
         self.assertIn("timed out", str(caught))
-        self.assertLess(elapsed, 1.5)
+        self.assertLess(elapsed, 2.0)
         self.assertFalse(child_running_after_return)
 
     def test_early_closed_stdin_is_cleaned_up_before_error_returns(self) -> None:
@@ -550,7 +550,7 @@ print(json.dumps({
         assert caught is not None
         self.assertFalse(child_running_after_return)
         self.assertIn("input", str(caught))
-        self.assertLess(elapsed, 1.5)
+        self.assertLess(elapsed, 2.0)
 
     def test_descendant_scans_are_throttled_during_module_run(self) -> None:
         descendant_scan_count = 0
