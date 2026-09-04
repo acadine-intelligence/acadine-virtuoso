@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import sqlite3
+import textwrap
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -97,6 +98,8 @@ class PracticeService:
         io: PracticeIO,
         now: datetime | None = None,
         agent_help: str = "none",
+        selection_reason: str | None = None,
+        project_ids: tuple[str, ...] = (),
     ) -> PracticeResult:
         if agent_help not in _AGENT_HELP:
             raise PracticeError(
@@ -116,6 +119,12 @@ class PracticeService:
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
 
+        self._write_context(
+            io,
+            item=item,
+            selection_reason=selection_reason,
+            project_ids=project_ids,
+        )
         open_notes = self._ask_yes_no(io, "Notes open? [y/N]: ")
         io.write(f"Challenge: {item.title}")
         io.write(item.prompt)
@@ -577,6 +586,42 @@ class PracticeService:
             if answer in {"y", "yes"}:
                 return True
             io.write("Enter yes or no.")
+
+    @staticmethod
+    def _write_context(
+        io: PracticeIO,
+        *,
+        item: LearningItem,
+        selection_reason: str | None,
+        project_ids: tuple[str, ...],
+    ) -> None:
+        """Print display-only context before the first interaction.
+
+        Reads nothing and writes no state. Focus prints when present,
+        projects only from explicit caller-supplied identifiers, and the
+        reason only when one was provided. Long text wraps at 80 columns.
+        """
+        focus = getattr(item, "focus", "")
+        if isinstance(focus, str) and focus.strip():
+            for line in textwrap.wrap(
+                f"Focus: {focus.strip()}", width=80
+            ) or ["Focus: "]:
+                io.write(line)
+        cleaned_projects = [
+            project.strip()
+            for project in project_ids
+            if isinstance(project, str) and project.strip()
+        ]
+        if cleaned_projects:
+            for line in textwrap.wrap(
+                "Projects: " + ", ".join(cleaned_projects), width=80
+            ):
+                io.write(line)
+        if selection_reason is not None and selection_reason.strip():
+            for line in textwrap.wrap(
+                f"Why now: {selection_reason.strip()}", width=80
+            ):
+                io.write(line)
 
     @staticmethod
     def _ask_confidence(io: PracticeIO) -> int:

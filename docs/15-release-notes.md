@@ -2,6 +2,10 @@
 
 Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased practice context display
+
+Interactive CLI practice now shows `Focus:`, optional `Projects:`, and `Why now:` before the first interaction. Project identifiers come only from explicit transfer records. The reason mirrors the review queue's deterministic wording, or names an explicit item request. The context display reads state only and writes nothing. The Obsidian plugin already showed the same context through the review contracts.
+
 ## Unreleased session composition
 
 `compose` returns an evidence-aware `virtuoso/focus-proposal@0.1`: one primary challenge with cited source events, item hashes, skipped material with traceable reasons, alternatives, uncertainty, and rationale. It targets the newest recorded gap before falling back to the deterministic due-then-new selection, and never exposes an answer before an attempt.
