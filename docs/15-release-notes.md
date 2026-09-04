@@ -1,34 +1,36 @@
 # Release notes
 
-The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases. Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. These notes record public repository milestones and the checks that accompanied them.
+The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases (tag at `1df2c99`, published 2026-09-04). Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. Sections under "Included in v0.1.0" landed before the tag. These notes record public repository milestones and the checks that accompanied them.
 
 ## Unreleased Obsidian projection
 
 `export obsidian --out DIR` writes one frontmatter-only Markdown stub per review-queue item into a folder outside the workspace, plus a manifest, so Obsidian Bases can show the workspace due queue with no second scheduler. Stubs carry item id, title, focus, status, next review, project ids, content hash, and generation time; no answer or hint content is exported. The command refuses targets inside the workspace, symlinks, and folders holding files it did not generate, and removes stubs for items that left the queue. Repeated runs at the same instant are byte-identical. Closes #45.
 
-## Unreleased benchmark-directed focus
+## Included in v0.1.0
+
+### Benchmark-directed focus
 
 `benchmark import` stores a local benchmark artifact as append-only evidence: tested commit, harness and version, model, prompt hash, tool permissions, environment, and normalized observations against a versioned operating-level map. `benchmark propose` turns the earliest unproposed failed criterion into an evidence-cited FocusProposal with rerun condition. `benchmark decide` reuses the existing learner-decision contract. `benchmark rerun` links a rerun to its baseline and reports per-criterion metric change with specific comparability warnings; a passing rerun never promotes capability or mastery. `benchmark export` emits a redacted run with normalized fields only.
 
-## Unreleased practice context display
+### Practice context display
 
 Interactive CLI practice now shows `Focus:`, optional `Projects:`, and `Why now:` before the first interaction. Project identifiers come only from explicit transfer records. The reason mirrors the review queue's deterministic wording, or names an explicit item request. The context display reads state only and writes nothing. The Obsidian plugin already showed the same context through the review contracts.
 
-## Unreleased session composition
+### Session composition
 
 `compose` returns an evidence-aware `virtuoso/focus-proposal@0.1`: one primary challenge with cited source events, item hashes, skipped material with traceable reasons, alternatives, uncertainty, and rationale. It targets the newest recorded gap before falling back to the deterministic due-then-new selection, and never exposes an answer before an attempt.
 
 `compose decide` records one append-only `virtuoso/learner-decision@0.1` per proposal with hash revalidation at decide time. A decision creates no attempt, scheduler, capability, or mastery evidence; practice from a proposal uses the existing `practice --item ID` command with the decided item.
 
-## Unreleased learn-first workflow
+### Learn-first workflow
 
 Learn-first items use `virtuoso/item@0.2` and carry a bounded learning unit before their prompt and hidden answer. `next --json` returns a typed `virtuoso/next-action@0.1` envelope. The local `learn` command records explicit completion as a hash-bound study event. Study does not start FSRS or create recall, transfer, capability, or mastery evidence. Existing `virtuoso/item@0.1` files remain recall-first.
 
 The Obsidian review queue omits pending learn-first items. The learning step remains CLI-only in this slice.
 
-## v0.1.0 release candidate
+### v0.1.0 release candidate
 
-Date: 2026-09-03
+Date: 2026-09-03. Published as v0.1.0 on 2026-09-04.
 
 The Python package and Hermes plugin now use version `0.1.0`. The Obsidian plugin uses the same version. `virtuoso --version` reads installed distribution metadata.
 
