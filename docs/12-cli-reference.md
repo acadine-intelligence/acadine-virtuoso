@@ -300,6 +300,48 @@ virtuoso --workspace PATH queries stale-links [--json]
 
 Output schema: `virtuoso/stale-links@0.1`. The top-level `links` array contains `item_id`, `source_id`, and `relative_path` for each linked source note whose current indexed hash no longer matches.
 
+## Export (read-only projections)
+
+Exports write derived views of workspace state to a folder you choose. They read the workspace and never write to its database. Every run rewrites the whole target folder, so treat the folder as generated output.
+
+### `export obsidian`
+
+```
+virtuoso --workspace PATH export obsidian --out DIR [--json]
+```
+
+Writes one Markdown stub per item in the current review queue (the same items and order that `review due` returns) into `DIR`, plus a `.virtuoso-export.json` manifest. Obsidian Bases can index the stubs by folder and frontmatter, so a Base view shows the same due set as the CLI at the moment of export.
+
+Each stub carries frontmatter only: `schema` (`virtuoso/obsidian-stub@0.1`), `item_id`, `title`, `focus`, `status` (`due` or `new`), `next_review` (ISO-8601 or `null`), `project_ids`, `schedule_owner` (`virtuoso-workspace`), `content_hash`, `generated_at`, and `generated: true`. The body is a fixed notice. No prompt, answer, hint, follow-up, or learning-unit prose leaves the workspace.
+
+Safety rules, all fail closed:
+
+- `DIR` must be outside the workspace and must not be a symlink.
+- If `DIR` contains any file that this export did not generate, the command refuses and lists the foreign files. Choose an empty folder or remove them first.
+- Stubs for items that left the queue (retired, or now waiting on a learn-first step) are deleted; `removed_count` reports how many.
+- Running twice at the same instant against the same workspace is byte-identical. Only `generated_at` changes between runs.
+
+Output schema: `virtuoso/obsidian-export@0.1` with `generated_at`, `output_dir`, `stub_count`, `due_count`, `new_count`, `removed_count`, and a `stubs` array of `item_id`, `status`, `due_at`, `focus`, `relative_path`.
+
+Example Base view (add to your own `.base` file):
+
+```yaml
+views:
+  - type: table
+    name: Workspace Due Now
+    filters:
+      and:
+        - file.inFolder("path/to/DIR")
+        - schedule_owner == "virtuoso-workspace"
+        - status == "due"
+    order:
+      - file.name
+      - focus
+      - next_review
+```
+
+The projection is a view, not a store. The workspace SQLite remains the only scheduler and evidence writer. Re-run the export after practice sessions, or on a schedule.
+
 ## Retrieval
 
 The retrieval index is derived state in `.virtuoso/search.sqlite3`. Lexical commands refresh stale index content from active workspace items. Semantic commands use vectors supplied by the caller. Virtuoso does not call an embedding service.

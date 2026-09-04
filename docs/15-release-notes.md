@@ -1,6 +1,10 @@
 # Release notes
 
-Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
+The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases. Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. These notes record public repository milestones and the checks that accompanied them.
+
+## Unreleased Obsidian projection
+
+`export obsidian --out DIR` writes one frontmatter-only Markdown stub per review-queue item into a folder outside the workspace, plus a manifest, so Obsidian Bases can show the workspace due queue with no second scheduler. Stubs carry item id, title, focus, status, next review, project ids, content hash, and generation time; no answer or hint content is exported. The command refuses targets inside the workspace, symlinks, and folders holding files it did not generate, and removes stubs for items that left the queue. Repeated runs at the same instant are byte-identical. Closes #45.
 
 ## Unreleased benchmark-directed focus
 

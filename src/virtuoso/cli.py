@@ -254,6 +254,21 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="check workspace health")
     doctor.add_argument("--json", action="store_true")
 
+    export = commands.add_parser(
+        "export", help="write read-only projections of workspace state"
+    )
+    export_commands = export.add_subparsers(dest="export_command", required=True)
+    export_obsidian = export_commands.add_parser(
+        "obsidian",
+        help="regenerate a folder of frontmatter-only stubs for Obsidian Bases",
+    )
+    export_obsidian.add_argument(
+        "--out",
+        required=True,
+        help="target folder outside the workspace; rewritten on every run",
+    )
+    export_obsidian.add_argument("--json", action="store_true")
+
     search = commands.add_parser(
         "search", help="lexical (FTS5) and semantic (embedding kNN) retrieval"
     )
@@ -728,6 +743,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     service.skip_result_payload(service.skip(sys.stdin.read())),
                     as_json=args.json,
                 )
+                return 0
+        if args.command == "export":
+            from .obsidian_export import ObsidianExporter, ObsidianExportError
+
+            if args.export_command == "obsidian":
+                try:
+                    result = ObsidianExporter(workspace).export(Path(args.out))
+                except ObsidianExportError as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                _emit(result.to_dict(), as_json=args.json)
                 return 0
         if args.command == "queries":
             from . import queries as queries_module

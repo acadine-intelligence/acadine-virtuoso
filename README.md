@@ -94,6 +94,8 @@ Offline here means Obsidian, the installed CLI, and the local workspace work wit
 
 The current Obsidian review queue omits learn-first items that still need study. Complete their learning step in the CLI first.
 
+To see the workspace queue inside Obsidian Bases without a second scheduler, run `virtuoso --workspace PATH export obsidian --out DIR` into a folder in your vault. It writes frontmatter-only stubs that mirror `review due`; a Base view filtered on that folder then shows exactly what the CLI considers due. The export is read-only and rewrites the folder on every run. See `docs/12-cli-reference.md`.
+
 ## Extension boundary
 
 External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. Calling code must opt in for each run with `allow_trusted=True`. There is no public CLI command for module execution and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use.
