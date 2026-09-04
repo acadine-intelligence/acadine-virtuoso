@@ -29,4 +29,5 @@ These records include target designs and deferred work. They do not expand the i
 - [Adoption record](09-adoption.md)
 - [Release notes](15-release-notes.md)
 - [Verification history](16-verification-history.md)
+- [Acknowledgements](17-acknowledgements.md): open-source foundations and attribution
 - [v0.1.0 release notes](releases/v0.1.0.md)
