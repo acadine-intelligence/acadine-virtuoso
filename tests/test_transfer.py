@@ -101,7 +101,7 @@ class ProjectTransferEvidenceTests(unittest.TestCase):
             migration = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             db.execute("DROP TABLE transfer_events")
             db.execute("CREATE TABLE transfer_events(event_id TEXT)")
-        self.assertEqual(migration, 14)
+        self.assertEqual(migration, 15)
         with self.assertRaisesRegex(WorkspaceError, "transfer_events"):
             WorkspaceService.open(self.root)
 

@@ -112,6 +112,25 @@ virtuoso --workspace PATH compose list [--status pending|decided|all] [--limit N
 
 `compose decide` output schema: `virtuoso/learner-decision@0.1`. `accept` uses the proposal primary; `change` requires a chosen active item from the same focus; `reject` takes no chosen item. One decision per proposal: a second decision fails with exit 2. At decide time the proposal's cited item hashes are revalidated against current workspace state; a stale hash fails closed and writes nothing. A decision appends only its own record: no attempt, scheduler, transfer, review-skip, capability, or mastery evidence. Practice from a proposal means invoking the existing `practice --item ID` with the decided item id.
 
+### `benchmark`
+
+Turn one failed benchmark criterion into human practice. The benchmarked system owns the artifact; Virtuoso stores the import as append-only evidence.
+
+```
+virtuoso --workspace PATH benchmark import --file ARTIFACT.json [--source-reference REF] [--json]
+virtuoso --workspace PATH benchmark propose [--json]
+virtuoso --workspace PATH benchmark rerun --file ARTIFACT.json --baseline RUN_ID [--json]
+virtuoso --workspace PATH benchmark export --run-id RUN_ID [--json]
+```
+
+`benchmark import` output schema: `virtuoso/benchmark-run@0.1`. The artifact must carry `run_id`, `source_reference`, `tested_commit`, `harness`, `harness_version`, `model_id`, `prompt_hash`, `tool_permissions`, `environment`, `operating_level_map_version` (`opmap@1`), `occurred_at`, and normalized `observations` (each with `criterion`, `level`, `status`, `metric`, `value`). Malformed JSON, unknown schema, unknown operating level, duplicate `run_id`, and a changed source hash for the same `source_reference` fail closed without changing prior state. Local filesystem paths are rejected as `source_reference`.
+
+`benchmark propose` composes one ordinary `FocusProposal` from the earliest failed observation not yet proposed (ordering: run `occurred_at`, then `criterion`, then `run_id`). The proposal adds a `benchmark` object naming the run, failed criterion, operating level, rerun condition, and cites `benchmark:<run_id>` in `source_event_ids`. The primary item is matched by focus equal to the criterion; a missing compatible item fails with guidance. When no valid benchmark run exists, ordinary composition still works.
+
+`benchmark rerun` links the run to its baseline and reports per-criterion `metric` change. Matching requires the same criterion and metric; a missing counterpart reports `metric-missing`. Changed `tested_commit`, `harness`, `harness_version`, `model_id`, `prompt_hash`, `tool_permissions`, or `environment` each produce a specific comparability warning. The report carries `claims_mastery: false` always; a passing rerun never promotes capability or mastery.
+
+`benchmark export` emits the run with normalized fields only and `redacted: true`. Private paths and learner content are excluded by construction; provenance is shared only when the user runs this export deliberately.
+
 ### `learn`
 
 Read and explicitly finish one current learn-first item version.

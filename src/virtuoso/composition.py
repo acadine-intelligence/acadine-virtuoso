@@ -91,7 +91,21 @@ class SessionComposer:
 
         pending = self._pending_learn_states(focus)
         uncertainty: str | None = None
-        if pending:
+        self._pending_benchmark_block: dict[str, Any] | None = None
+        benchmark_failure = self._next_benchmark_failure(focus)
+        if benchmark_failure is not None:
+            (
+                primary_id,
+                action,
+                rationale,
+                source_event_ids,
+                skipped,
+                alternatives,
+                uncertainty,
+            ) = self._benchmark_composition(
+                failure=benchmark_failure, now=now_utc
+            )
+        elif pending:
             state = pending[0]
             item = self._load(state.item_id)
             if item.entry_mode == "learn-first":
@@ -150,6 +164,10 @@ class SessionComposer:
             "rationale": rationale,
             "occurred_at": occurred_at,
         }
+        if benchmark_failure is not None:
+            payload_core["benchmark"] = (
+                self._pending_benchmark_block or benchmark_failure
+            )
         proposal_id = _deterministic_id("proposal-", payload_core)
         payload = {
             "schema": PROPOSAL_SCHEMA,
@@ -464,6 +482,96 @@ class SessionComposer:
 
         alternatives = tuple(item_id for item_id in evaluable if item_id != primary_id)
         return primary_id, "practice", rationale, source_event_ids, skipped, alternatives
+
+    def _next_benchmark_failure(self, focus: str | None) -> dict[str, Any] | None:
+        from .benchmark import BenchmarkService
+
+        service = BenchmarkService(self.workspace)
+        failure = service.next_failed_observation()
+        if failure is None:
+            return None
+        if focus is not None:
+            item_id = self._item_for_criterion(failure["criterion"])
+            if item_id is None:
+                return None
+            item = self._load(item_id)
+            if item.focus != focus:
+                return None
+        return {
+            "run_id": failure["run_id"],
+            "failed_criterion": failure["criterion"],
+            "operating_level": failure["level"],
+            "metric": failure["metric"],
+            "value": failure["value"],
+            "occurred_at": failure["occurred_at"],
+        }
+
+    def _benchmark_composition(
+        self, *, failure: dict[str, Any], now: datetime
+    ) -> tuple[str, str, str, tuple[str, ...], list[dict[str, Any]], tuple[str, ...], str]:
+        from .benchmark import BenchmarkService
+
+        criterion = failure["failed_criterion"]
+        item_id = self._item_for_criterion(criterion)
+        if item_id is None:
+            raise CompositionError(
+                f"benchmark criterion '{criterion}' has no active learning item; "
+                f"add an item with focus '{criterion}' to practice this failure"
+            )
+        item = self._load(item_id)
+        rationale = (
+            f"Benchmark run {failure['run_id']} failed criterion '{criterion}' "
+            f"at operating level '{failure['operating_level']}' "
+            f"({failure['metric']} = {failure['value']}). "
+            f"Practice '{item_id}' targets this exact failure."
+        )
+        uncertainty = (
+            "One synthetic benchmark observation guides this proposal; the run "
+            "records its tested commit, harness, model, prompt hash, tool "
+            "permissions, and environment for comparability."
+        )
+        benchmark_block = {
+            **failure,
+            "rerun_condition": (
+                f"Rerun harness with matching commit, harness, model, prompt, "
+                f"tool permissions, and environment; link the run to baseline "
+                f"{failure['run_id']} and compare {failure['metric']}."
+            ),
+        }
+        self._pending_benchmark_block = benchmark_block
+        service = BenchmarkService(self.workspace)
+        service.record_proposal(run_id=failure["run_id"], criterion=criterion)
+
+        pending = self._pending_learn_states(None)
+        alternatives = tuple(
+            state.item_id
+            for state in pending
+            if state.item_id != item_id
+        )
+        if alternatives:
+            uncertainty += (
+                " Pending learn-first study steps exist; this benchmark failure "
+                "takes precedence for this proposal."
+            )
+        return (
+            item_id,
+            "practice",
+            rationale,
+            (f"benchmark:{failure['run_id']}",),
+            [],
+            alternatives,
+            uncertainty,
+        )
+
+    def _item_for_criterion(self, criterion: str) -> str | None:
+        with self.workspace._connect() as db:
+            row = db.execute(
+                """SELECT item_id FROM items
+                   WHERE focus = ? AND retired_at IS NULL
+                   ORDER BY item_id LIMIT 1""",
+                (criterion,),
+            ).fetchone()
+        return row["item_id"] if row is not None else None
 
     def _pending_learn_states(self, focus: str | None) -> list[Any]:
         try:
