@@ -45,7 +45,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 14
+_CURRENT_MIGRATION_VERSION = 15
 
 
 class WorkspaceError(VirtuosoError):
@@ -1181,6 +1181,80 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'composition_decisions is append-only');
                 END""",
+            # Migration 15: benchmark runs, observations, rerun links.
+            """CREATE TABLE IF NOT EXISTS benchmark_runs (
+                run_id TEXT PRIMARY KEY,
+                source_reference TEXT NOT NULL,
+                source_hash TEXT NOT NULL CHECK(length(source_hash) = 64),
+                payload_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS benchmark_observations (
+                run_id TEXT NOT NULL
+                    REFERENCES benchmark_runs(run_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                criterion TEXT NOT NULL,
+                level TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pass', 'fail')),
+                metric TEXT NOT NULL,
+                value REAL NOT NULL,
+                PRIMARY KEY (run_id, criterion)
+            )""",
+            """CREATE TABLE IF NOT EXISTS benchmark_reruns (
+                run_id TEXT PRIMARY KEY
+                    REFERENCES benchmark_runs(run_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                baseline_run_id TEXT NOT NULL
+                    REFERENCES benchmark_runs(run_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                warnings_json TEXT NOT NULL,
+                changes_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(run_id != baseline_run_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS benchmark_proposals (
+                run_id TEXT NOT NULL
+                    REFERENCES benchmark_runs(run_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                criterion TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (run_id, criterion)
+            )""",
+            """CREATE TRIGGER benchmark_runs_reject_update
+                BEFORE UPDATE ON benchmark_runs
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_runs is append-only');
+                END""",
+            """CREATE TRIGGER benchmark_runs_reject_delete
+                BEFORE DELETE ON benchmark_runs
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_runs is append-only');
+                END""",
+            """CREATE TRIGGER benchmark_observations_reject_update
+                BEFORE UPDATE ON benchmark_observations
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_observations is append-only');
+                END""",
+            """CREATE TRIGGER benchmark_observations_reject_delete
+                BEFORE DELETE ON benchmark_observations
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_observations is append-only');
+                END""",
+            """CREATE TRIGGER benchmark_reruns_reject_update
+                BEFORE UPDATE ON benchmark_reruns
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_reruns is append-only');
+                END""",
+            """CREATE TRIGGER benchmark_reruns_reject_delete
+                BEFORE DELETE ON benchmark_reruns
+                BEGIN
+                    SELECT RAISE(ABORT, 'benchmark_reruns is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1262,7 +1336,8 @@ class WorkspaceService:
                 11: statements[48:52],
                 12: statements[52:55],
                 13: statements[55:60],
-                14: statements[60:],
+                14: statements[60:69],
+                15: statements[69:79],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:

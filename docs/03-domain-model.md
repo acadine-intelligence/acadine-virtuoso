@@ -47,6 +47,12 @@
 `LearnerDecision`
 : Append-only learner accept, change, or reject of one `FocusProposal`. It binds the chosen item to its current content hash at decide time and creates no attempt, scheduler, capability, or mastery evidence.
 
+`BenchmarkRun`
+: Append-only benchmark evidence: source reference, source hash, tested commit, harness and version, model identifier, prompt hash, tool permissions, environment, and normalized observations. The benchmarked system owns the artifact; Virtuoso stores the import.
+
+`BenchmarkRerun`
+: One run linked to a baseline with stored comparability warnings and per-criterion metric changes. It creates no capability or mastery evidence, and a passing rerun promotes nothing.
+
 ## Ownership
 
 Markdown owns learner prose. SQLite owns study events, attempts, scheduler state, proposals, module receipts, XP events, and sync history. Project systems own commitments and milestones. Obsidian edits Markdown; Hermes may invoke contracts and supply approved context. No owner writes another owner's native state.

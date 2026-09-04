@@ -2,6 +2,10 @@
 
 Virtuoso has no published package or GitHub Release yet. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased benchmark-directed focus
+
+`benchmark import` stores a local benchmark artifact as append-only evidence: tested commit, harness and version, model, prompt hash, tool permissions, environment, and normalized observations against a versioned operating-level map. `benchmark propose` turns the earliest unproposed failed criterion into an evidence-cited FocusProposal with rerun condition. `benchmark decide` reuses the existing learner-decision contract. `benchmark rerun` links a rerun to its baseline and reports per-criterion metric change with specific comparability warnings; a passing rerun never promotes capability or mastery. `benchmark export` emits a redacted run with normalized fields only.
+
 ## Unreleased practice context display
 
 Interactive CLI practice now shows `Focus:`, optional `Projects:`, and `Why now:` before the first interaction. Project identifiers come only from explicit transfer records. The reason mirrors the review queue's deterministic wording, or names an explicit item request. The context display reads state only and writes nothing. The Obsidian plugin already showed the same context through the review contracts.

@@ -136,6 +136,34 @@ def _parser() -> argparse.ArgumentParser:
     compose.add_argument("--focus", help="restrict composition to one focus track")
     compose.add_argument("--json", action="store_true")
 
+    benchmark = commands.add_parser(
+        "benchmark", help="import benchmark evidence and propose human practice"
+    )
+    benchmark_commands = benchmark.add_subparsers(dest="benchmark_command")
+    benchmark_import = benchmark_commands.add_parser(
+        "import", help="import one benchmark artifact as append-only evidence"
+    )
+    benchmark_import.add_argument("--file", required=True)
+    benchmark_import.add_argument("--source-reference")
+    benchmark_import.add_argument("--json", action="store_true")
+    benchmark_commands.add_parser(
+        "propose", help="compose one FocusProposal from the next failed observation"
+    )
+    benchmark_propose = benchmark_commands.choices["propose"]
+    benchmark_propose.add_argument("--json", action="store_true")
+    benchmark_rerun = benchmark_commands.add_parser(
+        "rerun", help="link a rerun to its baseline and report metric change"
+    )
+    benchmark_rerun.add_argument("--file", required=True)
+    benchmark_rerun.add_argument("--baseline", required=True)
+    benchmark_rerun.add_argument("--json", action="store_true")
+    benchmark_export = benchmark_commands.add_parser(
+        "export", help="export one redacted benchmark run"
+    )
+    benchmark_export.add_argument("--run-id", required=True)
+    benchmark_export.add_argument("--json", action="store_true")
+    benchmark.add_argument("--json", action="store_true")
+
     learn = commands.add_parser(
         "learn", help="read and explicitly finish one learn-first item"
     )
@@ -540,6 +568,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _emit(proposal.to_dict(), as_json=args.json)
             return 0
+        if args.command == "benchmark":
+            from .benchmark import BenchmarkError, BenchmarkService
+
+            service = BenchmarkService(workspace)
+            if args.benchmark_command == "import":
+                try:
+                    run = service.import_run(
+                        Path(args.file),
+                        source_reference=args.source_reference,
+                    )
+                except (BenchmarkError, OSError) as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                _emit(
+                    {
+                        "schema": "virtuoso/benchmark-run@0.1",
+                        "run_id": run.run_id,
+                        "source_reference": run.source_reference,
+                        "source_hash": run.source_hash,
+                        "occurred_at": run.occurred_at,
+                        "observations": list(run.observations),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.benchmark_command == "propose":
+                composer = SessionComposer(workspace)
+                proposal = composer.compose(now=datetime.now(timezone.utc))
+                _emit(proposal.to_dict(), as_json=args.json)
+                return 0
+            if args.benchmark_command == "rerun":
+                try:
+                    report = service.import_rerun(
+                        Path(args.file), baseline_run_id=args.baseline
+                    )
+                except (BenchmarkError, OSError) as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                _emit(report, as_json=args.json)
+                return 0
+            if args.benchmark_command == "export":
+                try:
+                    exported = service.export(args.run_id)
+                except BenchmarkError as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                _emit(exported, as_json=args.json)
+                return 0
+            raise WorkspaceError(
+                "benchmark requires a subcommand: import, propose, rerun, or export"
+            )
         if args.command == "learn":
             LearningService(workspace).run(
                 item_id=args.item,

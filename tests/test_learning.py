@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from conftest import downgrade_composition_to_v13, downgrade_learning_to_v12
+from conftest import (
+    downgrade_benchmark_to_v14,
+    downgrade_composition_to_v13,
+    downgrade_learning_to_v12,
+)
 from virtuoso.learning import LearningError, LearningService
 from virtuoso.practice import PracticeError, PracticeService
 from virtuoso.queries import QueryError, learning_state
@@ -481,7 +485,7 @@ class LearningDomainTests(unittest.TestCase):
                     " AND name LIKE 'study_events_reject_%'"
                 ).fetchall()
             }
-        self.assertEqual(versions, list(range(1, 15)))
+        self.assertEqual(versions, list(range(1, 16)))
         self.assertEqual(row, ("recall-first", None))
         self.assertEqual(study_count, 0)
         self.assertEqual(
@@ -544,7 +548,7 @@ class LearningDomainTests(unittest.TestCase):
                     " AND name LIKE 'composition_%'"
                 ).fetchall()
             }
-        self.assertEqual(versions, list(range(1, 15)))
+        self.assertEqual(versions, list(range(1, 16)))
         self.assertEqual(proposal_count, 0)
         self.assertEqual(decision_count, 0)
         self.assertEqual(
@@ -560,6 +564,77 @@ class LearningDomainTests(unittest.TestCase):
         )
         self.assertEqual(loaded.item_id, "legacy-recall")
         self.assertEqual(item.path.read_bytes(), item_bytes)
+        self.assertEqual(schema(migrated), schema(fresh))
+
+    def test_v14_workspace_migrates_without_inventing_benchmark_evidence(self) -> None:
+        item = self.workspace.add_item(
+            item_id="legacy-recall",
+            title="Legacy recall",
+            focus="migration",
+            prompt="What must migration preserve?",
+            answer="The item and its absence of benchmark evidence.",
+        )
+        item_bytes = item.path.read_bytes()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            downgrade_benchmark_to_v14(db)
+            self.assertEqual(
+                db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                14,
+            )
+
+        migrated = WorkspaceService.open(self.root)
+        loaded = migrated.load_item("legacy-recall")
+        fresh = WorkspaceService.init(Path(self.tmp.name).resolve() / "fresh-v14")
+
+        with sqlite3.connect(migrated.db_path) as db:
+            versions = [
+                row[0]
+                for row in db.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+            runs = db.execute("SELECT COUNT(*) FROM benchmark_runs").fetchone()[0]
+            observations = db.execute(
+                "SELECT COUNT(*) FROM benchmark_observations"
+            ).fetchone()[0]
+            reruns = db.execute(
+                "SELECT COUNT(*) FROM benchmark_reruns"
+            ).fetchone()[0]
+            triggers = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                    " AND name LIKE 'benchmark_%'"
+                ).fetchall()
+            }
+        self.assertEqual(versions, list(range(1, 16)))
+        self.assertEqual((runs, observations, reruns), (0, 0, 0))
+        self.assertEqual(
+            triggers,
+            {
+                "benchmark_runs_reject_update",
+                "benchmark_runs_reject_delete",
+                "benchmark_observations_reject_update",
+                "benchmark_observations_reject_delete",
+                "benchmark_reruns_reject_update",
+                "benchmark_reruns_reject_delete",
+            },
+        )
+        self.assertEqual(loaded.item_id, "legacy-recall")
+        self.assertEqual(item.path.read_bytes(), item_bytes)
+
+        def schema(service: WorkspaceService) -> dict[tuple[str, str], str]:
+            with sqlite3.connect(service.db_path) as db:
+                return {
+                    (row[0], row[1]): WorkspaceService._normalized_schema_sql(row[2])
+                    for row in db.execute(
+                        """SELECT name, type, sql FROM sqlite_master
+                           WHERE name NOT LIKE 'sqlite_%'
+                             AND type IN ('table', 'trigger', 'index')
+                           ORDER BY name, type"""
+                    ).fetchall()
+                }
+
         self.assertEqual(schema(migrated), schema(fresh))
 
     def test_doctor_and_read_only_query_explain_learning_state(self) -> None:

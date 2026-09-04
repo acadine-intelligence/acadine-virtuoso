@@ -81,8 +81,27 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_benchmark_to_v14(db: sqlite3.Connection) -> None:
+    """Remove migration 15 benchmark state from a fresh test database."""
+    for trigger in (
+        "benchmark_runs_reject_update",
+        "benchmark_runs_reject_delete",
+        "benchmark_observations_reject_update",
+        "benchmark_observations_reject_delete",
+        "benchmark_reruns_reject_update",
+        "benchmark_reruns_reject_delete",
+    ):
+        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    db.execute("DROP TABLE IF EXISTS benchmark_proposals")
+    db.execute("DROP TABLE IF EXISTS benchmark_reruns")
+    db.execute("DROP TABLE IF EXISTS benchmark_observations")
+    db.execute("DROP TABLE IF EXISTS benchmark_runs")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 15")
+
+
 def downgrade_composition_to_v13(db: sqlite3.Connection) -> None:
     """Remove migration 14 composition state from a fresh test database."""
+    downgrade_benchmark_to_v14(db)
     for trigger in (
         "composition_proposals_reject_update",
         "composition_proposals_reject_delete",

@@ -141,7 +141,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (14,))
+            self.assertEqual(migration, (15,))
 
     def test_v11_to_v12_migration_preserves_items_and_adds_skip_ledger(self) -> None:
         service = WorkspaceService.init(self.root)
@@ -187,7 +187,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ).fetchall()
             }
         self.assertEqual(after, before)
-        self.assertEqual(versions, list(range(1, 15)))
+        self.assertEqual(versions, list(range(1, 16)))
         self.assertEqual(review_table, ("table",))
         self.assertEqual(
             review_triggers,
@@ -221,7 +221,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 15)),
+                list(range(1, 16)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -555,7 +555,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -894,7 +894,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             state = db.execute(
                 "SELECT source_event_id, state_json FROM scheduler_state"
             ).fetchall()
-        self.assertEqual(versions, list(range(1, 15)))
+        self.assertEqual(versions, list(range(1, 16)))
         self.assertEqual(
             attempt,
             [
