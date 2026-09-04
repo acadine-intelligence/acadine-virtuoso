@@ -67,7 +67,11 @@ Verification details live in `docs/16-verification-history.md`.
 
 ## Obsidian plugin milestone, 2026-08-22
 
-The local `v0.2.0` tag records an earlier plugin milestone. The tag was never pushed and no GitHub Release exists for it. The current public version policy supersedes that local tag and reports `0.1.0`.
+A local `v0.2.0` tag once recorded an earlier plugin milestone. It was never
+pushed and never had a GitHub Release; it was deleted from this clone on
+2026-09-04 because its number collides with the public version sequence that
+now starts at `0.1.0`. History for that milestone lives in the commits below
+and in `docs/16-verification-history.md`.
 
 - Commit `2ba23cc` added a full-screen card session inside Obsidian.
 - Commit `e77a0bd` hardened parsing and limited each card to one scheduler write per session.
