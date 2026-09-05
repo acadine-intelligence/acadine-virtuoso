@@ -2,6 +2,12 @@
 
 The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases (tag at `1df2c99`, published 2026-09-04). Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. Sections under "Included in v0.1.0" landed before the tag. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased minimum FSRS interval
+
+`scheduler configure --minimum-interval-days DAYS` sets an optional FSRS interval floor. Whole days from 0 through 36500 are accepted; zero keeps the existing FSRS timing. One day means 24 elapsed hours after each attempt, including learning and relearning. Longer intervals stay unchanged. Proposals record the floor and the original FSRS due time alongside the effective due time stored in the card.
+
+Changing only the floor preserves FSRS memory state. Existing due dates and previous evidence remain unchanged. Other configuration and version mismatches still fail. SM-2 behavior is unchanged. This preference can delay reviews beyond FSRS's recommendation and may reduce actual retention. Tracks #53.
+
 ## Unreleased scheduler portfolio
 
 Virtuoso now runs more than one spaced-repetition algorithm. `schedulers.py` defines a `SchedulerBackend` protocol; FSRS (`fsrs`, version `6.3.2`) moved behind it with unchanged behaviour and stays the default for every new and existing workspace. `sm2` (SuperMemo 2, written from the published 1990 description, version `sm2-1990/1`) ships as the second built-in with configuration `first_interval_days`, `second_interval_days`, and `minimum_easiness`. Every proposal keeps recording algorithm, version, configuration, previous and proposed state, due time, and rationale.

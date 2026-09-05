@@ -60,6 +60,19 @@ A study event records the exact item hash, learning-unit hash, time, and source 
 
 Scheduling is explainable: each attempt produces a scheduler proposal carrying the algorithm, version, configuration, previous state, proposed state, and a plain-language rationale. FSRS 6.3.2 is the default scheduler and SM-2 ships as a second built-in; `virtuoso scheduler switch --to sm2` changes algorithm with a recorded, fail-closed switch and no silent state mixing. See the [acknowledgements](docs/17-acknowledgements.md) for the FSRS, py-fsrs, and SuperMemo 2 work behind the built-ins.
 
+## Choose a minimum review interval
+
+To keep FSRS reviews at least one full day apart, run:
+
+```bash
+virtuoso --workspace "$WORKSPACE" scheduler configure --minimum-interval-days 1
+virtuoso --workspace "$WORKSPACE" scheduler show --json
+```
+
+The setting accepts whole days from 0 through 36500. A day means 24 elapsed hours after the attempt. Zero restores FSRS timing, including short learning steps. Existing workspaces keep that default until you choose a minimum.
+
+The minimum applies to future attempts, including failed reviews. Longer FSRS intervals stay unchanged. Changing the setting preserves memory state and leaves existing due dates alone. Each affected proposal records the original FSRS due time and the effective due time. Delaying a review can reduce actual retention; choose the minimum to suit your schedule.
+
 ## Beyond single items
 
 ### Read-only sources

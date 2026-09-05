@@ -86,6 +86,26 @@ class SchedulerBackend(Protocol):
         ...
 
 
+def configurations_compatible(
+    algorithm: str, previous: object, proposed: Mapping[str, Any]
+) -> bool:
+    """Only the FSRS interval floor may change without resetting memory state."""
+    if not isinstance(previous, dict):
+        return False
+    if algorithm != "fsrs":
+        return previous == proposed
+    backend = resolve_backend(algorithm)
+    try:
+        backend.validate_configuration(previous)
+        backend.validate_configuration(proposed)
+    except SchedulerError:
+        return False
+    old, new = dict(previous), dict(proposed)
+    old.pop("minimum_interval_days", None)
+    new.pop("minimum_interval_days", None)
+    return old == new
+
+
 def _require_aware(value: datetime, *, label: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise SchedulerStateError(f"{label} must be timezone-aware")
@@ -153,7 +173,7 @@ def evidence_clause(attempt: AttemptFacts) -> str:
 
 
 class FsrsBackend:
-    """FSRS through the `fsrs` package. Behaviour matches the pre-portfolio code."""
+    """FSRS through the `fsrs` package, with an optional post-review interval floor."""
 
     name = "fsrs"
 
@@ -164,7 +184,10 @@ class FsrsBackend:
         return {"desired_retention": 0.9, "enable_fuzzing": False}
 
     def validate_configuration(self, raw: Mapping[str, Any]) -> dict[str, Any]:
-        _reject_unknown_fields(raw, {"desired_retention", "enable_fuzzing"}, name=self.name)
+        _reject_unknown_fields(
+            raw, {"desired_retention", "enable_fuzzing", "minimum_interval_days"},
+            name=self.name,
+        )
         desired_retention = raw.get("desired_retention", 0.9)
         if (
             not isinstance(desired_retention, (int, float))
@@ -180,10 +203,23 @@ class FsrsBackend:
             raise SchedulerConfigurationError(
                 "scheduler enable_fuzzing must be true or false"
             )
-        return {
+        configuration = {
             "desired_retention": float(desired_retention),
             "enable_fuzzing": enable_fuzzing,
         }
+        if "minimum_interval_days" in raw:
+            minimum = raw["minimum_interval_days"]
+            if (
+                not isinstance(minimum, int)
+                or isinstance(minimum, bool)
+                or not 0 <= minimum <= 36500
+            ):
+                raise SchedulerConfigurationError(
+                    "scheduler minimum_interval_days must be a whole number "
+                    "of days from 0 through 36500"
+                )
+            configuration["minimum_interval_days"] = minimum
+        return configuration
 
     def propose(
         self,
@@ -193,6 +229,7 @@ class FsrsBackend:
         configuration: Mapping[str, Any],
     ) -> SchedulerOutcome:
         occurred_at = _check_attempt(attempt)
+        configuration = self.validate_configuration(configuration)
         try:
             card = (
                 Card.from_json(previous_state_json)
@@ -228,6 +265,20 @@ class FsrsBackend:
             f"FSRS rating {rating.name} from result {attempt.result}; "
             + evidence_clause(attempt)
         )
+        minimum = configuration.get("minimum_interval_days", 0)
+        if minimum:
+            try:
+                floor = occurred_at + timedelta(days=minimum)
+            except OverflowError as exc:
+                raise SchedulerStateError(
+                    "FSRS minimum interval exceeds the supported timestamp range"
+                ) from exc
+            original_due = next_card.due
+            next_card.due = max(original_due, floor)
+            rationale += (
+                f" Configured minimum interval {minimum} day(s); original due "
+                f"{original_due.isoformat()}; effective due {next_card.due.isoformat()}."
+            )
         return SchedulerOutcome(
             proposed_state_json=next_card.to_json(),
             due_at=next_card.due,

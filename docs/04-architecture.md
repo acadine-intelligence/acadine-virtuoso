@@ -70,6 +70,8 @@ Scheduler state is keyed by item, algorithm, and learning context, so two algori
 
 Every proposal records its algorithm, version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory. External schedulers through the `scheduler` module category are designed in `18-scheduler-portfolio-design.md` and not yet wired to practice.
 
+FSRS supports an optional `minimum_interval_days` scheduling preference. Zero or omission preserves upstream timing. A positive value clamps the due time after FSRS runs, without changing its returned memory parameters. The card and proposal carry the same effective due time; the rationale preserves the original due time. Only this preference may change across existing FSRS state without an incompatibility error. The workspace rechecks the configured minimum inside the attempt transaction and rejects a stale or too-short proposal. `scheduler configure` replaces the configuration file under the same writer lock while leaving existing due dates and evidence untouched.
+
 The future meta-scheduler compares outcomes within comparable contexts and chooses only among learner-approved policies. It does not invent intervals or infer competence.
 
 ## Extension protocol

@@ -22,6 +22,8 @@ from .learning_state import (
 from .schedulers import (
     SchedulerBackend,
     SchedulerError,
+    builtin_algorithms,
+    configurations_compatible,
     resolve_backend,
 )
 from .workload import (
@@ -514,6 +516,37 @@ class WorkspaceService:
             algorithm=settings.algorithm, learning_context=settings.learning_context
         )
         return settings
+
+    def configure_scheduler(self, *, minimum_interval_days: int) -> dict[str, Any]:
+        """Change the FSRS interval floor for future attempts; keep existing due dates."""
+        with self._connect() as db:
+            # Serialize with algorithm switches and attempt recording.
+            db.execute("BEGIN IMMEDIATE")
+            config = self.configuration()
+            settings = self._validated_scheduler_settings(config["scheduler"])
+            self._require_recorded_switch(
+                algorithm=settings.algorithm, learning_context=settings.learning_context
+            )
+            if settings.algorithm != "fsrs":
+                raise WorkspaceError("minimum_interval_days is available only for FSRS")
+            scheduler = {
+                **config["scheduler"], "minimum_interval_days": minimum_interval_days
+            }
+            settings = self._validated_scheduler_settings(scheduler)
+            self._replace_private_text(
+                self.config_path,
+                json.dumps({**config, "scheduler": scheduler}, indent=2, sort_keys=True) + "\n",
+                label="workspace configuration",
+            )
+        return {
+            "schema": "virtuoso/scheduler-settings@0.1",
+            "algorithm": settings.algorithm,
+            "algorithm_version": settings.algorithm_version,
+            "learning_context": settings.learning_context,
+            "configuration": settings.configuration,
+            "built_in_algorithms": list(builtin_algorithms()),
+            "existing_due_dates_changed": False,
+        }
 
     def scheduler_backend(self, algorithm: str | None = None) -> SchedulerBackend:
         """The built-in backend for `algorithm` (default: the configured one)."""
@@ -4311,6 +4344,26 @@ class WorkspaceService:
             )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if proposal["algorithm"] == "fsrs":
+                try:
+                    configuration = self.scheduler_backend("fsrs").validate_configuration(
+                        {"minimum_interval_days": proposal["configuration"].get("minimum_interval_days", 0)}
+                    )
+                except SchedulerError as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                settings = self.scheduler_settings()
+                if (
+                    settings.algorithm != "fsrs"
+                    or settings.learning_context != proposal["learning_context"]
+                ):
+                    raise WorkspaceError("scheduler changed during practice; retry the attempt")
+                minimum = configuration.get("minimum_interval_days", 0)
+                if minimum != settings.configuration.get("minimum_interval_days", 0):
+                    raise WorkspaceError(
+                        "FSRS minimum interval changed during practice; retry the attempt"
+                    )
+                if due_at - occurred_at < timedelta(days=minimum):
+                    raise WorkspaceError("scheduler due timestamp is shorter than the minimum interval")
             item_row = db.execute(
                 """SELECT content_hash, relative_path, entry_mode,
                           learning_unit_hash
@@ -4364,7 +4417,9 @@ class WorkspaceService:
                     ) from exc
                 if (
                     row["algorithm_version"] != proposal["algorithm_version"]
-                    or current_configuration != proposal["configuration"]
+                    or not configurations_compatible(
+                        proposal["algorithm"], current_configuration, proposal["configuration"]
+                    )
                 ):
                     raise WorkspaceError(
                         "scheduler state version or configuration is incompatible with the proposal"
