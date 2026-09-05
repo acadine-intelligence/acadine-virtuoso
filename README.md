@@ -14,23 +14,29 @@ New material needs a different first action. Mark an item `learn-first` to read 
 
 ## Install
 
-Requires Python 3.11+.
+Requires Python 3.11 or newer. [Install uv](https://docs.astral.sh/uv/getting-started/installation/) first. uv can download a compatible Python without changing the system interpreter.
+
+Install the current source into an isolated tool environment:
 
 ```bash
 git clone https://github.com/acadine-intelligence/acadine-virtuoso.git
 cd acadine-virtuoso
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -e .
+uv tool install --python 3.11 .
+virtuoso --version
 ```
+
+If uv reports that its executable directory is outside `PATH`, follow its instruction to run `uv tool update-shell`, then start a new shell. The `virtuoso` command works outside this checkout.
+
+For development, use the locked project environment in [CONTRIBUTING.md](CONTRIBUTING.md). For installation from a downloaded release and upgrade precautions, see [the installation guide](docs/18-installation.md). The current release workflow prepares drafts; this does not imply a published package is available.
 
 ## Five-minute tour
 
 ```bash
 WORKSPACE=~/my-practice
-.venv/bin/virtuoso --workspace "$WORKSPACE" init
+virtuoso --workspace "$WORKSPACE" init
 
 # Add your first item: a question you want to be able to answer cold.
-.venv/bin/virtuoso --workspace "$WORKSPACE" add \
+virtuoso --workspace "$WORKSPACE" add \
   --id testing-effect \
   --title "Explain the testing effect" \
   --focus learning-science \
@@ -40,14 +46,14 @@ WORKSPACE=~/my-practice
   --follow-up "Give one coding example."
 
 # What should I practice next?
-.venv/bin/virtuoso --workspace "$WORKSPACE" next --json
+virtuoso --workspace "$WORKSPACE" next --json
 
 # Practice: prompt first, recall timed, then reveal and grade honestly.
-.venv/bin/virtuoso --workspace "$WORKSPACE" practice --item testing-effect
+virtuoso --workspace "$WORKSPACE" practice --item testing-effect
 
 # Inspect the evidence and the scheduler's reasoning.
-.venv/bin/virtuoso --workspace "$WORKSPACE" attempts --json
-.venv/bin/virtuoso --workspace "$WORKSPACE" doctor --json
+virtuoso --workspace "$WORKSPACE" attempts --json
+virtuoso --workspace "$WORKSPACE" doctor --json
 ```
 
 For unfamiliar material, add `--entry-mode learn-first` and `--learning-unit "..."`. `next --json` then returns `action: learn`. Run `virtuoso --workspace "$WORKSPACE" learn --item ITEM_ID`, read the unit, and choose `finish` or `stop`. A finished study step records no attempt, schedule, capability state, or mastery claim.
@@ -140,7 +146,8 @@ Virtuoso is early and under active dogfood. `product.json` records its current c
 ## Verify
 
 ```bash
-.venv/bin/python -m compileall -q src tests
-.venv/bin/python -m unittest discover -s tests
-.venv/bin/virtuoso --help
+uv sync --locked --group build
+uv run --locked python -m compileall -q src tests scripts
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked virtuoso --help
 ```

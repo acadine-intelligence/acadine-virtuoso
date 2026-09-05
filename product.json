@@ -126,18 +126,23 @@
   "verification": {
     "commands": [
       {
+        "name": "locked-environment",
+        "argv": ["uv", "sync", "--locked", "--group", "build"],
+        "required": true
+      },
+      {
         "name": "compile",
-        "argv": [".venv/bin/python", "-m", "compileall", "-q", "src", "tests"],
+        "argv": ["uv", "run", "--locked", "python", "-m", "compileall", "-q", "src", "tests"],
         "required": true
       },
       {
         "name": "unit-and-journey-tests",
-        "argv": [".venv/bin/python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "argv": ["uv", "run", "--locked", "python", "-m", "unittest", "discover", "-s", "tests", "-v"],
         "required": true
       },
       {
-        "name": "installed-cli-smoke",
-        "argv": [".venv/bin/virtuoso", "--help"],
+        "name": "development-cli-smoke",
+        "argv": ["uv", "run", "--locked", "virtuoso", "--help"],
         "required": true
       }
     ],
@@ -159,9 +164,9 @@
     }
   },
   "operations": {
-    "install": "python3.11 -m venv .venv && .venv/bin/python -m pip install -e .",
-    "run": ".venv/bin/virtuoso --workspace PATH <command>",
-    "health": ".venv/bin/virtuoso --workspace PATH doctor --json checks the workspace schema, SQLite integrity, item hashes, and evidence counts without changing learning state.",
+    "install": "uv tool install --python 3.11 .",
+    "run": "virtuoso --workspace PATH <command>",
+    "health": "virtuoso --workspace PATH doctor --json checks the workspace schema, SQLite integrity, item hashes, and evidence counts without changing learning state.",
     "rollback": "Use versioned Git commits and package releases; back up the local SQLite file before migrations and retain append-only event export so derived state can be rebuilt.",
     "support_owner": "Acadine maintainers",
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
