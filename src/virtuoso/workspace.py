@@ -595,12 +595,15 @@ class WorkspaceService:
     def _latest_switch(
         db: sqlite3.Connection, *, learning_context: str
     ) -> sqlite3.Row | None:
+        # The ledger is append-only, so insertion order (rowid) is the true
+        # record order. occurred_at may repeat or arrive out of order through
+        # the API's explicit `now`, and tie-breaking on random ids misfires.
         return db.execute(
             """SELECT switch_id, from_algorithm, to_algorithm, learning_context,
                       mode, items_with_prior_state, occurred_at
                FROM scheduler_switches
                WHERE learning_context = ?
-               ORDER BY occurred_at DESC, created_at DESC, switch_id DESC
+               ORDER BY rowid DESC
                LIMIT 1""",
             (learning_context,),
         ).fetchone()
@@ -643,7 +646,7 @@ class WorkspaceService:
                 """SELECT switch_id, from_algorithm, to_algorithm, learning_context,
                           mode, items_with_prior_state, occurred_at
                    FROM scheduler_switches
-                   ORDER BY occurred_at, created_at, switch_id"""
+                   ORDER BY rowid"""
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -680,14 +683,22 @@ class WorkspaceService:
             source = self._unrecorded_switch_source(
                 db, algorithm=backend.name, learning_context=learning_context
             )
-            if current == backend.name:
-                if source is None:
-                    raise WorkspaceError(
-                        f"scheduler algorithm is already {backend.name}; nothing to switch"
-                    )
-                from_algorithm = source
-            else:
+            latest = self._latest_switch(db, learning_context=learning_context)
+            ledger_algorithm = latest["to_algorithm"] if latest is not None else None
+            if current != backend.name:
                 from_algorithm = current
+            elif source is not None:
+                # The file already names the target but another algorithm
+                # still holds state without a recorded switch: record the repair.
+                from_algorithm = source
+            elif ledger_algorithm is not None and ledger_algorithm != backend.name:
+                # The file was edited back by hand after a recorded switch: the
+                # ledger's newest entry is the honest starting point.
+                from_algorithm = ledger_algorithm
+            else:
+                raise WorkspaceError(
+                    f"scheduler algorithm is already {backend.name}; nothing to switch"
+                )
             stated = self._stated_algorithms(db, learning_context=learning_context)
             record = {
                 "switch_id": f"scheduler-switch-{uuid.uuid4().hex}",
@@ -705,6 +716,11 @@ class WorkspaceService:
                    ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 tuple(record.values()),
             )
+            # Invariant: replace the file BEFORE the transaction commits. If
+            # the process dies here the file names the target with no row,
+            # which the guard detects and `scheduler switch` repairs. The
+            # reverse order (row committed, old file) would look consistent
+            # to every reader and is only caught by doctor's ledger check.
             self._replace_private_text(
                 self.config_path,
                 json.dumps(new_config, indent=2, sort_keys=True) + "\n",
@@ -4966,35 +4982,49 @@ class WorkspaceService:
                     }
                 )
         scheduler = config["scheduler"]
-        settings = self._validated_scheduler_settings(scheduler)
+        # doctor diagnoses; it reports a broken scheduler configuration
+        # instead of failing like the commands that would act on it.
+        configuration_error: str | None = None
+        settings: SchedulerSettings | None = None
+        try:
+            settings = self._validated_scheduler_settings(scheduler)
+        except WorkspaceError as exc:
+            configuration_error = str(exc)
+        algorithm = settings.algorithm if settings is not None else scheduler["algorithm"]
+        learning_context = scheduler["context"]
         with self._connect() as db:
             unrecorded_source = self._unrecorded_switch_source(
-                db,
-                algorithm=settings.algorithm,
-                learning_context=settings.learning_context,
+                db, algorithm=algorithm, learning_context=learning_context
             )
-            latest_switch = self._latest_switch(
-                db, learning_context=settings.learning_context
-            )
+            latest_switch = self._latest_switch(db, learning_context=learning_context)
+        # A ledger whose last entry names another algorithm than the file
+        # means the file was edited by hand after a recorded switch.
+        ledger_disagrees = (
+            latest_switch is not None and latest_switch["to_algorithm"] != algorithm
+        )
         scheduler_report: dict[str, Any] = {
-            "algorithm": settings.algorithm,
-            "algorithm_version": settings.algorithm_version,
-            "learning_context": settings.learning_context,
-            "configuration": settings.configuration,
+            "algorithm": algorithm,
+            "algorithm_version": settings.algorithm_version if settings else None,
+            "learning_context": learning_context,
+            "configuration": settings.configuration if settings else None,
+            "configuration_error": configuration_error,
             "unrecorded_switch_from": unrecorded_source,
             "last_switch": dict(latest_switch) if latest_switch is not None else None,
+            "last_switch_matches_configuration": not ledger_disagrees,
         }
         healthy = (
             database == "ok"
             and not stale_items
             and not stale_source_links
             and not legacy_files
+            and configuration_error is None
             and unrecorded_source is None
+            and not ledger_disagrees
         )
         workload = self._workload_counts(
             now or datetime.now(timezone.utc),
-            algorithm=settings.algorithm,
-            learning_context=settings.learning_context,
+            algorithm=algorithm,
+            learning_context=learning_context,
         )
         return {
             "status": "healthy" if healthy else "needs-attention",
