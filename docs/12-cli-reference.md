@@ -55,11 +55,12 @@ Inspect the spaced-repetition algorithm or adopt another built-in one.
 
 ```
 virtuoso --workspace PATH scheduler show [--json]
+virtuoso --workspace PATH scheduler configure --minimum-interval-days DAYS [--json]
 virtuoso --workspace PATH scheduler switch --to ALGORITHM [--json]
 virtuoso --workspace PATH scheduler history [--json]
 ```
 
-Built-in algorithms: `fsrs` (default, version `6.3.2`, configuration `desired_retention` and `enable_fuzzing`) and `sm2` (version `sm2-1990/1`, configuration `first_interval_days`, `second_interval_days`, `minimum_easiness`). `virtuoso.json` selects the algorithm under `scheduler.algorithm`; every other `scheduler` key except `context` belongs to that algorithm and is validated by it. Keys from another algorithm fail with exit 2.
+Built-in algorithms: `fsrs` (default, version `6.3.2`, configuration `desired_retention`, `enable_fuzzing`, and optional `minimum_interval_days`) and `sm2` (version `sm2-1990/1`, configuration `first_interval_days`, `second_interval_days`, `minimum_easiness`). `virtuoso.json` selects the algorithm under `scheduler.algorithm`; every other `scheduler` key except `context` belongs to that algorithm and is validated by it. Keys from another algorithm fail with exit 2.
 
 `scheduler show` output schema: `virtuoso/scheduler-settings@0.1` with `algorithm`, `algorithm_version`, `learning_context`, `configuration`, and `built_in_algorithms`.
 
@@ -68,6 +69,18 @@ Changing `scheduler.algorithm` by hand on a workspace that already holds state f
 `scheduler switch --to ALGORITHM` validates the target, appends one `virtuoso/scheduler-switch@0.1` row (`switch_id`, `from_algorithm`, `to_algorithm`, `learning_context`, `mode`, `items_with_prior_state`, `occurred_at`), and rewrites the `scheduler` block of `virtuoso.json` with the target's default configuration. The row and the file change land together or not at all. Mode is `fresh`: the target sees every item as new at its first attempt; the previous algorithm's state and proposals stay as history and remain visible in `attempts`. No memory parameters are converted between algorithms. Switching to the configured algorithm fails with exit 2 unless the guard above is active, in which case the switch records the algorithm that still holds state as `from_algorithm`.
 
 `scheduler history` output schema: `virtuoso/scheduler-history@0.1` with the chronological `switches` list. Switch rows reject update and deletion.
+
+#### Minimum FSRS interval
+
+`scheduler configure --minimum-interval-days DAYS` atomically updates only that setting in `virtuoso.json`. It accepts integers from 0 through 36500 and requires FSRS. Invalid input exits 2 without changing configuration or evidence. The JSON response uses `virtuoso/scheduler-settings@0.1` with `algorithm`, `algorithm_version`, `learning_context`, `configuration`, `built_in_algorithms`, and `existing_due_dates_changed: false`.
+
+Set `1` for a minimum of 24 elapsed hours after an attempt. Set `7` for a week. Set `0` to keep FSRS's own timing, including minute-scale learning steps. Omission also means zero; existing configurations and proposal payloads keep their original shape until you set a minimum.
+
+The FSRS backend computes the review first, including any fuzzing, then uses the later of its due time and `attempt.occurred_at + DAYS`. This includes learning and relearning after a failed attempt. The serialized card and proposal share that effective due time. A positive setting adds the configured minimum, original due time, and effective due time to the rationale. The memory parameters and rating mapping remain FSRS outputs.
+
+Changing only the minimum preserves existing memory state; the next recorded attempt uses the new setting. Existing due dates and previous proposals remain unchanged, so an item already due can still appear immediately. Other scheduler configuration changes and version mismatches retain the existing incompatibility checks. If the minimum changes between proposal generation and recording, the write fails with a retry instruction. `scheduler history` continues to list algorithm switches only. Switching algorithms resets the target configuration to its defaults, including an omitted minimum for FSRS.
+
+The minimum is a scheduling preference around FSRS. Delaying a review beyond its recommended time may reduce actual retention. SM-2 does not accept this setting. No database migration or retrospective rescheduling runs.
 
 ## Items
 

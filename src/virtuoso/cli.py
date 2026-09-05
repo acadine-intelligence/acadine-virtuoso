@@ -256,7 +256,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true")
 
     scheduler = commands.add_parser(
-        "scheduler", help="inspect or switch the spaced-repetition algorithm"
+        "scheduler", help="inspect, configure, or switch the spaced-repetition algorithm"
     )
     scheduler_commands = scheduler.add_subparsers(
         dest="scheduler_command", required=True
@@ -265,6 +265,14 @@ def _parser() -> argparse.ArgumentParser:
         "show", help="show the configured algorithm, version, and configuration"
     )
     scheduler_show.add_argument("--json", action="store_true")
+    scheduler_configure = scheduler_commands.add_parser(
+        "configure", help="set the FSRS minimum interval for future attempts"
+    )
+    scheduler_configure.add_argument(
+        "--minimum-interval-days", required=True, type=int, metavar="DAYS",
+        help="whole days from 0 through 36500; 0 keeps FSRS timing; 1 means 24 hours",
+    )
+    scheduler_configure.add_argument("--json", action="store_true")
     scheduler_switch = scheduler_commands.add_parser(
         "switch",
         help="adopt another built-in algorithm and record the switch",
@@ -855,6 +863,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "configuration": settings.configuration,
                         "built_in_algorithms": list(builtin_algorithms()),
                     },
+                    as_json=args.json,
+                )
+                return 0
+            if args.scheduler_command == "configure":
+                _emit(
+                    workspace.configure_scheduler(minimum_interval_days=args.minimum_interval_days),
                     as_json=args.json,
                 )
                 return 0

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from .errors import VirtuosoError
-from .schedulers import AttemptFacts, SchedulerError
+from .schedulers import AttemptFacts, SchedulerError, configurations_compatible
 from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
 
@@ -413,7 +413,9 @@ class PracticeService:
                 f"stored {label} state has an incompatible algorithm version: "
                 f"{snapshot.algorithm_version!r}; expected {version!r}"
             )
-        if snapshot is not None and snapshot.configuration != configuration:
+        if snapshot is not None and not configurations_compatible(
+            backend.name, snapshot.configuration, configuration
+        ):
             raise PracticeError(
                 f"stored {label} state has an incompatible scheduler configuration; "
                 "start a new context or migrate the state explicitly"
