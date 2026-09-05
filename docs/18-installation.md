@@ -24,6 +24,8 @@ For Obsidian, use the installed executable path (`command -v virtuoso` on macOS 
 
 CI uses GitHub-owned Actions pinned to commit SHAs. `ci/bootstrap.txt` pins uv and approved wheel hashes, so the existing Actions allowlist needs no change. `uv.lock` supplies project dependencies and the build group. `uv build --no-build-isolation` uses the prepared locked backend. Build dependencies are separate from the package's runtime requirements.
 
+The installation jobs use a bootstrap Python to install uv. uv downloads each requested test interpreter. This avoids relying on GitHub's interpreter catalogue, which lacks some supported macOS ARM patch releases. Each job runs the installation check with that requested interpreter.
+
 The build job uploads a wheel, source distribution and exported installation requirements under a commit-scoped artifact name. Installation jobs download those exact bytes. Each distribution gets a separate environment and a temporary working directory outside the checkout. The check clears Python source overrides, verifies the installed import origin and `py.typed`, then records one synthetic administered attempt through the installed command. This is a functional installation check for trusted artifacts, not an OS sandbox.
 
 The manual, main-only release workflow waits for the complete CI workflow. It downloads the tested distributions without rebuilding them, repeats their installation check, builds the Obsidian plugin and assembles the fixed release assets. The final job verifies transferred assets before creating a draft. Publication remains a maintainer action. This workflow does not upload to a package registry or update a user's installation.

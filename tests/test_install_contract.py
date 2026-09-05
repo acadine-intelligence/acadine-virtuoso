@@ -65,6 +65,13 @@ class InstallContractTests(unittest.TestCase):
                                         text=True, env={**os.environ, "NEEDS_JSON": json.dumps(needs)})
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
 
+    def test_matrix_uses_uv_for_the_requested_interpreter(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        install = ci.split("  install:", 1)[1].split("  obsidian-plugin:", 1)[0]
+        self.assertIn('uv python install "$TEST_PYTHON"', install)
+        self.assertIn('uv run --no-project --python "$TEST_PYTHON" python scripts/check_distributions.py', install)
+        self.assertIn("TEST_PYTHON: ${{ matrix.python }}", install)
+
     def test_ci_uses_locked_sync_and_commit_pinned_actions(self) -> None:
         for name in ("ci.yml", "release.yml"):
             with self.subTest(workflow=name):
