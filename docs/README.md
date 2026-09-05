@@ -21,6 +21,7 @@ Use the current guides for the implemented v0.1.0 behavior. The other records ex
 - [Learning research](10-learning-research.md)
 - [Evidence-ranked design](11-evidence-ranked-design.md)
 - [API consideration](14-api-consideration.md)
+- [Scheduler portfolio design](18-scheduler-portfolio-design.md): proposal for selectable and user-supplied scheduling algorithms (issue #47)
 
 These records include target designs and deferred work. They do not expand the interfaces documented in `12-cli-reference.md`.
 
