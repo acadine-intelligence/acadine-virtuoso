@@ -303,11 +303,10 @@ class PublicRepositoryContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         commands = (
-            "python -m venv .venv",
-            ".venv/bin/python -m pip install -e .",
-            ".venv/bin/python -m compileall -q src tests",
-            ".venv/bin/python -m unittest discover -s tests -v",
-            ".venv/bin/virtuoso --help",
+            "uv sync --locked --group build",
+            "uv run --locked python -m compileall -q src tests scripts",
+            "uv run --locked python -m unittest discover -s tests -v",
+            "uv run --locked virtuoso --help",
             "npm ci",
             "npm run typecheck",
             "npm test",
