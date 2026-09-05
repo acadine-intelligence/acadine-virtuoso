@@ -146,7 +146,7 @@ class CandidateDecisionTests(unittest.TestCase):
                            '2026-08-20T10:01:00+00:00', 'edit', NULL, NULL
                        )"""
                 )
-        self.assertEqual(version, 15)
+        self.assertEqual(version, 16)
         self.assertEqual(row, (None, None, None))
 
 

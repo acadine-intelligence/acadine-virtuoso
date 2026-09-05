@@ -485,7 +485,7 @@ class LearningDomainTests(unittest.TestCase):
                     " AND name LIKE 'study_events_reject_%'"
                 ).fetchall()
             }
-        self.assertEqual(versions, list(range(1, 16)))
+        self.assertEqual(versions, list(range(1, 17)))
         self.assertEqual(row, ("recall-first", None))
         self.assertEqual(study_count, 0)
         self.assertEqual(
@@ -548,7 +548,7 @@ class LearningDomainTests(unittest.TestCase):
                     " AND name LIKE 'composition_%'"
                 ).fetchall()
             }
-        self.assertEqual(versions, list(range(1, 16)))
+        self.assertEqual(versions, list(range(1, 17)))
         self.assertEqual(proposal_count, 0)
         self.assertEqual(decision_count, 0)
         self.assertEqual(
@@ -607,7 +607,7 @@ class LearningDomainTests(unittest.TestCase):
                     " AND name LIKE 'benchmark_%'"
                 ).fetchall()
             }
-        self.assertEqual(versions, list(range(1, 16)))
+        self.assertEqual(versions, list(range(1, 17)))
         self.assertEqual((runs, observations, reruns), (0, 0, 0))
         self.assertEqual(
             triggers,

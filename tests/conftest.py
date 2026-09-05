@@ -81,8 +81,17 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_scheduler_switches_to_v15(db: sqlite3.Connection) -> None:
+    """Remove migration 16 scheduler-switch state from a fresh test database."""
+    db.execute("DROP TRIGGER IF EXISTS scheduler_switches_reject_update")
+    db.execute("DROP TRIGGER IF EXISTS scheduler_switches_reject_delete")
+    db.execute("DROP TABLE IF EXISTS scheduler_switches")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 16")
+
+
 def downgrade_benchmark_to_v14(db: sqlite3.Connection) -> None:
     """Remove migration 15 benchmark state from a fresh test database."""
+    downgrade_scheduler_switches_to_v15(db)
     for trigger in (
         "benchmark_runs_reject_update",
         "benchmark_runs_reject_delete",

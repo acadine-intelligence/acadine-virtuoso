@@ -58,7 +58,7 @@ Every attempt stores the actual start and completion times, your initial respons
 
 A study event records the exact item hash, learning-unit hash, time, and source surface. It records exposure only. If either hash changes, Virtuoso asks for a new learning step and keeps the old event as history.
 
-Scheduling is explainable: each attempt produces a scheduler proposal carrying the algorithm, version, configuration, previous state, proposed state, and a plain-language rationale. FSRS 6.3.2 is the built-in scheduler; the module protocol lets you swap it for your own. See the [acknowledgements](docs/17-acknowledgements.md) for the FSRS and py-fsrs projects behind the default.
+Scheduling is explainable: each attempt produces a scheduler proposal carrying the algorithm, version, configuration, previous state, proposed state, and a plain-language rationale. FSRS 6.3.2 is the default scheduler and SM-2 ships as a second built-in; `virtuoso scheduler switch --to sm2` changes algorithm with a recorded, fail-closed switch and no silent state mixing. See the [acknowledgements](docs/17-acknowledgements.md) for the FSRS, py-fsrs, and SuperMemo 2 work behind the built-ins.
 
 ## Beyond single items
 

@@ -2,6 +2,12 @@
 
 The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases (tag at `1df2c99`, published 2026-09-04). Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. Sections under "Included in v0.1.0" landed before the tag. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased scheduler portfolio
+
+Virtuoso now runs more than one spaced-repetition algorithm. `schedulers.py` defines a `SchedulerBackend` protocol; FSRS (`fsrs`, version `6.3.2`) moved behind it with unchanged behaviour and stays the default for every new and existing workspace. `sm2` (SuperMemo 2, written from the published 1990 description, version `sm2-1990/1`) ships as the second built-in with configuration `first_interval_days`, `second_interval_days`, and `minimum_easiness`. Every proposal keeps recording algorithm, version, configuration, previous and proposed state, due time, and rationale.
+
+`virtuoso.json` accepts `scheduler.algorithm: sm2`; each algorithm validates its own configuration keys and rejects keys that belong to another. Changing the algorithm by hand on a workspace that already holds state for another algorithm fails closed in `practice`, `review`, `next`, `compose`, `queries workload`, and `scheduler show`, and `doctor` reports it. The new `scheduler switch --to ALGORITHM` command records one append-only row (migration 16, `scheduler_switches`) and rewrites the configuration in the same transaction. Mode is `fresh`: no memory parameters are converted; the previous algorithm's state and proposals stay as history. `scheduler show` and `scheduler history` are read-only. `doctor` gains a `scheduler` object. The workspace now checks the proposed state's own due time against `due_at` for every algorithm, not only FSRS. Tracks #47 (built-in portfolio and switch); external schedulers through the module boundary remain open.
+
 ## Unreleased Obsidian projection
 
 `export obsidian --out DIR` writes one frontmatter-only Markdown stub per review-queue item into a folder outside the workspace, plus a manifest, so Obsidian Bases can show the workspace due queue with no second scheduler. Stubs carry item id, title, focus, status, next review, project ids, content hash, and generation time; no answer or hint content is exported. The command refuses targets inside the workspace, symlinks, and folders holding files it did not generate, and removes stubs for items that left the queue. Repeated runs at the same instant are byte-identical. Closes #45.

@@ -355,15 +355,9 @@ class ReviewService:
             if state.action == "practice"
         }
 
-        scheduler = self.workspace.configuration().get("scheduler")
-        if not isinstance(scheduler, dict):
-            raise WorkspaceError("workspace scheduler configuration is missing")
-        algorithm = scheduler.get("algorithm")
-        context = scheduler.get("context")
-        if not isinstance(algorithm, str) or not algorithm:
-            raise WorkspaceError("scheduler algorithm must be a non-empty string")
-        if not isinstance(context, str) or not context:
-            raise WorkspaceError("scheduler context must be a non-empty string")
+        settings = self.workspace.scheduler_settings()
+        algorithm = settings.algorithm
+        context = settings.learning_context
 
         with sqlite3.connect(self.workspace.db_path) as db:
             db.row_factory = sqlite3.Row

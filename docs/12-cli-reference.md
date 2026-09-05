@@ -47,7 +47,27 @@ Check workspace health: database integrity, item freshness, source-link stalenes
 virtuoso --workspace PATH doctor [--json]
 ```
 
-JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `study_events`, `learning`, `stale_items`, `stale_source_links`, `legacy_files`, `workspace_schema`, `workload`. Each `legacy_files` entry has `path`, `reason`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) reports current scheduler state. The `learning` object reports `waiting_for_learning` and `ready_for_practice` across active items. `study_events` counts all retained study history. The command is read-only. It never repairs missing schema objects or changes evidence.
+JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`, `attempts`, `proposals`, `transfer_events`, `study_events`, `learning`, `scheduler`, `stale_items`, `stale_source_links`, `legacy_files`, `workspace_schema`, `workload`. Each `legacy_files` entry has `path`, `reason`. The `workload` object (`due_now`, `scheduled_total`, `new_items`) reports current scheduler state. The `learning` object reports `waiting_for_learning` and `ready_for_practice` across active items. The `scheduler` object reports the configured `algorithm`, `algorithm_version`, `learning_context`, `configuration`, `unrecorded_switch_from` (an algorithm that still holds state after `virtuoso.json` was edited by hand, or `null`), and `last_switch`. An unrecorded switch makes the status `needs-attention`. `study_events` counts all retained study history. The command is read-only. It never repairs missing schema objects or changes evidence.
+
+### `scheduler`
+
+Inspect the spaced-repetition algorithm or adopt another built-in one.
+
+```
+virtuoso --workspace PATH scheduler show [--json]
+virtuoso --workspace PATH scheduler switch --to ALGORITHM [--json]
+virtuoso --workspace PATH scheduler history [--json]
+```
+
+Built-in algorithms: `fsrs` (default, version `6.3.2`, configuration `desired_retention` and `enable_fuzzing`) and `sm2` (version `sm2-1990/1`, configuration `first_interval_days`, `second_interval_days`, `minimum_easiness`). `virtuoso.json` selects the algorithm under `scheduler.algorithm`; every other `scheduler` key except `context` belongs to that algorithm and is validated by it. Keys from another algorithm fail with exit 2.
+
+`scheduler show` output schema: `virtuoso/scheduler-settings@0.1` with `algorithm`, `algorithm_version`, `learning_context`, `configuration`, and `built_in_algorithms`.
+
+Changing `scheduler.algorithm` by hand on a workspace that already holds state for another algorithm in the same context fails closed: `practice`, `review record`, `review due`, `next`, `compose`, `queries workload`, and `scheduler show` exit 2 with `scheduler algorithm changed from A to B without a recorded switch; run: virtuoso scheduler switch --to B`, and `doctor` reports `needs-attention`. No evidence is written while the guard holds.
+
+`scheduler switch --to ALGORITHM` validates the target, appends one `virtuoso/scheduler-switch@0.1` row (`switch_id`, `from_algorithm`, `to_algorithm`, `learning_context`, `mode`, `items_with_prior_state`, `occurred_at`), and rewrites the `scheduler` block of `virtuoso.json` with the target's default configuration. The row and the file change land together or not at all. Mode is `fresh`: the target sees every item as new at its first attempt; the previous algorithm's state and proposals stay as history and remain visible in `attempts`. No memory parameters are converted between algorithms. Switching to the configured algorithm fails with exit 2 unless the guard above is active, in which case the switch records the algorithm that still holds state as `from_algorithm`.
+
+`scheduler history` output schema: `virtuoso/scheduler-history@0.1` with the chronological `switches` list. Switch rows reject update and deletion.
 
 ## Items
 
@@ -163,7 +183,7 @@ Interactive protocol (stdout prompts, stdin answers, in order):
 6. `Confidence [1-5]:`
 7. If the result was not `demonstrated` and the item has a follow-up: `Follow-up response:`.
 
-On completion the attempt (with full assistance attribution) and an FSRS 6.3.2 scheduling proposal are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt.
+On completion the attempt (with full assistance attribution) and a scheduling proposal from the configured algorithm (FSRS 6.3.2 by default; see `scheduler`) are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt.
 
 ### `practice --administer`
 
@@ -182,7 +202,7 @@ Contract:
 - The attempt row carries `administered = 1`, so administered and direct interactive attempts stay distinguishable in every query.
 - `--agent-help` defaults to `substantial` in this mode (the agent mediated the whole exchange). Pass a different level only when it honestly applies.
 - A blank `--response` cannot be graded `demonstrated`; the command fails closed.
-- The same FSRS proposal flow runs as for interactive attempts; the proposal rationale states that latency was unmeasured.
+- The same scheduler proposal flow runs as for interactive attempts; the proposal rationale states that latency was unmeasured.
 
 JSON output: `{"event_id", "item_id", "result", "confidence", "agent_help", "administered": true, "initial_latency_ms": null, "occurred_at", "proposal_due_at", "proposal_algorithm"}`.
 
@@ -254,7 +274,7 @@ Show recorded evidence and scheduler proposals.
 virtuoso --workspace PATH attempts [--json]
 ```
 
-JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2`), `learning_context`, `due_at` and `rationale`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
+JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2` for `fsrs`, `sm2-1990/1` for `sm2`), `learning_context`, `configuration`, `due_at` and `rationale`. Proposals made under a previous algorithm stay listed after a `scheduler switch`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
 
 ## Read-only analytics
 

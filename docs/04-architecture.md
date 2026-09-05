@@ -11,7 +11,7 @@ learner / harness
 cli.py -> workspace, learning, practice, candidate, review, query, and search services
              |-> Markdown item files
              |-> SQLite study/recall evidence, scheduler state, and derived search index
-             |-> built-in FSRS adapter
+             |-> built-in scheduler backends (FSRS default, SM-2)
              `-> external command module runner
 
 optional local interfaces: Obsidian plugin and Hermes plugin
@@ -28,9 +28,10 @@ The package is flat. These files are the implemented boundaries:
 - `learning.py`: the bounded interactive learning step and completion decision.
 - `learning_state.py`: shared typed learn-or-practice projection for current item versions.
 - `modules.py`: trusted external command manifests and execution.
-- `practice.py`: active-recall sessions and FSRS proposals.
+- `practice.py`: active-recall sessions and scheduler proposals through the configured backend.
 - `queries.py`: read-only evidence and workload projections.
 - `review.py`: versioned review contracts for local interfaces.
+- `schedulers.py`: the scheduler backend protocol and the built-in FSRS and SM-2 backends.
 - `search.py`: lexical and caller-supplied-vector retrieval.
 - `workload.py`: shared current-schedule workload projection.
 - `workspace.py`: workspace files, SQLite schema, sources, evidence, and transfers.
@@ -59,11 +60,15 @@ Historical due values remain candidate metadata. Import creates no scheduler sta
 
 Recall attempts, project-transfer events, and delayed transfer checks stay separate. A transfer event binds to the exact learning-item hash and records project, use case, outcome, independence, optional artifact reference, reflection, and a delayed-check date. One manually authored delayed check may inherit that date and append a pre-attempt prediction followed by an immutable completion containing the independent attempt, assistance attribution, scorer-bound acceptance evidence, teach-back, outcome, and optional inert artifact reference. The event, check, prediction, and completion rows reject direct update or deletion and fix `claims_mastery` to false. Their UTC chronology is causal: check creation cannot precede its source event; late check creation is allowed but cannot be backdated; prediction cannot precede either the inherited due time or check creation; and completion cannot precede check creation or prediction. The check queue is chronological capability evidence only: it never reads or writes recall attempts, scheduler state/proposals, or project selection/priority. Capability views may later interpret repeated evidence, but cannot rewrite these source records.
 
-SQLite migrations run in transactions and fail closed. Migration 13 adds item learning metadata and the append-only study-event ledger. Migration 14 adds append-only session composition proposals and learner decisions. Migration 15 adds append-only benchmark runs, observations, rerun links, and proposal markers. Existing items become recall-first and existing workspaces gain empty composition and benchmark tables without invented study, proposal, decision, or benchmark evidence. The current migrations are additive or reconstruct constrained tables without inventing evidence; automatic backup and restore are not implemented. Operators must make a consistent local backup before a future destructive migration. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
+SQLite migrations run in transactions and fail closed. Migration 13 adds item learning metadata and the append-only study-event ledger. Migration 14 adds append-only session composition proposals and learner decisions. Migration 15 adds append-only benchmark runs, observations, rerun links, and proposal markers. Migration 16 adds the append-only scheduler-switch ledger. Existing items become recall-first and existing workspaces gain empty composition, benchmark, and switch tables without invented study, proposal, decision, benchmark, or switch evidence. The current migrations are additive or reconstruct constrained tables without inventing evidence; automatic backup and restore are not implemented. Operators must make a consistent local backup before a future destructive migration. Runtime databases, WAL files, logs, and learner workspaces are ignored by Git.
 
 ## Scheduler portfolio
 
-Each scheduler implements one typed port and stores state under its own algorithm id. The first adapter is `fsrs@6.3.2` for atomic recall. Every proposal records its package version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory. Later schedulers may serve computational exercises, explanation, and writing without overwriting FSRS state.
+`schedulers.py` defines one `SchedulerBackend` protocol: validate the algorithm's own configuration keys, turn one attempt plus the previous stored state into a proposal (`proposed_state_json`, `due_at`, rationale), and read the due time back out of a stored state. Two built-ins implement it: `fsrs` (the `fsrs` package, version `6.3.2`, the default) and `sm2` (SuperMemo 2 written from the published 1990 description, version `sm2-1990/1`). `practice.py` asks the workspace for the configured backend and never imports an algorithm directly. The workspace validates every proposal the same way before storing it, including that the proposed state's own due time matches `due_at`.
+
+Scheduler state is keyed by item, algorithm, and learning context, so two algorithms never overwrite each other. Changing `scheduler.algorithm` in `virtuoso.json` while another algorithm still holds state in that context fails closed in every reader and writer until `scheduler switch` records the change in the append-only `scheduler_switches` table (migration 16) and rewrites the configuration in the same transaction. The only switch mode is `fresh`: no memory parameters are converted between algorithms, and the previous algorithm's state and proposals stay as history.
+
+Every proposal records its algorithm, version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory. External schedulers through the `scheduler` module category are designed in `18-scheduler-portfolio-design.md` and not yet wired to practice.
 
 The future meta-scheduler compares outcomes within comparable contexts and chooses only among learner-approved policies. It does not invent intervals or infer competence.
 

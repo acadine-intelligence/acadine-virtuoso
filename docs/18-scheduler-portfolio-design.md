@@ -1,6 +1,6 @@
 # Scheduler portfolio design
 
-Status: proposal for review. Tracks issue #47. No code in this change.
+Status: sections 1, 2, 4, and 5 are implemented (built-in portfolio, `scheduler switch`, fail-closed guard, attribution). Section 3 (external schedulers through the module boundary) remains a proposal. Tracks issue #47.
 
 ## Problem
 
