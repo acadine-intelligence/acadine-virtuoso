@@ -370,6 +370,8 @@ class WorkspaceSchedulerTests(unittest.TestCase):
         self.assertEqual(report["status"], "healthy")
         self.assertEqual(report["scheduler"]["algorithm"], "sm2")
         self.assertIsNone(report["scheduler"]["unrecorded_switch_from"])
+        self.assertIsNone(report["scheduler"]["configuration_error"])
+        self.assertTrue(report["scheduler"]["last_switch_matches_configuration"])
 
     def test_sm2_configuration_mismatch_fails_closed_like_fsrs(self) -> None:
         self._write_scheduler({"algorithm": "sm2", "context": "atomic-recall"})
@@ -517,6 +519,92 @@ class WorkspaceSchedulerTests(unittest.TestCase):
             self.workspace.switch_scheduler(to_algorithm="sm2", now=datetime(2026, 8, 19))
         self.assertEqual(self.workspace.list_scheduler_switches(), [])
         self.assertEqual(json.loads(self.workspace.config_path.read_text())["scheduler"]["algorithm"], "fsrs")
+
+    def test_two_switches_with_the_same_timestamp_resolve_in_record_order(self) -> None:
+        """Review finding: ordering by occurred_at with a random id tie-break
+        misfired when the API recorded two switches at one `now`, once both
+        algorithms held state. Record order (rowid) is the only honest order
+        for an append-only ledger."""
+        self._practise("alpha")
+        self.workspace.switch_scheduler(to_algorithm="sm2", now=NOW)
+        self._practise("beta", at=NOW)
+        for _ in range(20):
+            self.workspace.switch_scheduler(to_algorithm="fsrs", now=NOW)
+            self.assertEqual(self.workspace.scheduler_settings().algorithm, "fsrs")
+            self.workspace.switch_scheduler(to_algorithm="sm2", now=NOW)
+            self.assertEqual(self.workspace.scheduler_settings().algorithm, "sm2")
+        history = self.workspace.list_scheduler_switches()
+        self.assertEqual(len(history), 41)
+        self.assertEqual(
+            [(s["from_algorithm"], s["to_algorithm"]) for s in history],
+            [("fsrs", "sm2")] + [("sm2", "fsrs"), ("fsrs", "sm2")] * 20,
+        )
+        # An out-of-order occurred_at must not outrank the newest record.
+        self.workspace.switch_scheduler(to_algorithm="fsrs", now=NOW - timedelta(days=1))
+        self.assertEqual(self.workspace.scheduler_settings().algorithm, "fsrs")
+        report = self.workspace.doctor(now=NOW)
+        self.assertEqual(report["status"], "healthy")
+        self.assertEqual(report["scheduler"]["last_switch"]["to_algorithm"], "fsrs")
+
+    def test_doctor_reports_a_ledger_that_disagrees_with_the_file(self) -> None:
+        """Review finding: a recorded switch to B with a file still naming A
+        looked healthy. The file can only reach that state by hand."""
+        self._practise("alpha")
+        self.workspace.switch_scheduler(to_algorithm="sm2", now=NOW)
+        self._write_scheduler(
+            {
+                "algorithm": "fsrs",
+                "context": "atomic-recall",
+                "desired_retention": 0.9,
+                "enable_fuzzing": False,
+            }
+        )
+        report = self.workspace.doctor(now=NOW)
+        self.assertEqual(report["status"], "needs-attention")
+        self.assertFalse(report["scheduler"]["last_switch_matches_configuration"])
+        self.assertEqual(report["scheduler"]["last_switch"]["to_algorithm"], "sm2")
+        # Readers still work (fsrs holds the only state), so the repair path
+        # must be the switch command, which records sm2 -> fsrs from the ledger.
+        self.assertEqual(self.workspace.scheduler_settings().algorithm, "fsrs")
+        back = self.workspace.switch_scheduler(to_algorithm="fsrs", now=NOW + timedelta(hours=1))
+        self.assertEqual((back["from_algorithm"], back["to_algorithm"]), ("sm2", "fsrs"))
+        self.assertEqual(back["items_with_prior_state"], 0)
+        report = self.workspace.doctor(now=NOW)
+        self.assertEqual(report["status"], "healthy")
+        self.assertTrue(report["scheduler"]["last_switch_matches_configuration"])
+        with self.assertRaisesRegex(WorkspaceError, "already fsrs; nothing to switch"):
+            self.workspace.switch_scheduler(to_algorithm="fsrs", now=NOW + timedelta(hours=2))
+
+    def test_doctor_reports_a_broken_scheduler_configuration_instead_of_failing(self) -> None:
+        """Review finding: doctor raised on another algorithm's keys while the
+        sibling hand-edit mistake was reported as needs-attention."""
+        self._write_scheduler(
+            {
+                "algorithm": "sm2",
+                "context": "atomic-recall",
+                "desired_retention": 0.9,
+                "enable_fuzzing": False,
+            }
+        )
+        report = self.workspace.doctor(now=NOW)
+        self.assertEqual(report["status"], "needs-attention")
+        self.assertIn(
+            "unknown scheduler configuration fields for sm2",
+            report["scheduler"]["configuration_error"],
+        )
+        self.assertEqual(report["scheduler"]["algorithm"], "sm2")
+        self.assertIsNone(report["scheduler"]["configuration"])
+        self.assertIsNone(report["scheduler"]["algorithm_version"])
+        self.assertEqual(
+            report["workload"], {"due_now": 0, "scheduled_total": 0, "new_items": 2}
+        )
+        # An unknown algorithm is reported the same way.
+        self._write_scheduler({"algorithm": "leitner", "context": "atomic-recall"})
+        report = self.workspace.doctor(now=NOW)
+        self.assertEqual(report["status"], "needs-attention")
+        self.assertIn(
+            "unsupported built-in scheduler", report["scheduler"]["configuration_error"]
+        )
 
     def test_switch_rows_are_append_only(self) -> None:
         self.workspace.switch_scheduler(to_algorithm="sm2", now=NOW)
