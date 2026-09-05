@@ -357,15 +357,12 @@ class SessionComposer:
     def _practice_composition(
         self, *, focus: str | None, now: datetime
     ) -> tuple[str, str, str, tuple[str, ...], list[dict[str, Any]], tuple[str, ...]]:
-        scheduler = self.workspace.configuration().get("scheduler")
-        if not isinstance(scheduler, dict):
-            raise CompositionError("workspace scheduler configuration is missing")
-        algorithm = scheduler.get("algorithm")
-        learning_context = scheduler.get("context")
-        if not isinstance(algorithm, str) or not algorithm:
-            raise CompositionError("scheduler algorithm must be a non-empty string")
-        if not isinstance(learning_context, str) or not learning_context:
-            raise CompositionError("scheduler context must be a non-empty string")
+        try:
+            settings = self.workspace.scheduler_settings()
+        except WorkspaceError as exc:
+            raise CompositionError(str(exc)) from exc
+        algorithm = settings.algorithm
+        learning_context = settings.learning_context
         try:
             with self.workspace._connect() as db:
                 schedules = current_schedules(

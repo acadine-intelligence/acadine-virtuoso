@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.metadata
 import sqlite3
 import textwrap
 import time
@@ -9,9 +8,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from fsrs import Card, Rating, Scheduler
-
 from .errors import VirtuosoError
+from .schedulers import AttemptFacts, SchedulerError
 from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
 
@@ -394,47 +392,30 @@ class PracticeService:
         self, *, item: LearningItem, attempt: AttemptRecord
     ) -> SchedulerProposal:
         try:
-            scheduler_config = self.workspace.configuration().get("scheduler")
+            settings = self.workspace.scheduler_settings()
+            backend = self.workspace.scheduler_backend(settings.algorithm)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
-        if not isinstance(scheduler_config, dict):
-            raise PracticeError("workspace scheduler configuration is missing")
-        if scheduler_config.get("algorithm") != "fsrs":
-            raise PracticeError(
-                f"unsupported built-in scheduler: {scheduler_config.get('algorithm')!r}"
+        context = settings.learning_context
+        configuration = settings.configuration
+        version = settings.algorithm_version
+        label = backend.name.upper() if backend.name != "sm2" else "SM-2"
+        try:
+            snapshot = self.workspace.scheduler_snapshot(
+                item_id=item.item_id,
+                algorithm=backend.name,
+                learning_context=context,
             )
-        context = scheduler_config.get("context", item.learning_context)
-        if not isinstance(context, str) or not context.strip():
-            raise PracticeError("scheduler context must be a non-empty string")
-        desired_retention = scheduler_config.get("desired_retention", 0.9)
-        if (
-            not isinstance(desired_retention, (int, float))
-            or isinstance(desired_retention, bool)
-            or not 0 < float(desired_retention) < 1
-        ):
-            raise PracticeError("scheduler desired_retention must be a number between 0 and 1")
-        desired_retention = float(desired_retention)
-        enable_fuzzing = scheduler_config.get("enable_fuzzing", False)
-        if not isinstance(enable_fuzzing, bool):
-            raise PracticeError("scheduler enable_fuzzing must be true or false")
-        configuration: dict[str, object] = {
-            "desired_retention": desired_retention,
-            "enable_fuzzing": enable_fuzzing,
-        }
-        version = importlib.metadata.version("fsrs")
-        snapshot = self.workspace.scheduler_snapshot(
-            item_id=item.item_id,
-            algorithm="fsrs",
-            learning_context=context,
-        )
+        except WorkspaceError as exc:
+            raise PracticeError(str(exc)) from exc
         if snapshot is not None and snapshot.algorithm_version != version:
             raise PracticeError(
-                "stored FSRS state has an incompatible algorithm version: "
+                f"stored {label} state has an incompatible algorithm version: "
                 f"{snapshot.algorithm_version!r}; expected {version!r}"
             )
         if snapshot is not None and snapshot.configuration != configuration:
             raise PracticeError(
-                "stored FSRS state has an incompatible scheduler configuration; "
+                f"stored {label} state has an incompatible scheduler configuration; "
                 "start a new context or migrate the state explicitly"
             )
         previous_state = snapshot.state_json if snapshot is not None else None
@@ -442,63 +423,34 @@ class PracticeService:
             snapshot.source_event_id if snapshot is not None else None
         )
         try:
-            card = (
-                Card.from_json(previous_state)
-                if previous_state
-                else Card(due=attempt.occurred_at)
+            outcome = backend.propose(
+                previous_state_json=previous_state,
+                attempt=AttemptFacts(
+                    result=attempt.result,
+                    confidence=attempt.confidence,
+                    occurred_at=attempt.occurred_at,
+                    latency_ms=attempt.initial_latency_ms,
+                    administered=attempt.administered,
+                ),
+                configuration=configuration,
             )
-        except (TypeError, ValueError, KeyError) as exc:
-            raise PracticeError(f"stored FSRS state is invalid: {exc}") from exc
-        rating = {
-            "demonstrated": Rating.Good,
-            "partial": Rating.Hard,
-            "not-demonstrated": Rating.Again,
-        }[attempt.result]
-        scheduler = Scheduler(
-            desired_retention=desired_retention,
-            enable_fuzzing=enable_fuzzing,
-        )
-        try:
-            next_card, _review_log = scheduler.review_card(
-                card,
-                rating,
-                review_datetime=attempt.occurred_at,
-                review_duration=attempt.initial_latency_ms,
-            )
-        except (TypeError, ValueError) as exc:
-            raise PracticeError(f"FSRS could not schedule this attempt: {exc}") from exc
+        except SchedulerError as exc:
+            raise PracticeError(str(exc)) from exc
 
-        created_at = attempt.occurred_at
-        proposed_state = next_card.to_json()
-        if attempt.administered:
-            latency_clause = (
-                "latency unmeasured (agent-administered) and support are retained "
-                "as evidence "
-            )
-        else:
-            latency_clause = (
-                f"latency {attempt.initial_latency_ms} ms and support are retained "
-                "as evidence "
-            )
-        rationale = (
-            f"FSRS rating {rating.name} from result {attempt.result}; "
-            + latency_clause
-            + "but do not assert competence."
-        )
         return SchedulerProposal(
             proposal_id=f"proposal-{uuid.uuid4().hex}",
             source_event_id=attempt.event_id,
             item_id=item.item_id,
-            algorithm="fsrs",
+            algorithm=backend.name,
             algorithm_version=version,
             learning_context=context,
-            configuration=configuration,
-            due_at=next_card.due,
-            rationale=rationale,
+            configuration=dict(configuration),
+            due_at=outcome.due_at,
+            rationale=outcome.rationale,
             previous_state_json=previous_state,
-            proposed_state_json=proposed_state,
+            proposed_state_json=outcome.proposed_state_json,
             previous_source_event_id=previous_source_event_id,
-            created_at=created_at,
+            created_at=attempt.occurred_at,
         )
 
     def _persist(

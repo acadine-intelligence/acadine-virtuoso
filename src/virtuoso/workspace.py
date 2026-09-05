@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import errno
 import json
-import math
 import os
 import re
 import sqlite3
@@ -19,6 +18,11 @@ from .learning_state import (
     LearningActionState,
     LearningStateDataError,
     current_learning_states,
+)
+from .schedulers import (
+    SchedulerBackend,
+    SchedulerError,
+    resolve_backend,
 )
 from .workload import (
     WorkloadDataError,
@@ -45,7 +49,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 15
+_CURRENT_MIGRATION_VERSION = 16
 
 
 class WorkspaceError(VirtuosoError):
@@ -124,6 +128,16 @@ class SchedulerSnapshot:
     state_json: str
     source_event_id: str
     algorithm_version: str
+    configuration: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SchedulerSettings:
+    """The configured scheduler after backend validation."""
+
+    algorithm: str
+    algorithm_version: str
+    learning_context: str
     configuration: dict[str, Any]
 
 
@@ -472,29 +486,215 @@ class WorkspaceService:
         scheduler = value["scheduler"]
         if not isinstance(scheduler, dict):
             raise WorkspaceError("workspace scheduler configuration must be a JSON object")
-        self._require_exact_fields(
-            scheduler,
-            {"algorithm", "context", "desired_retention", "enable_fuzzing"},
-            "scheduler configuration",
-        )
-        if scheduler["algorithm"] != "fsrs":
-            raise WorkspaceError("scheduler algorithm must be 'fsrs'")
+        missing = sorted({"algorithm", "context"} - set(scheduler))
+        if missing:
+            raise WorkspaceError(
+                "missing scheduler configuration fields: " + ", ".join(missing)
+            )
+        algorithm = scheduler["algorithm"]
+        if not isinstance(algorithm, str) or not algorithm.strip():
+            raise WorkspaceError("scheduler algorithm must be a non-empty string")
         context = scheduler["context"]
         if not isinstance(context, str) or not context.strip():
             raise WorkspaceError("scheduler context must be a non-empty string")
-        desired_retention = scheduler["desired_retention"]
-        if (
-            not isinstance(desired_retention, (int, float))
-            or isinstance(desired_retention, bool)
-            or not math.isfinite(float(desired_retention))
-            or not 0 < float(desired_retention) < 1
-        ):
-            raise WorkspaceError(
-                "scheduler desired_retention must be a finite number between 0 and 1"
-            )
-        if not isinstance(scheduler["enable_fuzzing"], bool):
-            raise WorkspaceError("scheduler enable_fuzzing must be true or false")
         return value
+
+    def scheduler_settings(self) -> SchedulerSettings:
+        """The configured scheduler, validated by its backend and checked
+        against recorded state.
+
+        Fails closed when `virtuoso.json` names an algorithm whose
+        configuration keys are invalid, or when scheduler state exists for a
+        different algorithm in the configured context without a recorded
+        `scheduler switch`. Reads only; writes nothing.
+        """
+        scheduler = self.configuration()["scheduler"]
+        settings = self._validated_scheduler_settings(scheduler)
+        self._require_recorded_switch(
+            algorithm=settings.algorithm, learning_context=settings.learning_context
+        )
+        return settings
+
+    def scheduler_backend(self, algorithm: str | None = None) -> SchedulerBackend:
+        """The built-in backend for `algorithm` (default: the configured one)."""
+        if algorithm is None:
+            algorithm = self.configuration()["scheduler"]["algorithm"]
+        try:
+            return resolve_backend(algorithm)
+        except SchedulerError as exc:
+            raise WorkspaceError(str(exc)) from exc
+
+    @staticmethod
+    def _validated_scheduler_settings(scheduler: dict[str, Any]) -> SchedulerSettings:
+        try:
+            backend = resolve_backend(scheduler["algorithm"])
+            configuration = backend.validate_configuration(
+                {
+                    key: value
+                    for key, value in scheduler.items()
+                    if key not in ("algorithm", "context")
+                }
+            )
+        except SchedulerError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        return SchedulerSettings(
+            algorithm=backend.name,
+            algorithm_version=backend.version,
+            learning_context=scheduler["context"],
+            configuration=configuration,
+        )
+
+    def _stated_algorithms(
+        self, db: sqlite3.Connection, *, learning_context: str
+    ) -> dict[str, int]:
+        """Algorithms with stored scheduler state in one context, with item counts."""
+        rows = db.execute(
+            """SELECT algorithm, COUNT(*) AS items
+               FROM scheduler_state
+               WHERE learning_context = ?
+               GROUP BY algorithm
+               ORDER BY algorithm""",
+            (learning_context,),
+        ).fetchall()
+        return {row["algorithm"]: int(row["items"]) for row in rows}
+
+    @staticmethod
+    def _latest_switch(
+        db: sqlite3.Connection, *, learning_context: str
+    ) -> sqlite3.Row | None:
+        return db.execute(
+            """SELECT switch_id, from_algorithm, to_algorithm, learning_context,
+                      mode, items_with_prior_state, occurred_at
+               FROM scheduler_switches
+               WHERE learning_context = ?
+               ORDER BY occurred_at DESC, created_at DESC, switch_id DESC
+               LIMIT 1""",
+            (learning_context,),
+        ).fetchone()
+
+    def _unrecorded_switch_source(
+        self,
+        db: sqlite3.Connection,
+        *,
+        algorithm: str,
+        learning_context: str,
+    ) -> str | None:
+        """The algorithm that still holds state when the configured one was
+        adopted without `scheduler switch`, or None when consistent."""
+        stated = self._stated_algorithms(db, learning_context=learning_context)
+        others = [name for name in stated if name != algorithm]
+        if not others:
+            return None
+        latest = self._latest_switch(db, learning_context=learning_context)
+        if latest is not None and latest["to_algorithm"] == algorithm:
+            return None
+        if latest is not None and latest["from_algorithm"] in others:
+            return latest["from_algorithm"]
+        return others[0]
+
+    def _require_recorded_switch(self, *, algorithm: str, learning_context: str) -> None:
+        with self._connect() as db:
+            source = self._unrecorded_switch_source(
+                db, algorithm=algorithm, learning_context=learning_context
+            )
+        if source is not None:
+            raise WorkspaceError(
+                f"scheduler algorithm changed from {source} to {algorithm} "
+                "without a recorded switch; "
+                f"run: virtuoso scheduler switch --to {algorithm}"
+            )
+
+    def list_scheduler_switches(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT switch_id, from_algorithm, to_algorithm, learning_context,
+                          mode, items_with_prior_state, occurred_at
+                   FROM scheduler_switches
+                   ORDER BY occurred_at, created_at, switch_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def switch_scheduler(
+        self, *, to_algorithm: str, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Adopt another built-in algorithm for the configured context.
+
+        Mode `fresh`: the target sees every item as new at its first
+        attempt. Prior state and proposals under the previous algorithm stay
+        as history. One append-only `scheduler_switches` row and the
+        rewritten `virtuoso.json` land together or not at all.
+        """
+        occurred_at = now or datetime.now(timezone.utc)
+        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            raise WorkspaceError("scheduler switch timestamp must be timezone-aware")
+        occurred_at = occurred_at.astimezone(timezone.utc)
+        backend = self.scheduler_backend(to_algorithm)
+        config = self.configuration()
+        scheduler = config["scheduler"]
+        current = scheduler["algorithm"]
+        learning_context = scheduler["context"]
+        new_configuration = backend.default_configuration()
+        new_config = {
+            **config,
+            "scheduler": {
+                "algorithm": backend.name,
+                "context": learning_context,
+                **new_configuration,
+            },
+        }
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = self._unrecorded_switch_source(
+                db, algorithm=backend.name, learning_context=learning_context
+            )
+            if current == backend.name:
+                if source is None:
+                    raise WorkspaceError(
+                        f"scheduler algorithm is already {backend.name}; nothing to switch"
+                    )
+                from_algorithm = source
+            else:
+                from_algorithm = current
+            stated = self._stated_algorithms(db, learning_context=learning_context)
+            record = {
+                "switch_id": f"scheduler-switch-{uuid.uuid4().hex}",
+                "from_algorithm": from_algorithm,
+                "to_algorithm": backend.name,
+                "learning_context": learning_context,
+                "mode": "fresh",
+                "items_with_prior_state": stated.get(from_algorithm, 0),
+                "occurred_at": occurred_at.isoformat(),
+            }
+            db.execute(
+                """INSERT INTO scheduler_switches(
+                       switch_id, from_algorithm, to_algorithm, learning_context,
+                       mode, items_with_prior_state, occurred_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                tuple(record.values()),
+            )
+            self._replace_private_text(
+                self.config_path,
+                json.dumps(new_config, indent=2, sort_keys=True) + "\n",
+                label="workspace configuration",
+            )
+        return {
+            "schema": "virtuoso/scheduler-switch@0.1",
+            **record,
+            "algorithm_version": backend.version,
+            "configuration": new_configuration,
+        }
+
+    def _replace_private_text(self, path: Path, text: str, *, label: str) -> None:
+        """Atomically replace an owned private file through a same-directory temp file."""
+        if path.is_symlink():
+            raise WorkspaceError(f"Virtuoso-owned path must not be a symlink: {path}")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        identity = self._write_private_text_exclusive(temporary, text, label=label)
+        try:
+            os.replace(temporary, path)
+        except OSError as exc:
+            self._unlink_if_identity(temporary, identity)
+            raise WorkspaceError(f"cannot replace {label} {path}: {exc}") from exc
 
     @staticmethod
     def _load_json(text: str, *, label: str) -> Any:
@@ -1255,6 +1455,28 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'benchmark_reruns is append-only');
                 END""",
+            # Migration 16: append-only record of scheduler algorithm switches.
+            """CREATE TABLE IF NOT EXISTS scheduler_switches (
+                switch_id TEXT PRIMARY KEY,
+                from_algorithm TEXT NOT NULL CHECK(length(from_algorithm) BETWEEN 1 AND 64),
+                to_algorithm TEXT NOT NULL CHECK(length(to_algorithm) BETWEEN 1 AND 64),
+                learning_context TEXT NOT NULL CHECK(length(learning_context) BETWEEN 1 AND 64),
+                mode TEXT NOT NULL CHECK(mode IN ('fresh')),
+                items_with_prior_state INTEGER NOT NULL CHECK(items_with_prior_state >= 0),
+                occurred_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(from_algorithm != to_algorithm)
+            )""",
+            """CREATE TRIGGER scheduler_switches_reject_update
+                BEFORE UPDATE ON scheduler_switches
+                BEGIN
+                    SELECT RAISE(ABORT, 'scheduler_switches is append-only');
+                END""",
+            """CREATE TRIGGER scheduler_switches_reject_delete
+                BEFORE DELETE ON scheduler_switches
+                BEGIN
+                    SELECT RAISE(ABORT, 'scheduler_switches is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1338,6 +1560,7 @@ class WorkspaceService:
                 13: statements[55:60],
                 14: statements[60:69],
                 15: statements[69:79],
+                16: statements[79:82],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -4060,14 +4283,16 @@ class WorkspaceService:
             raise WorkspaceError(f"invalid proposed scheduler state: {exc}") from exc
         if not isinstance(proposed_state, dict):
             raise WorkspaceError("invalid proposed scheduler state: expected an object")
-        if proposal["algorithm"] == "fsrs":
-            state_due = self._parse_aware_datetime(
-                proposed_state.get("due"), label="proposed FSRS state due timestamp"
+        # Every algorithm's stored state carries its own due timestamp, so the
+        # workspace validates each proposal the same way instead of trusting
+        # one backend more than another.
+        state_due = self._parse_aware_datetime(
+            proposed_state.get("due"), label="proposed scheduler state due timestamp"
+        )
+        if state_due != due_at:
+            raise WorkspaceError(
+                "scheduler due timestamp does not match the proposed scheduler state"
             )
-            if state_due != due_at:
-                raise WorkspaceError(
-                    "scheduler due timestamp does not match the proposed FSRS state"
-                )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             item_row = db.execute(
@@ -4464,15 +4689,9 @@ class WorkspaceService:
             raise WorkspaceError(str(exc)) from exc
         if focus is not None and not focus.strip():
             raise WorkspaceError("focus filter must be a non-empty string")
-        scheduler = self.configuration().get("scheduler")
-        if not isinstance(scheduler, dict):
-            raise WorkspaceError("workspace scheduler configuration is missing")
-        algorithm = scheduler.get("algorithm")
-        learning_context = scheduler.get("context")
-        if not isinstance(algorithm, str) or not algorithm:
-            raise WorkspaceError("scheduler algorithm must be a non-empty string")
-        if not isinstance(learning_context, str) or not learning_context:
-            raise WorkspaceError("scheduler context must be a non-empty string")
+        settings = self.scheduler_settings()
+        algorithm = settings.algorithm
+        learning_context = settings.learning_context
         try:
             with self._connect() as db:
                 schedules = current_schedules(
@@ -4691,17 +4910,36 @@ class WorkspaceService:
                         "relative_path": row["source_relative_path"],
                     }
                 )
+        scheduler = config["scheduler"]
+        settings = self._validated_scheduler_settings(scheduler)
+        with self._connect() as db:
+            unrecorded_source = self._unrecorded_switch_source(
+                db,
+                algorithm=settings.algorithm,
+                learning_context=settings.learning_context,
+            )
+            latest_switch = self._latest_switch(
+                db, learning_context=settings.learning_context
+            )
+        scheduler_report: dict[str, Any] = {
+            "algorithm": settings.algorithm,
+            "algorithm_version": settings.algorithm_version,
+            "learning_context": settings.learning_context,
+            "configuration": settings.configuration,
+            "unrecorded_switch_from": unrecorded_source,
+            "last_switch": dict(latest_switch) if latest_switch is not None else None,
+        }
         healthy = (
             database == "ok"
             and not stale_items
             and not stale_source_links
             and not legacy_files
+            and unrecorded_source is None
         )
-        scheduler = config["scheduler"]
         workload = self._workload_counts(
             now or datetime.now(timezone.utc),
-            algorithm=scheduler["algorithm"],
-            learning_context=scheduler["context"],
+            algorithm=settings.algorithm,
+            learning_context=settings.learning_context,
         )
         return {
             "status": "healthy" if healthy else "needs-attention",
@@ -4720,6 +4958,7 @@ class WorkspaceService:
                     state.action == "practice" for state in learning_states
                 ),
             },
+            "scheduler": scheduler_report,
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
             "legacy_files": legacy_files,

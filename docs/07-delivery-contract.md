@@ -12,7 +12,7 @@ This iteration is complete only when all of the following work from a clean loca
 6. `virtuoso --workspace PATH learn --item ID` shows only the current learning unit and appends one study event after explicit completion. Stopping or failing writes nothing. Study creates no attempt, scheduler, transfer, capability, or mastery evidence.
 7. Every direct, administered, and review practice writer rejects a learn-first item until a matching current study event exists.
 8. `virtuoso --workspace PATH practice --item ID` shows the prompt before the answer, measures initial recall with a monotonic clock, supports retry then hint then worked answer, times a failed/partial follow-up response, and records actual attempt start/completion times, result, confidence, notes state, response text, answer reveal, and support attribution.
-9. The completed attempt appends immutable evidence and an FSRS next-review proposal that names algorithm `fsrs`, installed version, configuration, learning context, source event, and due time.
+9. The completed attempt appends immutable evidence and a next-review proposal from the configured built-in scheduler (`fsrs` by default, `sm2` optional) that names the algorithm, its version, configuration, learning context, source event, and due time. Changing the algorithm on a workspace with recorded state fails closed until `scheduler switch` records the change.
 10. `virtuoso --workspace PATH attempts --json` returns separate study, attempt, skip, and proposal evidence without claiming mastery.
 11. The extension boundary validates and invokes one trusted local executable through `virtuoso/module@0.1` only when calling code passes `allow_trusted=True`. Tests prove that unknown fields/schema, missing calling-code opt-in, shell or command-wrapper indirection, malformed or incomplete typed output, timeout, oversized output, nested private-state projections, descendant spawning, and manifest identity drift fail closed. There is no public CLI command for module execution and no consent dialog. Descendant spawning is denied with a POSIX process limit and execution fails closed when that control is unavailable. The trusted executable still has the invoking user's file permissions, so this boundary is not an OS sandbox.
 12. `virtuoso --workspace PATH doctor --json` reports a healthy workspace after the journey and explains active learn-versus-practice counts.
@@ -58,7 +58,7 @@ A non-implementing reviewer inspects the exact Git commit for:
 - product and delivery-contract fit;
 - answer-hiding and timing logic;
 - learning-evidence attribution;
-- FSRS integration and scheduler-state isolation;
+- FSRS integration, the scheduler backend protocol, and scheduler-state isolation;
 - SQLite transactions and migration safety;
 - module process security, timeout, output bounds, and schema validation;
 - privacy, path handling, and absence of personal data;

@@ -15,6 +15,7 @@ from .errors import VirtuosoError
 from .learning import LearningService
 from .practice import PracticeIO, PracticeService
 from .review import ReviewError, ReviewService
+from .schedulers import builtin_algorithms
 from .workspace import WorkspaceError, WorkspaceService
 
 
@@ -253,6 +254,27 @@ def _parser() -> argparse.ArgumentParser:
 
     doctor = commands.add_parser("doctor", help="check workspace health")
     doctor.add_argument("--json", action="store_true")
+
+    scheduler = commands.add_parser(
+        "scheduler", help="inspect or switch the spaced-repetition algorithm"
+    )
+    scheduler_commands = scheduler.add_subparsers(
+        dest="scheduler_command", required=True
+    )
+    scheduler_show = scheduler_commands.add_parser(
+        "show", help="show the configured algorithm, version, and configuration"
+    )
+    scheduler_show.add_argument("--json", action="store_true")
+    scheduler_switch = scheduler_commands.add_parser(
+        "switch",
+        help="adopt another built-in algorithm and record the switch",
+    )
+    scheduler_switch.add_argument("--to", required=True, metavar="ALGORITHM")
+    scheduler_switch.add_argument("--json", action="store_true")
+    scheduler_history = scheduler_commands.add_parser(
+        "history", help="list recorded algorithm switches"
+    )
+    scheduler_history.add_argument("--json", action="store_true")
 
     export = commands.add_parser(
         "export", help="write read-only projections of workspace state"
@@ -787,14 +809,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if args.query_command == "workload":
-                scheduler = workspace.configuration()["scheduler"]
+                settings = workspace.scheduler_settings()
                 _emit(
                     {
                         "schema": "virtuoso/workload-by-focus@0.1",
                         "focuses": queries_module.workload_by_focus(
                             workspace.db_path,
-                            algorithm=scheduler["algorithm"],
-                            learning_context=scheduler["context"],
+                            algorithm=settings.algorithm,
+                            learning_context=settings.learning_context,
                         ),
                     },
                     as_json=args.json,
@@ -821,6 +843,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "scheduler":
+            if args.scheduler_command == "show":
+                settings = workspace.scheduler_settings()
+                _emit(
+                    {
+                        "schema": "virtuoso/scheduler-settings@0.1",
+                        "algorithm": settings.algorithm,
+                        "algorithm_version": settings.algorithm_version,
+                        "learning_context": settings.learning_context,
+                        "configuration": settings.configuration,
+                        "built_in_algorithms": list(builtin_algorithms()),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.scheduler_command == "switch":
+                _emit(workspace.switch_scheduler(to_algorithm=args.to), as_json=args.json)
+                return 0
+            if args.scheduler_command == "history":
+                _emit(
+                    {
+                        "schema": "virtuoso/scheduler-history@0.1",
+                        "switches": workspace.list_scheduler_switches(),
+                    },
+                    as_json=args.json,
+                )
+                return 0
         if args.command == "search":
             from dataclasses import asdict as _asdict
 

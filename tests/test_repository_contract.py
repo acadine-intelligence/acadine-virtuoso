@@ -99,10 +99,16 @@ class PublicRepositoryContractTests(unittest.TestCase):
             "virtuoso --workspace PATH review load --item ID --json",
             "virtuoso --workspace PATH review record --json",
             "virtuoso --workspace PATH review skip --json",
+            "virtuoso --workspace PATH scheduler show [--json]",
+            "virtuoso --workspace PATH scheduler switch --to ALGORITHM [--json]",
+            "virtuoso --workspace PATH scheduler history [--json]",
         )
         schemas = (
             "virtuoso/item@0.2",
             "virtuoso/next-action@0.1",
+            "virtuoso/scheduler-settings@0.1",
+            "virtuoso/scheduler-switch@0.1",
+            "virtuoso/scheduler-history@0.1",
             "virtuoso/benchmark-run@0.1",
             "virtuoso/focus-proposal@0.1",
             "virtuoso/learner-decision@0.1",
@@ -142,6 +148,7 @@ class PublicRepositoryContractTests(unittest.TestCase):
             "practice.py",
             "queries.py",
             "review.py",
+            "schedulers.py",
             "search.py",
             "workspace.py",
         )
