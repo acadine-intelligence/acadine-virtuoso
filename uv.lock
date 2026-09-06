@@ -1,0 +1,56 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "acadine-virtuoso"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fsrs" },
+    { name = "typing-extensions" },
+]
+
+[package.dev-dependencies]
+build = [
+    { name = "setuptools" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fsrs", specifier = "==6.3.2" },
+    { name = "typing-extensions", specifier = "==4.16.0" },
+]
+
+[package.metadata.requires-dev]
+build = [{ name = "setuptools", specifier = "==80.9.0" }]
+
+[[package]]
+name = "fsrs"
+version = "6.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/cf/3995867b03de059624aa49634d62895eef211f909b322c4a478dcd858bd8/fsrs-6.3.2.tar.gz", hash = "sha256:7fe79947ceb92ca35fdca3dfa511a239be15b317cde63d6643a2da6110844d91", size = 32766, upload-time = "2026-08-09T04:36:03.074Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/b9/c815e796480dd22441886f06b23f249a7ff2e3f41fc9bfaa428332e34b49/fsrs-6.3.2-py3-none-any.whl", hash = "sha256:bc55066c821164b1cff6d75b17a3ed8e86cfd45789e3d775cfcb895319ce9ba4", size = 22837, upload-time = "2026-08-09T04:36:01.932Z" },
+]
+
+[[package]]
+name = "setuptools"
+version = "80.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/18/5d/3bf57dcd21979b887f014ea83c24ae194cfcd12b9e0fda66b957c69d1fca/setuptools-80.9.0.tar.gz", hash = "sha256:f36b47402ecde768dbfafc46e8e4207b4360c654f1f3bb84475f0a28628fb19c", size = 1319958, upload-time = "2025-05-27T00:56:51.443Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl", hash = "sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922", size = 1201486, upload-time = "2025-05-27T00:56:49.664Z" },
+]
+
+[[package]]
+name = "typing-extensions"
+version = "4.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
+]

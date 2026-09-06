@@ -16,6 +16,9 @@ dependencies = [
   "typing-extensions==4.16.0",
 ]
 
+[dependency-groups]
+build = ["setuptools==80.9.0"]
+
 [project.scripts]
 virtuoso = "virtuoso.cli:main"
 

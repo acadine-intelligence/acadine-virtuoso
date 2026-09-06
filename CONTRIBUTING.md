@@ -11,16 +11,28 @@ Virtuoso accepts focused changes that preserve local ownership of learning data 
 
 ## Python setup and checks
 
-Python 3.11 or newer is required. Confirm that `python` resolves to a supported version, then run the same commands as public CI:
+Python 3.11 or newer is required. Install uv 0.10.10 for parity with CI. `.python-version` selects Python 3.11.15; uv can download it. CI bootstraps uv with `python -m pip install --only-binary=:all: --require-hashes -r ci/bootstrap.txt` after setting up Python. A normal contributor can install uv through its official installer.
 
 ```bash
-python --version
-python -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/python -m compileall -q src tests
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/virtuoso --help
+uv sync --locked --group build
+uv run --locked python -m compileall -q src tests scripts
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked virtuoso --help
 ```
+
+`--locked` refuses stale dependency metadata. When intentionally changing dependencies, run `uv lock` and review the lockfile diff. Keep the build backend version in `[build-system]` and the `build` dependency group equal.
+
+Build the distributions with the locked backend, then test installation outside the checkout:
+
+```bash
+uv sync --locked --group build
+uv build --no-build-isolation --out-dir dist/python
+uv export --locked --no-emit-project --group build --format requirements-txt --output-file dist/install-requirements.txt
+uv run --locked python scripts/check_distributions.py
+uv run --locked python -m unittest discover -s tests/integration -v
+```
+
+The installation check creates a fresh environment for each distribution. It installs hash-locked dependencies first, then installs the artifact with dependency resolution and network access disabled. It checks the package resources and runs an administered practice journey with `doctor`. Integration controls remove a packaged resource and require rejection. CI installs the same distributions on macOS and Linux with Python 3.11 through 3.14. Later Python releases are unverified until added to the matrix.
 
 Use synthetic temporary workspaces for tests. Do not point tests at a personal Virtuoso workspace or Obsidian vault.
 

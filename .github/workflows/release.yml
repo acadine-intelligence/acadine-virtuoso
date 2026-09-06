@@ -13,7 +13,7 @@ concurrency:
 jobs:
   guard:
     name: Require main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Reject any other ref
@@ -31,11 +31,11 @@ jobs:
   build:
     name: Build verified assets
     needs: required-ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -50,27 +50,34 @@ jobs:
           mkdir -p dist/python
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: plugins/obsidian/package-lock.json
 
-      - name: Install Python build tools
+      - name: Install pinned uv and locked project
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -e . "build==1.6.0"
+          python -m pip install --only-binary=:all: --require-hashes -r ci/bootstrap.txt
+          uv sync --locked --group build
 
       - name: Validate source versions
         run: .venv/bin/python scripts/release_artifacts.py version
 
-      - name: Build Python distributions
-        run: .venv/bin/python -m build --sdist --wheel --outdir dist/python
+      # Required CI installs these exact bytes on macOS and Linux.
+      - name: Download tested Python distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-dist-${{ github.sha }}
+          path: dist/
+
+      - name: Recheck transferred installations
+        run: python scripts/check_distributions.py
 
       - name: Install plugin dependencies
         working-directory: plugins/obsidian
@@ -95,7 +102,7 @@ jobs:
         run: .venv/bin/python scripts/release_artifacts.py verify
 
       - name: Upload exact release directory
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: virtuoso-release-${{ github.sha }}
           path: dist/release
@@ -106,25 +113,25 @@ jobs:
   release:
     name: Create draft GitHub Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: read
       contents: write
     steps:
       - name: Check out exact workflow commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
 
       - name: Download exact release directory
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: virtuoso-release-${{ github.sha }}
           path: dist/release
@@ -153,6 +160,7 @@ jobs:
           fi
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Repository identity and version enter the shell through environment variables.
       - name: Create draft release at this commit
         env:
           GH_TOKEN: ${{ github.token }}

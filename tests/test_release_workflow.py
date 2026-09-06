@@ -64,15 +64,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(workflow.count("contents: write"), 1)
         self.assertIn("contents: write", release)
         allowed_uses = {
-            "actions/checkout@v7",
-            "actions/setup-python@v7",
-            "actions/setup-node@v7",
-            "actions/upload-artifact@v7",
-            "actions/download-artifact@v8",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
             "./.github/workflows/ci.yml",
         }
         observed = {
-            line.split("uses:", 1)[1].strip()
+            line.split("uses:", 1)[1].split("#", 1)[0].strip()
             for line in workflow.splitlines()
             if "uses:" in line
         }
@@ -86,21 +86,31 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for marker in (
             "test ! -L dist",
             "rm -rf dist build",
-            "build==1.6.0",
-            "python -m build --sdist --wheel --outdir dist/python",
+            "uv sync --locked --group build",
+            "name: python-dist-${{ github.sha }}",
+            "scripts/check_distributions.py",
             "npm ci",
             "npm run typecheck",
             "npm test",
             "npm run build",
             "scripts/release_artifacts.py assemble",
             "scripts/release_artifacts.py verify",
-            "actions/upload-artifact@v7",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, build)
-        self.assertIn("actions/download-artifact@v8", release)
+        self.assertIn("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", release)
         self.assertIn("scripts/release_artifacts.py verify", release)
         self.assertIn("dist/release", workflow)
+        self.assertNotIn("uv build", build, "Release must reuse the tested distributions")
+        ci = _text(CI_WORKFLOW)
+        self.assertIn("uv build --no-build-isolation --out-dir dist/python", ci)
+        self.assertIn("name: python-dist-${{ github.sha }}", ci)
+        install = _job_block(ci, "install")
+        self.assertIn("needs: python", install)
+        self.assertIn("python scripts/check_distributions.py", install)
+        self.assertIn("macos-14", install)
+        self.assertIn("ubuntu-24.04", install)
 
     def test_release_creation_is_draft_only_and_fails_closed(self) -> None:
         workflow = _text(RELEASE_WORKFLOW)

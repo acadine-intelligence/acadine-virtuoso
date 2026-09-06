@@ -1,0 +1,9 @@
+# uv bootstrap for macOS x86_64/arm64 and Linux x86_64/arm64.
+# SHA-256 values from https://pypi.org/pypi/uv/0.10.10/json
+# Install with pip --only-binary=:all: --require-hashes.
+uv==0.10.10 \
+    --hash=sha256:ee47b5bc1b8ccd246a3801611b2b71c8107db3a2b528e64463d737fd8e4f2798 \
+    --hash=sha256:009a4c534e83bada52c8e2cccea6250e3486d01d609e4eb874cd302e2e534269 \
+    --hash=sha256:e42e9e4a196ef75d1089715574eb1fe9bb62d390da05c6c8b36650a4de23d59f \
+    --hash=sha256:5dd85cc8ff9fa967c02c3edbf2b77d54b56bedcb56b323edec0df101f37f26e2 \
+    --hash=sha256:fbd827042dbdcadeb5e3418bee73ded9feb5ead8edac23e6e1b5dadb5a90f8b2
