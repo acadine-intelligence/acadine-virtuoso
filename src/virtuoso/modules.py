@@ -39,6 +39,7 @@ _ALLOWED_READS = {
     "attempt.summary",
     "focus.summary",
     "scheduler.summary",
+    "scheduler.request",
     "project.summary",
 }
 _PRIVATE_STATE_KEYS = {
@@ -84,6 +85,13 @@ _MODULE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _PROJECTION_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "scheduler.request": {
+        "item_id": str,
+        "learning_context": str,
+        "attempt": dict,
+        "previous_state": (dict, type(None)),
+        "configuration": dict,
+    },
     "challenge.summary": {
         "item_id": str,
         "title": str,
@@ -126,6 +134,7 @@ _RESULT_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
         "algorithm_version": str,
         "learning_context": str,
         "configuration": dict,
+        "proposed_state": dict,
         "rationale": str,
     },
     "practice-proposal": {
@@ -154,6 +163,13 @@ _SUPPORT_ACTION_FIELDS: dict[str, type | tuple[type, ...]] = {
     "kind": str,
     "response": (str, type(None)),
     "latency_ms": (int, type(None)),
+}
+_SCHEDULER_ATTEMPT_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "result": str,
+    "confidence": int,
+    "occurred_at": str,
+    "latency_ms": (int, type(None)),
+    "administered": bool,
 }
 _SUPPORT_ACTION_KINDS = {
     "retry",
@@ -630,6 +646,39 @@ class ModuleRunner:
                     raise ModuleError(f"{projection}.{field} must be a {type_name}")
             if projection == "attempt.summary" and "support_actions" in body:
                 cls._validate_support_actions(body["support_actions"])
+            if projection == "scheduler.request":
+                _require_exact_keys(body, set(schema), "scheduler.request")
+                attempt = body["attempt"]
+                assert isinstance(attempt, dict)
+                _require_exact_keys(
+                    attempt, set(_SCHEDULER_ATTEMPT_FIELDS),
+                    "scheduler.request.attempt",
+                )
+                for field, child in attempt.items():
+                    expected = _SCHEDULER_ATTEMPT_FIELDS[field]
+                    if isinstance(child, bool) and expected != bool:
+                        valid = False
+                    else:
+                        valid = isinstance(child, expected)
+                    if not valid:
+                        raise ModuleError(
+                            f"scheduler.request.attempt.{field} has an invalid type"
+                        )
+                if attempt["result"] not in {
+                    "demonstrated", "partial", "not-demonstrated"
+                }:
+                    raise ModuleError(
+                        "scheduler.request.attempt.result is not supported"
+                    )
+                if not 1 <= attempt["confidence"] <= 5:
+                    raise ModuleError(
+                        "scheduler.request.attempt.confidence must be from 1 to 5"
+                    )
+                latency = attempt["latency_ms"]
+                if latency is not None and latency < 0:
+                    raise ModuleError(
+                        "scheduler.request.attempt.latency_ms must be non-negative"
+                    )
 
     @classmethod
     def _validate_result_payload(cls, kind: str, payload: dict[str, Any]) -> None:

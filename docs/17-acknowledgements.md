@@ -14,6 +14,10 @@ The second built-in scheduler, `sm2`, implements the SuperMemo 2 algorithm publi
 
 Any future built-in algorithm adds its entry here in the same change that adds the code.
 
+## Fixed ladder example
+
+`examples/modules/fixed-ladder/` is a dependency-free illustration of the external scheduler contract. Its 1, 3, 7, 14, and 30 day ladder with failure reset is a simple example policy. Virtuoso makes no novelty or research-performance claim for it.
+
 ## Tooling
 
 - [Obsidian](https://obsidian.md) hosts the optional review plugin. The plugin speaks only to the local CLI.

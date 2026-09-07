@@ -2,6 +2,14 @@
 
 The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases (tag at `1df2c99`, published 2026-09-04). Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. Sections under "Included in v0.1.0" landed before the tag. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased external schedulers
+
+Workspaces can select a trusted local scheduler as `module:<module-id>` from a private manifest under `workspace/modules/<module-id>/virtuoso.module.json`. The module receives one narrowly typed `scheduler.request` projection in the existing `virtuoso/module-request@0.1` envelope. It receives attempt facts, prior scheduler state, context, and its finite configuration object, but no workspace path, database path, or learner prose. The `scheduler-proposal` result now requires `proposed_state`.
+
+Practice execution requires `--allow-trusted-scheduler` for each CLI run, or `allow_trusted=True` for each Python service call. Read-only commands validate configuration and the manifest without executing it. Results must match manifest identity, version, context, and configuration and provide a timezone-aware due time, matching state due time, and nonempty rationale. Accepted module receipts are stored atomically with the attempt and proposal. Rejected executions, timeouts, stale manifests, and invalid proposals store no receipt and leave the database unchanged. Generic module runs retain their earlier failure-receipt behavior.
+
+The dependency-free `fixed-ladder` example demonstrates 1, 3, 7, 14, and 30 day intervals with failure reset. It serves as an example policy and makes no novelty claim. Tracks #47.
+
 ## Unreleased minimum FSRS interval
 
 `scheduler configure --minimum-interval-days DAYS` sets an optional FSRS interval floor. Whole days from 0 through 36500 are accepted; zero keeps the existing FSRS timing. One day means 24 elapsed hours after each attempt, including learning and relearning. Longer intervals stay unchanged. Proposals record the floor and the original FSRS due time alongside the effective due time stored in the card.
@@ -12,7 +20,7 @@ Changing only the floor preserves FSRS memory state. Existing due dates and prev
 
 Virtuoso now runs more than one spaced-repetition algorithm. `schedulers.py` defines a `SchedulerBackend` protocol; FSRS (`fsrs`, version `6.3.2`) moved behind it with unchanged behaviour and stays the default for every new and existing workspace. `sm2` (SuperMemo 2, written from the published 1990 description, version `sm2-1990/1`) ships as the second built-in with configuration `first_interval_days`, `second_interval_days`, and `minimum_easiness`. Every proposal keeps recording algorithm, version, configuration, previous and proposed state, due time, and rationale.
 
-`virtuoso.json` accepts `scheduler.algorithm: sm2`; each algorithm validates its own configuration keys and rejects keys that belong to another. Changing the algorithm by hand on a workspace that already holds state for another algorithm fails closed in `practice`, `review`, `next`, `compose`, `queries workload`, and `scheduler show`, and `doctor` reports it. The new `scheduler switch --to ALGORITHM` command records one append-only row (migration 16, `scheduler_switches`) and rewrites the configuration in the same transaction. Mode is `fresh`: no memory parameters are converted; the previous algorithm's state and proposals stay as history. `scheduler show` and `scheduler history` are read-only. `doctor` gains a `scheduler` object. The workspace now checks the proposed state's own due time against `due_at` for every algorithm, not only FSRS. Tracks #47 (built-in portfolio and switch); external schedulers through the module boundary remain open.
+`virtuoso.json` accepts `scheduler.algorithm: sm2`; each algorithm validates its own configuration keys and rejects keys that belong to another. Changing the algorithm by hand on a workspace that already holds state for another algorithm fails closed in `practice`, `review`, `next`, `compose`, `queries workload`, and `scheduler show`, and `doctor` reports it. The new `scheduler switch --to ALGORITHM` command records one append-only row (migration 16, `scheduler_switches`) and rewrites the configuration in the same transaction. Mode is `fresh`: no memory parameters are converted; the previous algorithm's state and proposals stay as history. `scheduler show` and `scheduler history` are read-only. `doctor` gains a `scheduler` object. The workspace now checks the proposed state's own due time against `due_at` for every algorithm, not only FSRS. Tracks #47 (built-in portfolio and switch).
 
 ## Unreleased Obsidian projection
 

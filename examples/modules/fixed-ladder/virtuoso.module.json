@@ -1,0 +1,20 @@
+{
+  "capabilities": {
+    "reads": [
+      "scheduler.request"
+    ],
+    "returns": "scheduler-proposal"
+  },
+  "category": "scheduler",
+  "command": {
+    "argv": [
+      "python3",
+      "fixed_ladder.py"
+    ],
+    "timeout_seconds": 2
+  },
+  "id": "fixed-ladder",
+  "schema": "virtuoso/module@0.1",
+  "trust": "local-executable",
+  "version": "1.0.0"
+}

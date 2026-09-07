@@ -19,6 +19,7 @@ from .learning_state import (
     LearningStateDataError,
     current_learning_states,
 )
+from .modules import ModuleError, ModuleManifest
 from .schedulers import (
     SchedulerBackend,
     SchedulerError,
@@ -141,6 +142,7 @@ class SchedulerSettings:
     algorithm_version: str
     learning_context: str
     configuration: dict[str, Any]
+    module_manifest: ModuleManifest | None = None
 
 
 @dataclass(frozen=True)
@@ -557,10 +559,84 @@ class WorkspaceService:
         except SchedulerError as exc:
             raise WorkspaceError(str(exc)) from exc
 
-    @staticmethod
-    def _validated_scheduler_settings(scheduler: dict[str, Any]) -> SchedulerSettings:
+    def _scheduler_module_manifest(self, algorithm: str) -> ModuleManifest:
+        prefix = "module:"
+        module_id = algorithm[len(prefix):] if algorithm.startswith(prefix) else ""
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", module_id):
+            raise WorkspaceError(
+                "module scheduler algorithm must be module:<lowercase-dash-id>"
+            )
+        modules_dir = self.root / "modules"
+        module_dir = modules_dir / module_id
+        manifest_path = module_dir / "virtuoso.module.json"
+        for path, directory in (
+            (modules_dir, True),
+            (module_dir, True),
+            (manifest_path, False),
+        ):
+            if path.is_symlink():
+                raise WorkspaceError(f"scheduler module path must not be a symlink: {path}")
+            try:
+                status = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"scheduler module manifest not found for {module_id}: {manifest_path}"
+                ) from exc
+            expected = stat_module.S_ISDIR if directory else stat_module.S_ISREG
+            if not expected(status.st_mode):
+                raise WorkspaceError(f"scheduler module path has the wrong type: {path}")
+            if stat_module.S_IMODE(status.st_mode) & 0o077:
+                expected_mode = "0700" if directory else "0600"
+                raise WorkspaceError(
+                    f"scheduler module path must be private ({expected_mode}): {path}"
+                )
         try:
-            backend = resolve_backend(scheduler["algorithm"])
+            manifest = ModuleManifest.load(manifest_path)
+        except ModuleError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        if manifest.path != manifest_path:
+            raise WorkspaceError("scheduler module manifest escaped its configured directory")
+        if manifest.module_id != module_id:
+            raise WorkspaceError(
+                "scheduler module manifest id does not match scheduler.algorithm"
+            )
+        if manifest.category != "scheduler":
+            raise WorkspaceError("scheduler module manifest category must be scheduler")
+        if manifest.reads != ("scheduler.request",):
+            raise WorkspaceError(
+                "scheduler module must read exactly the scheduler.request projection"
+            )
+        return manifest
+
+    def _validated_scheduler_settings(self, scheduler: dict[str, Any]) -> SchedulerSettings:
+        algorithm = scheduler["algorithm"]
+        if isinstance(algorithm, str) and algorithm.startswith("module:"):
+            unknown = sorted(set(scheduler) - {"algorithm", "context", "configuration"})
+            if unknown:
+                raise WorkspaceError(
+                    "unknown external scheduler settings: " + ", ".join(unknown)
+                )
+            configuration = scheduler.get("configuration")
+            if not isinstance(configuration, dict):
+                raise WorkspaceError(
+                    "external scheduler configuration must be a JSON object"
+                )
+            try:
+                json.dumps(configuration, sort_keys=True, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise WorkspaceError(
+                    f"external scheduler configuration is not finite JSON: {exc}"
+                ) from exc
+            manifest = self._scheduler_module_manifest(algorithm)
+            return SchedulerSettings(
+                algorithm=f"module:{manifest.module_id}",
+                algorithm_version=manifest.version,
+                learning_context=scheduler["context"],
+                configuration=dict(configuration),
+                module_manifest=manifest,
+            )
+        try:
+            backend = resolve_backend(algorithm)
             configuration = backend.validate_configuration(
                 {
                     key: value
@@ -664,46 +740,76 @@ class WorkspaceService:
         if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
             raise WorkspaceError("scheduler switch timestamp must be timezone-aware")
         occurred_at = occurred_at.astimezone(timezone.utc)
-        backend = self.scheduler_backend(to_algorithm)
         config = self.configuration()
         scheduler = config["scheduler"]
         current = scheduler["algorithm"]
         learning_context = scheduler["context"]
-        new_configuration = backend.default_configuration()
+        if to_algorithm.startswith("module:"):
+            manifest = self._scheduler_module_manifest(to_algorithm)
+            target_algorithm = f"module:{manifest.module_id}"
+            target_version = manifest.version
+            with self._connect() as lookup_db:
+                prior = lookup_db.execute(
+                    """SELECT configuration_json FROM scheduler_state
+                       WHERE algorithm = ? AND learning_context = ?
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (target_algorithm, learning_context),
+                ).fetchone()
+            if prior is None:
+                new_configuration = {}
+            else:
+                loaded = self._load_json(
+                    prior["configuration_json"],
+                    label="stored scheduler configuration",
+                )
+                if not isinstance(loaded, dict):
+                    raise WorkspaceError(
+                        "stored scheduler configuration must be an object"
+                    )
+                new_configuration = loaded
+        else:
+            backend = self.scheduler_backend(to_algorithm)
+            target_algorithm = backend.name
+            target_version = backend.version
+            new_configuration = backend.default_configuration()
         new_config = {
             **config,
             "scheduler": {
-                "algorithm": backend.name,
+                "algorithm": target_algorithm,
                 "context": learning_context,
-                **new_configuration,
+                **(
+                    {"configuration": new_configuration}
+                    if target_algorithm.startswith("module:")
+                    else new_configuration
+                ),
             },
         }
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             source = self._unrecorded_switch_source(
-                db, algorithm=backend.name, learning_context=learning_context
+                db, algorithm=target_algorithm, learning_context=learning_context
             )
             latest = self._latest_switch(db, learning_context=learning_context)
             ledger_algorithm = latest["to_algorithm"] if latest is not None else None
-            if current != backend.name:
+            if current != target_algorithm:
                 from_algorithm = current
             elif source is not None:
                 # The file already names the target but another algorithm
                 # still holds state without a recorded switch: record the repair.
                 from_algorithm = source
-            elif ledger_algorithm is not None and ledger_algorithm != backend.name:
+            elif ledger_algorithm is not None and ledger_algorithm != target_algorithm:
                 # The file was edited back by hand after a recorded switch: the
                 # ledger's newest entry is the honest starting point.
                 from_algorithm = ledger_algorithm
             else:
                 raise WorkspaceError(
-                    f"scheduler algorithm is already {backend.name}; nothing to switch"
+                    f"scheduler algorithm is already {target_algorithm}; nothing to switch"
                 )
             stated = self._stated_algorithms(db, learning_context=learning_context)
             record = {
                 "switch_id": f"scheduler-switch-{uuid.uuid4().hex}",
                 "from_algorithm": from_algorithm,
-                "to_algorithm": backend.name,
+                "to_algorithm": target_algorithm,
                 "learning_context": learning_context,
                 "mode": "fresh",
                 "items_with_prior_state": stated.get(from_algorithm, 0),
@@ -729,7 +835,7 @@ class WorkspaceService:
         return {
             "schema": "virtuoso/scheduler-switch@0.1",
             **record,
-            "algorithm_version": backend.version,
+            "algorithm_version": target_version,
             "configuration": new_configuration,
         }
 
@@ -762,7 +868,10 @@ class WorkspaceService:
             raise WorkspaceError(f"invalid {label}: {value!r}") from exc
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise WorkspaceError(f"{label} must include a timezone")
-        return parsed.astimezone(timezone.utc)
+        try:
+            return parsed.astimezone(timezone.utc)
+        except (ValueError, OverflowError) as exc:
+            raise WorkspaceError(f"{label} is outside the supported UTC range") from exc
 
     @staticmethod
     def _require_exact_fields(
@@ -4210,6 +4319,7 @@ class WorkspaceService:
         attempt: dict[str, Any],
         proposal: dict[str, Any],
         state_json: str,
+        module_receipt: dict[str, Any] | None = None,
     ) -> None:
         self._require_exact_fields(
             attempt,
@@ -4307,8 +4417,8 @@ class WorkspaceService:
             raise WorkspaceError(
                 "attempt and scheduler proposal timestamps must identify one transition"
             )
-        if due_at <= occurred_at:
-            raise WorkspaceError("scheduler due timestamp must be after the attempt")
+        if due_at < occurred_at:
+            raise WorkspaceError("scheduler due timestamp must not precede the attempt")
         if not isinstance(proposal["configuration"], dict):
             raise WorkspaceError("scheduler proposal configuration must be an object")
         if not isinstance(attempt["support_actions"], list):
@@ -4342,8 +4452,75 @@ class WorkspaceService:
             raise WorkspaceError(
                 "scheduler due timestamp does not match the proposed scheduler state"
             )
+        if proposal["algorithm"].startswith("module:"):
+            if module_receipt is None:
+                raise WorkspaceError("external scheduler proposal requires a module receipt")
+            self._require_exact_fields(
+                module_receipt,
+                {
+                    "receipt_id", "module_id", "module_version", "category", "kind",
+                    "manifest_sha256", "stdout_sha256", "status", "error",
+                    "duration_ms", "started_at", "completed_at",
+                },
+                "scheduler module receipt",
+            )
+            module_id = proposal["algorithm"].removeprefix("module:")
+            if (
+                module_receipt["module_id"] != module_id
+                or module_receipt["module_version"] != proposal["algorithm_version"]
+                or module_receipt["category"] != "scheduler"
+                or module_receipt["kind"] != "scheduler-proposal"
+                or module_receipt["status"] != "succeeded"
+                or module_receipt["error"] is not None
+            ):
+                raise WorkspaceError("scheduler module receipt identity is invalid")
+            for field in ("manifest_sha256", "stdout_sha256"):
+                if not isinstance(module_receipt[field], str) or len(module_receipt[field]) != 64:
+                    raise WorkspaceError(f"scheduler module receipt {field} is invalid")
+            if (
+                not isinstance(module_receipt["duration_ms"], int)
+                or isinstance(module_receipt["duration_ms"], bool)
+                or module_receipt["duration_ms"] < 0
+            ):
+                raise WorkspaceError("scheduler module receipt duration is invalid")
+            self._parse_aware_datetime(
+                module_receipt["started_at"], label="module receipt started timestamp"
+            )
+            self._parse_aware_datetime(
+                module_receipt["completed_at"], label="module receipt completed timestamp"
+            )
+        elif module_receipt is not None:
+            raise WorkspaceError("built-in scheduler proposal must not carry a module receipt")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            settings = self.scheduler_settings()
+            if (
+                settings.algorithm != proposal["algorithm"]
+                or settings.learning_context != proposal["learning_context"]
+            ):
+                raise WorkspaceError("scheduler changed during practice; retry the attempt")
+            if settings.module_manifest is not None:
+                assert module_receipt is not None
+                if (
+                    settings.algorithm != proposal["algorithm"]
+                    or settings.algorithm_version != proposal["algorithm_version"]
+                    or settings.learning_context != proposal["learning_context"]
+                    or not configurations_compatible(
+                        proposal["algorithm"],
+                        settings.configuration,
+                        proposal["configuration"],
+                    )
+                ):
+                    raise WorkspaceError(
+                        "scheduler version or configuration changed during practice; retry the attempt"
+                    )
+                if (
+                    settings.module_manifest.manifest_sha256
+                    != module_receipt["manifest_sha256"]
+                ):
+                    raise WorkspaceError(
+                        "scheduler module manifest changed during practice; retry the attempt"
+                    )
             if proposal["algorithm"] == "fsrs":
                 try:
                     configuration = self.scheduler_backend("fsrs").validate_configuration(
@@ -4507,6 +4684,30 @@ class WorkspaceService:
                     proposal["created_at"],
                 ),
             )
+            if module_receipt is not None:
+                db.execute(
+                    """
+                    INSERT INTO module_run_receipts(
+                        receipt_id, module_id, module_version, category, kind,
+                        manifest_sha256, stdout_sha256, status, error,
+                        duration_ms, started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        module_receipt["receipt_id"],
+                        module_receipt["module_id"],
+                        module_receipt["module_version"],
+                        module_receipt["category"],
+                        module_receipt["kind"],
+                        module_receipt["manifest_sha256"],
+                        module_receipt["stdout_sha256"],
+                        module_receipt["status"],
+                        module_receipt["error"],
+                        module_receipt["duration_ms"],
+                        module_receipt["started_at"],
+                        module_receipt["completed_at"],
+                    ),
+                )
             self._require_current_item_content_hash(
                 item_id=attempt["item_id"],
                 relative_path=item_row["relative_path"],
