@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import textwrap
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Any, Protocol
 
 from .errors import VirtuosoError
+from .modules import ModuleError, ModuleRunner
 from .schedulers import AttemptFacts, SchedulerError, configurations_compatible
 from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
@@ -76,6 +78,7 @@ class SchedulerProposal:
     proposed_state_json: str
     previous_source_event_id: str | None
     created_at: datetime
+    module_receipt: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,7 @@ class PracticeService:
         agent_help: str = "none",
         selection_reason: str | None = None,
         project_ids: tuple[str, ...] = (),
+        allow_trusted: bool = False,
     ) -> PracticeResult:
         if agent_help not in _AGENT_HELP:
             raise PracticeError(
@@ -222,7 +226,9 @@ class PracticeService:
             agent_help=agent_help,
             support_actions=tuple(support),
         )
-        proposal = self._schedule(item=item, attempt=attempt)
+        proposal = self._schedule(
+            item=item, attempt=attempt, allow_trusted=allow_trusted
+        )
         self._persist(attempt=attempt, proposal=proposal)
 
         result_label = result.replace("-", " ")
@@ -243,6 +249,7 @@ class PracticeService:
         confidence: int,
         agent_help: str = "substantial",
         now: datetime | None = None,
+        allow_trusted: bool = False,
     ) -> PracticeResult:
         """Record an agent-administered attempt with honest attribution.
 
@@ -301,7 +308,9 @@ class PracticeService:
             support_actions=(),
             administered=True,
         )
-        proposal = self._schedule(item=item, attempt=attempt)
+        proposal = self._schedule(
+            item=item, attempt=attempt, allow_trusted=allow_trusted
+        )
         self._persist(attempt=attempt, proposal=proposal)
         return PracticeResult(attempt=attempt, proposal=proposal)
 
@@ -319,6 +328,7 @@ class PracticeService:
         confidence: int,
         open_notes: bool,
         support_actions: tuple[SupportAction, ...],
+        allow_trusted: bool = False,
     ) -> PracticeResult:
         """Record one measured attempt completed by a local user interface."""
         if result not in _RESULTS:
@@ -384,26 +394,36 @@ class PracticeService:
             support_actions=support_actions,
             administered=False,
         )
-        proposal = self._schedule(item=item, attempt=attempt)
+        proposal = self._schedule(
+            item=item, attempt=attempt, allow_trusted=allow_trusted
+        )
         self._persist(attempt=attempt, proposal=proposal)
         return PracticeResult(attempt=attempt, proposal=proposal)
 
     def _schedule(
-        self, *, item: LearningItem, attempt: AttemptRecord
+        self,
+        *,
+        item: LearningItem,
+        attempt: AttemptRecord,
+        allow_trusted: bool = False,
     ) -> SchedulerProposal:
         try:
             settings = self.workspace.scheduler_settings()
-            backend = self.workspace.scheduler_backend(settings.algorithm)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
         context = settings.learning_context
         configuration = settings.configuration
         version = settings.algorithm_version
-        label = backend.name.upper() if backend.name != "sm2" else "SM-2"
+        algorithm = settings.algorithm
+        label = (
+            algorithm.removeprefix("module:")
+            if algorithm.startswith("module:")
+            else algorithm.upper() if algorithm != "sm2" else "SM-2"
+        )
         try:
             snapshot = self.workspace.scheduler_snapshot(
                 item_id=item.item_id,
-                algorithm=backend.name,
+                algorithm=algorithm,
                 learning_context=context,
             )
         except WorkspaceError as exc:
@@ -414,7 +434,7 @@ class PracticeService:
                 f"{snapshot.algorithm_version!r}; expected {version!r}"
             )
         if snapshot is not None and not configurations_compatible(
-            backend.name, snapshot.configuration, configuration
+            algorithm, snapshot.configuration, configuration
         ):
             raise PracticeError(
                 f"stored {label} state has an incompatible scheduler configuration; "
@@ -424,35 +444,164 @@ class PracticeService:
         previous_source_event_id = (
             snapshot.source_event_id if snapshot is not None else None
         )
-        try:
-            outcome = backend.propose(
-                previous_state_json=previous_state,
-                attempt=AttemptFacts(
-                    result=attempt.result,
-                    confidence=attempt.confidence,
-                    occurred_at=attempt.occurred_at,
-                    latency_ms=attempt.initial_latency_ms,
-                    administered=attempt.administered,
-                ),
-                configuration=configuration,
+        module_receipt: dict[str, Any] | None = None
+        if settings.module_manifest is not None:
+            if not allow_trusted:
+                raise PracticeError(
+                    "trusted scheduler execution requires per-run opt-in; rerun the "
+                    "CLI command with --allow-trusted-scheduler"
+                )
+            try:
+                previous_object = (
+                    json.loads(previous_state) if previous_state is not None else None
+                )
+            except (TypeError, ValueError) as exc:
+                raise PracticeError(
+                    f"stored {label} state is invalid: {exc}"
+                ) from exc
+            if previous_object is not None and not isinstance(previous_object, dict):
+                raise PracticeError(f"stored {label} state is invalid: expected an object")
+            request = {
+                "schema": "virtuoso/module-request@0.1",
+                "projections": {
+                    "scheduler.request": {
+                        "item_id": item.item_id,
+                        "learning_context": context,
+                        "attempt": {
+                            "result": attempt.result,
+                            "confidence": attempt.confidence,
+                            "occurred_at": attempt.occurred_at.isoformat(),
+                            "latency_ms": attempt.initial_latency_ms,
+                            "administered": attempt.administered,
+                        },
+                        "previous_state": previous_object,
+                        "configuration": dict(configuration),
+                    }
+                },
+            }
+            module_started_at = datetime.now(timezone.utc)
+            try:
+                result = ModuleRunner().run(
+                    settings.module_manifest,
+                    request,
+                    allow_trusted=True,
+                )
+            except ModuleError as exc:
+                raise PracticeError(str(exc)) from exc
+            module_completed_at = datetime.now(timezone.utc)
+            payload = result.payload
+            module_id = settings.module_manifest.module_id
+            if payload["algorithm"] != module_id:
+                raise PracticeError(
+                    "scheduler module result algorithm must match its manifest id"
+                )
+            if payload["algorithm_version"] != settings.module_manifest.version:
+                raise PracticeError(
+                    "scheduler module result algorithm_version must match its manifest version"
+                )
+            if payload["learning_context"] != context:
+                raise PracticeError(
+                    "scheduler module result learning_context must match the request"
+                )
+            if not configurations_compatible(
+                algorithm, payload["configuration"], configuration
+            ):
+                raise PracticeError(
+                    "scheduler module result configuration must match the request"
+                )
+            rationale = payload["rationale"]
+            if not rationale.strip():
+                raise PracticeError("scheduler module result rationale must be nonempty")
+            try:
+                due_at = datetime.fromisoformat(payload["due_at"].replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise PracticeError("scheduler module due_at must be a valid timestamp") from exc
+            if due_at.tzinfo is None or due_at.utcoffset() is None:
+                raise PracticeError("scheduler module due_at must be timezone-aware")
+            try:
+                due_at = due_at.astimezone(timezone.utc)
+            except (ValueError, OverflowError) as exc:
+                raise PracticeError(
+                    "scheduler module due_at is outside the supported UTC range"
+                ) from exc
+            if due_at < attempt.occurred_at:
+                raise PracticeError("scheduler module due_at must not precede the attempt")
+            proposed_state = payload["proposed_state"]
+            state_due_raw = proposed_state.get("due")
+            if not isinstance(state_due_raw, str):
+                raise PracticeError("scheduler module proposed_state.due must be a timestamp")
+            try:
+                state_due = datetime.fromisoformat(state_due_raw.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise PracticeError(
+                    "scheduler module proposed_state.due must be a valid timestamp"
+                ) from exc
+            if state_due.tzinfo is None or state_due.utcoffset() is None:
+                raise PracticeError(
+                    "scheduler module proposed_state.due must be timezone-aware"
+                )
+            try:
+                state_due = state_due.astimezone(timezone.utc)
+            except (ValueError, OverflowError) as exc:
+                raise PracticeError(
+                    "scheduler module proposed_state.due is outside the supported UTC range"
+                ) from exc
+            if state_due != due_at:
+                raise PracticeError(
+                    "scheduler module proposed_state.due must match due_at"
+                )
+            proposed_state_json = json.dumps(
+                proposed_state, sort_keys=True, allow_nan=False
             )
-        except SchedulerError as exc:
-            raise PracticeError(str(exc)) from exc
+            module_receipt = {
+                "receipt_id": f"module-run-{uuid.uuid4().hex}",
+                "module_id": result.module_id,
+                "module_version": result.module_version,
+                "category": settings.module_manifest.category,
+                "kind": result.kind,
+                "manifest_sha256": settings.module_manifest.manifest_sha256,
+                "stdout_sha256": result.stdout_sha256,
+                "status": "succeeded",
+                "error": None,
+                "duration_ms": result.duration_ms,
+                "started_at": module_started_at.isoformat(),
+                "completed_at": module_completed_at.isoformat(),
+            }
+        else:
+            try:
+                backend = self.workspace.scheduler_backend(algorithm)
+                outcome = backend.propose(
+                    previous_state_json=previous_state,
+                    attempt=AttemptFacts(
+                        result=attempt.result,
+                        confidence=attempt.confidence,
+                        occurred_at=attempt.occurred_at,
+                        latency_ms=attempt.initial_latency_ms,
+                        administered=attempt.administered,
+                    ),
+                    configuration=configuration,
+                )
+            except (SchedulerError, WorkspaceError) as exc:
+                raise PracticeError(str(exc)) from exc
+            due_at = outcome.due_at
+            rationale = outcome.rationale
+            proposed_state_json = outcome.proposed_state_json
 
         return SchedulerProposal(
             proposal_id=f"proposal-{uuid.uuid4().hex}",
             source_event_id=attempt.event_id,
             item_id=item.item_id,
-            algorithm=backend.name,
+            algorithm=algorithm,
             algorithm_version=version,
             learning_context=context,
             configuration=dict(configuration),
-            due_at=outcome.due_at,
-            rationale=outcome.rationale,
+            due_at=due_at,
+            rationale=rationale,
             previous_state_json=previous_state,
-            proposed_state_json=outcome.proposed_state_json,
+            proposed_state_json=proposed_state_json,
             previous_source_event_id=previous_source_event_id,
             created_at=attempt.occurred_at,
+            module_receipt=module_receipt,
         )
 
     def _persist(
@@ -501,6 +650,7 @@ class PracticeService:
                     "created_at": proposal.created_at.isoformat(),
                 },
                 state_json=proposal.proposed_state_json,
+                module_receipt=proposal.module_receipt,
             )
         except sqlite3.IntegrityError:
             raise

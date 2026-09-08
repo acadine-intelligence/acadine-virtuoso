@@ -51,7 +51,7 @@ JSON output keys: `status` (`healthy` or `needs-attention`), `database`, `items`
 
 ### `scheduler`
 
-Inspect the spaced-repetition algorithm or adopt another built-in one.
+Inspect the spaced-repetition algorithm or adopt another built-in or trusted local module.
 
 ```
 virtuoso --workspace PATH scheduler show [--json]
@@ -62,11 +62,13 @@ virtuoso --workspace PATH scheduler history [--json]
 
 Built-in algorithms: `fsrs` (default, version `6.3.2`, configuration `desired_retention`, `enable_fuzzing`, and optional `minimum_interval_days`) and `sm2` (version `sm2-1990/1`, configuration `first_interval_days`, `second_interval_days`, `minimum_easiness`). `virtuoso.json` selects the algorithm under `scheduler.algorithm`; every other `scheduler` key except `context` belongs to that algorithm and is validated by it. Keys from another algorithm fail with exit 2.
 
+An external scheduler uses `scheduler.algorithm: module:<module-id>` and a finite `scheduler.configuration` JSON object owned by that module. Its private manifest must be the regular, non-symlink file `workspace/modules/<module-id>/virtuoso.module.json`, with matching manifest id and category `scheduler`. The manifest must read exactly `scheduler.request` and return `scheduler-proposal`. Module directories use mode `0700` and the manifest uses `0600`. Settings, switch, next, due, query, and doctor commands validate these facts without executing the module.
+
 `scheduler show` output schema: `virtuoso/scheduler-settings@0.1` with `algorithm`, `algorithm_version`, `learning_context`, `configuration`, and `built_in_algorithms`.
 
 Changing `scheduler.algorithm` by hand on a workspace that already holds state for another algorithm in the same context fails closed: `practice`, `review record`, `review due`, `next`, `compose`, `queries workload`, and `scheduler show` exit 2 with `scheduler algorithm changed from A to B without a recorded switch; run: virtuoso scheduler switch --to B`, and `doctor` reports `needs-attention`. No evidence is written while the guard holds.
 
-`scheduler switch --to ALGORITHM` validates the target, appends one `virtuoso/scheduler-switch@0.1` row (`switch_id`, `from_algorithm`, `to_algorithm`, `learning_context`, `mode`, `items_with_prior_state`, `occurred_at`), and rewrites the `scheduler` block of `virtuoso.json` with the target's default configuration. The row and the file change land together or not at all. Mode is `fresh`: the target sees every item as new at its first attempt; the previous algorithm's state and proposals stay as history and remain visible in `attempts`. No memory parameters are converted between algorithms. Switching to the algorithm the file already names fails with exit 2 unless `doctor` reports an unrecorded switch or a disagreeing ledger; the switch then records the algorithm that holds state, or the ledger's newest algorithm, as `from_algorithm` so the ledger is repaired honestly.
+`scheduler switch --to ALGORITHM` validates the target, appends one `virtuoso/scheduler-switch@0.1` row (`switch_id`, `from_algorithm`, `to_algorithm`, `learning_context`, `mode`, `items_with_prior_state`, `occurred_at`), and rewrites the `scheduler` block of `virtuoso.json` with the target's default configuration. A new module target starts with `{}`; returning to a module with stored state restores that state's exact configuration. The row and the file change land together or not at all. Mode is `fresh`: a target with no earlier state sees every item as new at its first attempt; earlier state under any algorithm stays isolated by algorithm and remains visible in `attempts`. No memory parameters are converted between algorithms. Switching to the algorithm the file already names fails with exit 2 unless `doctor` reports an unrecorded switch or a disagreeing ledger; the switch then records the algorithm that holds state, or the ledger's newest algorithm, as `from_algorithm` so the ledger is repaired honestly.
 
 `scheduler history` output schema: `virtuoso/scheduler-history@0.1` with the chronological `switches` list. Switch rows reject update and deletion.
 
@@ -179,7 +181,7 @@ The command displays the exact learning unit. It does not show the recall prompt
 Run one interactive active-recall session for an item. A pending learn-first item is rejected before the prompt loop begins.
 
 ```
-virtuoso --workspace PATH practice --item ID [--agent-help none|light|substantial|unknown]
+virtuoso --workspace PATH practice --item ID [--agent-help none|light|substantial|unknown] [--allow-trusted-scheduler]
 ```
 
 Interactive protocol (stdout prompts, stdin answers, in order):
@@ -196,7 +198,7 @@ Interactive protocol (stdout prompts, stdin answers, in order):
 6. `Confidence [1-5]:`
 7. If the result was not `demonstrated` and the item has a follow-up: `Follow-up response:`.
 
-On completion the attempt (with full assistance attribution) and a scheduling proposal from the configured algorithm (FSRS 6.3.2 by default; see `scheduler`) are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt.
+On completion the attempt (with full assistance attribution) and a scheduling proposal from the configured algorithm (FSRS 6.3.2 by default; see `scheduler`) are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt. A configured module scheduler runs only when this command includes `--allow-trusted-scheduler`. The flag authorizes this run only.
 
 ### `practice --administer`
 
@@ -205,7 +207,8 @@ Record one agent-administered attempt non-interactively. Use this when the learn
 ```
 virtuoso --workspace PATH practice --item ID --administer \
   --response TEXT --result demonstrated|partial|not-demonstrated \
-  --confidence 1-5 [--agent-help none|light|substantial|unknown] [--json]
+  --confidence 1-5 [--agent-help none|light|substantial|unknown] \
+  [--allow-trusted-scheduler] [--json]
 ```
 
 Contract:
@@ -246,6 +249,8 @@ printf '%s' "$REQUEST_JSON" | \
   virtuoso --workspace PATH review record --json
 ```
 
+Add `--allow-trusted-scheduler` to that command when this one record operation should execute the configured module.
+
 Request schema: `virtuoso/review-attempt@0.1`. It requires these exact fields:
 
 - `submission_id`: 32 lowercase hexadecimal characters. Retrying uses the same value.
@@ -258,7 +263,7 @@ Request schema: `virtuoso/review-attempt@0.1`. It requires these exact fields:
 - `confidence`: integer 1 through 5.
 - `open_notes`: whether notes were open during recall.
 
-Output schema: `virtuoso/review-attempt-result@0.1`. The `attempt` object contains `event_id`, `item_id`, `item_content_hash`, `result`, `confidence`, `initial_latency_ms`, `administered`, and `occurred_at`. The `proposal` object contains `proposal_id`, `algorithm`, `algorithm_version`, and `due_at`. Core code writes the attempt, proposal, and scheduler state in one SQLite transaction.
+Output schema: `virtuoso/review-attempt-result@0.1`. The `attempt` object contains `event_id`, `item_id`, `item_content_hash`, `result`, `confidence`, `initial_latency_ms`, `administered`, and `occurred_at`. The `proposal` object contains `proposal_id`, `algorithm`, `algorithm_version`, and `due_at`. Core code writes the attempt, proposal, scheduler state, and successful module receipt in one SQLite transaction. A module scheduler requires `--allow-trusted-scheduler`; an optional interface that cannot pass it must direct the learner to this CLI route and must not execute the module silently.
 
 Record a skip by sending a JSON object on stdin:
 

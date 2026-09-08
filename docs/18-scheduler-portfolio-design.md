@@ -1,6 +1,6 @@
 # Scheduler portfolio design
 
-Status: sections 1, 2, 4, and 5 are implemented (built-in portfolio, `scheduler switch`, fail-closed guard, attribution). Section 3 (external schedulers through the module boundary) remains a proposal. Tracks issue #47.
+Status: sections 1 through 5 are implemented. The external scheduler delivery reconciles the request sketch below with the existing module envelope. Tracks issue #47.
 
 ## Problem
 
@@ -64,17 +64,20 @@ Why not more: each built-in is a permanent maintenance and attribution commitmen
 
 `scheduler.algorithm` accepts `module:<module-id>`. Practice then invokes the module through `ModuleRunner` with `allow_trusted=True`, exactly as the other categories do today, and treats the result as a `SchedulerOutcome`.
 
-Request (stdin), category `scheduler`:
+Request (stdin), category `scheduler`. The earlier top-level request sketch was obsolete because `virtuoso/module-request@0.1` already has the stable `{schema, projections}` envelope. The implemented request adds one narrowly typed `scheduler.request` projection and leaves every other category compatible:
 
 ```
 {
   "schema": "virtuoso/module-request@0.1",
-  "category": "scheduler",
-  "item_id": "...",
-  "learning_context": "atomic-recall",
-  "attempt": {"result": "partial", "confidence": 3, "occurred_at": "...", "latency_ms": 4210, "administered": false},
-  "previous_state": {...} | null,
-  "configuration": {...}
+  "projections": {
+    "scheduler.request": {
+      "item_id": "...",
+      "learning_context": "atomic-recall",
+      "attempt": {"result": "partial", "confidence": 3, "occurred_at": "...", "latency_ms": 4210, "administered": false},
+      "previous_state": {...} | null,
+      "configuration": {...}
+    }
+  }
 }
 ```
 
@@ -91,7 +94,9 @@ Result (stdout), type `scheduler-proposal`, extended with one required field:
 
 `proposed_state` is required because a scheduler without state cannot be re-run honestly. The result type has no external consumers yet (the category was never reachable from practice), so this is added to `scheduler-proposal` now rather than versioned. The change is recorded in the delivery contract and release notes.
 
-Core validates before storing: `algorithm` equals the configured module id, `learning_context` matches, `due_at` is timezone-aware and not before `occurred_at`, `proposed_state` is an object whose `due` matches `due_at`. Modules never receive a database path and never write the database. That is unchanged.
+Core validates before storing: `algorithm` equals the configured module id, `algorithm_version` equals the manifest version, `learning_context` and configuration exactly match, `due_at` is timezone-aware and not before `occurred_at`, `proposed_state` is a finite object whose `due` matches `due_at`, and rationale is nonempty. Core stores `module:<module-id>` consistently. The request contains no database path, workspace path, or learner prose. Only core writes the database through this protocol. A trusted executable still runs with the invoking user's file permissions; users must review it before use.
+
+Executable scheduling requires a fresh opt-in on each practice or review-record run. Read-only scheduler consumers validate without executing. Interfaces such as the optional Obsidian plugin that do not provide the flag fail with an actionable CLI route. A successful scheduler receipt is accepted in the same SQLite transaction as the attempt and proposal. Rejection stores no receipt and leaves database bytes unchanged. The generic `WorkspaceService.run_module` path intentionally retains failure receipts and is not used for scheduling.
 
 A worked example ships under `examples/modules/fixed-ladder/`: a fixed-interval ladder (1, 3, 7, 14, 30 days; failure resets) in one dependency-free Python file with its manifest. It doubles as a baseline for future algorithm comparisons.
 
@@ -123,13 +128,13 @@ Two pull requests, each independently reviewable and green:
 
 ## Acceptance
 
-- [ ] `virtuoso init` still produces an FSRS workspace; every existing test passes without modification to fixtures.
-- [ ] A workspace with `scheduler.algorithm: sm2` completes attempt → proposal → due → workload with no code change; proposals record `sm2`, its version, and its configuration.
-- [ ] Backend contract tests run against every built-in: deterministic output for identical input, `due_at` never before `occurred_at`, state round-trips, `due_from_state(proposed_state) == due_at`.
-- [ ] Editing `scheduler.algorithm` on a workspace with existing state makes the five commands above fail closed with the switch instruction; `scheduler switch` clears it and records the row.
-- [ ] The example module produces proposals that core accepts; a module result missing `proposed_state`, or with a `due_at` before the attempt, is rejected and nothing is stored.
-- [ ] Database bytes are unchanged when a module run is rejected.
-- [ ] CLI reference, architecture, delivery contract, release notes, and acknowledgements are updated in the same PRs as the code.
+- [x] `virtuoso init` still produces an FSRS workspace; existing fixtures remain compatible.
+- [x] A workspace with `scheduler.algorithm: sm2` completes attempt to proposal to due to workload with no code change; proposals record `sm2`, its version, and its configuration.
+- [x] Backend contract tests run against every built-in: deterministic output for identical input, `due_at` never before `occurred_at`, state round-trips, `due_from_state(proposed_state) == due_at`.
+- [x] Editing `scheduler.algorithm` on a workspace with existing state makes protected commands fail closed with the switch instruction; `scheduler switch` clears it and records the row.
+- [x] The example module produces proposals that core accepts; malformed results and past due times are rejected without evidence writes.
+- [x] Database bytes are unchanged when a scheduler module run is rejected.
+- [x] CLI reference, architecture, delivery contract, release notes, and acknowledgements describe the implemented contract.
 
 ## Open decisions for the maintainer
 

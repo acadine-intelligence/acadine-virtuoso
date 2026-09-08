@@ -92,6 +92,15 @@ def configurations_compatible(
     """Only the FSRS interval floor may change without resetting memory state."""
     if not isinstance(previous, dict):
         return False
+    if algorithm.startswith("module:"):
+        try:
+            return json.dumps(
+                previous, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ) == json.dumps(
+                proposed, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+        except (TypeError, ValueError):
+            return False
     if algorithm != "fsrs":
         return previous == proposed
     backend = resolve_backend(algorithm)

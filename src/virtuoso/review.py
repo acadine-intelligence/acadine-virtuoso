@@ -114,7 +114,9 @@ class ReviewService:
             learning_context=item.learning_context,
         )
 
-    def record(self, raw_request: str) -> PracticeResult:
+    def record(
+        self, raw_request: str, *, allow_trusted: bool = False
+    ) -> PracticeResult:
         request = self._request_object(raw_request)
         expected = {
             "schema",
@@ -219,6 +221,7 @@ class ReviewService:
                 confidence=confidence,
                 open_notes=request["open_notes"],
                 support_actions=tuple(support),
+                allow_trusted=allow_trusted,
             )
         except PracticeError as exc:
             if "stale" in str(exc).lower():

@@ -117,7 +117,7 @@ To see the workspace queue inside Obsidian Bases without a second scheduler, run
 
 ## Extension boundary
 
-External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. Calling code must opt in for each run with `allow_trusted=True`. There is no public CLI command for module execution and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use.
+External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. A scheduler can be selected as `module:<module-id>` from a private manifest under `workspace/modules/<module-id>/virtuoso.module.json`. Each `practice` or `review record` execution also requires `--allow-trusted-scheduler`; Python callers pass `allow_trusted=True`. Queue, query, switch, settings, and doctor commands validate the module without executing it. There is no public generic module-execution command and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use. The dependency-free fixed-ladder example under `examples/modules/fixed-ladder/` demonstrates the module protocol.
 
 ## What Virtuoso does not do
 

@@ -11,7 +11,7 @@ learner / harness
 cli.py -> workspace, learning, practice, candidate, review, query, and search services
              |-> Markdown item files
              |-> SQLite study/recall evidence, scheduler state, and derived search index
-             |-> built-in scheduler backends (FSRS default, SM-2)
+             |-> scheduler backends (FSRS default, SM-2, trusted local modules)
              `-> external command module runner
 
 optional local interfaces: Obsidian plugin and Hermes plugin
@@ -68,7 +68,11 @@ SQLite migrations run in transactions and fail closed. Migration 13 adds item le
 
 Scheduler state is keyed by item, algorithm, and learning context, so two algorithms never overwrite each other. Changing `scheduler.algorithm` in `virtuoso.json` while another algorithm still holds state in that context fails closed in every reader and writer until `scheduler switch` records the change in the append-only `scheduler_switches` table (migration 16) and rewrites the configuration in the same transaction. The only switch mode is `fresh`: no memory parameters are converted between algorithms, and the previous algorithm's state and proposals stay as history.
 
-Every proposal records its algorithm, version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory. External schedulers through the `scheduler` module category are designed in `18-scheduler-portfolio-design.md` and not yet wired to practice.
+Every proposal records its algorithm, version, configuration, context, input attempt, and due result. Delayed transfer checks do not use this scheduler portfolio: their inherited date is an evidence-inspection boundary; it does not schedule memory.
+
+An external scheduler is selected as `module:<module-id>`. Its manifest has one fixed, workspace-contained path, declares the `scheduler` category, and reads one `scheduler.request` projection inside the existing `{schema, projections}` envelope. The projection contains only item id, learning context, attempt facts, nullable prior state, and the module-owned configuration object. It contains no workspace path, database path, or learner-authored prose. Read-only commands validate the manifest and configuration without invoking the executable.
+
+Practice and `review record` default to denying executable scheduling. Their CLI commands must receive `--allow-trusted-scheduler`, and Python callers must pass `allow_trusted=True`, for each run. The scheduler result must preserve manifest identity, request context and configuration, and provide finite object state whose due timestamp matches its timezone-aware `due_at`. Core records the canonical `module:<module-id>` algorithm. A successful module receipt is inserted in the same transaction as its attempt, proposal, and state. A rejected scheduler execution writes no receipt and leaves the database unchanged. This differs intentionally from generic `WorkspaceService.run_module`, which retains failure receipts for generic module operations.
 
 FSRS supports an optional `minimum_interval_days` scheduling preference. Zero or omission preserves upstream timing. A positive value clamps the due time after FSRS runs, without changing its returned memory parameters. The card and proposal carry the same effective due time; the rationale preserves the original due time. Only this preference may change across existing FSRS state without an incompatibility error. The workspace rechecks the configured minimum inside the attempt transaction and rejects a stale or too-short proposal. `scheduler configure` replaces the configuration file under the same writer lock while leaving existing due dates and evidence untouched.
 
@@ -84,9 +88,9 @@ V0 supports external command modules only. A `virtuoso.module.json` manifest dec
 - protocol version and timeout
 - requested read projections and output capability
 
-Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables; this boundary is not an OS sandbox. They run with the invoking user's permissions. Calling code must opt in for each run with `allow_trusted=True`. There is no public CLI command for module execution and no consent dialog. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
+Virtuoso sends one bounded JSON object on stdin and expects one typed JSON object on stdout. External modules are trusted local executables; this boundary is not an OS sandbox. They run with the invoking user's permissions. Calling code must opt in for each run with `allow_trusted=True`. There is no public generic CLI command for module execution and no consent dialog. The runner rejects shell and command-wrapper indirection, uses `shell=False`, a sanitized environment, bounded temporary-file output capture, nested projection validation, per-result required fields, and load-time manifest hashing. V0 grants no descendant-process capability: on supported POSIX systems the module starts with a zero process limit, the runner terminates its process group after success or failure, and execution fails closed where that limit is unavailable. Modules receive no database path, and only core code may accept and persist their proposals; users must review a module because these controls do not prevent the executable itself from accessing other user-readable files.
 
-Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
+Initial categories are scheduler, practice-format, source-adapter, scoring-signal, and output-adapter. The scheduler category is connected to practice with the narrower projection and atomicity rules above. Other categories retain their existing projections and generic receipt behavior. In-process third-party plugins remain out of scope until the protocol and trust model have survived dogfooding.
 
 ## Hermes boundary
 

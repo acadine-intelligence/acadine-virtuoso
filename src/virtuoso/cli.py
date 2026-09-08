@@ -199,6 +199,11 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="learner confidence 1-5 (requires --administer)",
     )
+    practice.add_argument(
+        "--allow-trusted-scheduler",
+        action="store_true",
+        help="allow this practice run to execute the configured trusted scheduler module",
+    )
     practice.add_argument("--json", action="store_true")
 
     attempts = commands.add_parser("attempts", help="show evidence and proposals")
@@ -221,6 +226,11 @@ def _parser() -> argparse.ArgumentParser:
         "record", help="record one measured direct review attempt from JSON stdin"
     )
     review_record.add_argument("--json", action="store_true")
+    review_record.add_argument(
+        "--allow-trusted-scheduler",
+        action="store_true",
+        help="allow this record operation to execute the configured trusted scheduler module",
+    )
     review_skip = review_commands.add_parser(
         "skip", help="append one review skip event from JSON stdin"
     )
@@ -693,6 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result=args.result,
                     confidence=args.confidence,
                     agent_help=args.agent_help or "substantial",
+                    allow_trusted=args.allow_trusted_scheduler,
                 )
                 _emit(
                     {
@@ -727,6 +738,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 agent_help=args.agent_help or "none",
                 selection_reason=context["selection_reason"],
                 project_ids=context["project_ids"],
+                allow_trusted=args.allow_trusted_scheduler,
             )
             return 0
         if args.command == "attempts":
@@ -764,7 +776,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.review_command == "record":
                 _emit(
-                    service.attempt_result_payload(service.record(sys.stdin.read())),
+                    service.attempt_result_payload(
+                        service.record(
+                            sys.stdin.read(),
+                            allow_trusted=args.allow_trusted_scheduler,
+                        )
+                    ),
                     as_json=args.json,
                 )
                 return 0
