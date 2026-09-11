@@ -50,6 +50,23 @@ npm run build
 
 Do not commit `node_modules`, generated local settings, or a locally built `main.js` unless a release issue explicitly requires it.
 
+## Hermes plugin checks
+
+The adapter test group is separate from the standalone CLI's runtime dependencies. From the repository root:
+
+```bash
+uv sync --locked --group build --group hermes-test
+uv run --locked --group hermes-test python -m unittest discover -s plugins/hermes/tests -p 'test_*.py' -v
+cd plugins/hermes
+npm ci --ignore-scripts
+npm run check
+npm test
+npx playwright install --with-deps chromium
+npm run test:browser
+```
+
+The browser tests load the shipped module in a small SDK test host. A loopback-only fixture invokes the actual CLI against temporary synthetic workspaces. It never reads the active Hermes configuration. Screenshots stay in ignored `test-results/`. The production desktop file requires no npm build. CI runs these checks on macOS and Linux.
+
 ## Working agreement
 
 - Write a failing regression test before fixing a bug.

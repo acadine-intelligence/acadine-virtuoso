@@ -1,0 +1,6 @@
+{
+  "name": "virtuoso",
+  "title": "Virtuoso",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

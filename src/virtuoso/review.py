@@ -272,8 +272,8 @@ class ReviewService:
             raise ReviewContractError(
                 "item_content_hash must be 64 lowercase hexadecimal characters"
             )
-        if request["surface"] != "obsidian-plugin":
-            raise ReviewContractError("surface must be obsidian-plugin")
+        if request["surface"] not in ("obsidian-plugin", "hermes-desktop"):
+            raise ReviewContractError("surface must be obsidian-plugin or hermes-desktop")
         occurred_at = self._timestamp(request["occurred_at"], "occurred_at")
         try:
             return self.workspace.record_review_skip(

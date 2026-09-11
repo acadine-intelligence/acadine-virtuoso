@@ -35,13 +35,18 @@ def _workspace(ctx) -> str:
     return DEFAULT_WORKSPACE
 
 
-def _cli() -> str | None:
-    return shutil.which("virtuoso")
+def _cli(ctx=None) -> str | None:
+    executable = ctx.get_config("executable") if ctx is not None else None
+    if executable is None:
+        executable = "virtuoso"
+    if not isinstance(executable, str) or not executable.strip():
+        return None
+    return shutil.which(str(Path(executable).expanduser()))
 
 
-def check_virtuoso_available() -> bool:
+def check_virtuoso_available(ctx=None) -> bool:
     """Service gate: only advertise these tools when the CLI is installed."""
-    return _cli() is not None
+    return _cli(ctx) is not None
 
 
 def _error(message: str) -> str:
@@ -65,7 +70,7 @@ def _focus_option(focus: object) -> tuple[str | None, str | None]:
 
 
 def _run(ctx, *argv: str) -> str:
-    cli = _cli()
+    cli = _cli(ctx)
     if not cli:
         return _error("virtuoso CLI not found on PATH")
     ws = _workspace(ctx)
@@ -260,6 +265,6 @@ def register(ctx) -> None:
             toolset="virtuoso",
             schema=schema,
             handler=_make(handler),
-            check_fn=check_virtuoso_available,
+            check_fn=lambda: check_virtuoso_available(ctx),
             emoji=emoji,
         )

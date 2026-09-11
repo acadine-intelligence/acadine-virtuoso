@@ -235,6 +235,15 @@ def _parser() -> argparse.ArgumentParser:
         "skip", help="append one review skip event from JSON stdin"
     )
     review_skip.add_argument("--json", action="store_true")
+    study_load = review_commands.add_parser(
+        "study-load", help="load a learning unit without recall content or writes"
+    )
+    study_load.add_argument("--item", required=True)
+    study_load.add_argument("--json", action="store_true")
+    study_record = review_commands.add_parser(
+        "study-record", help="record explicit hash-bound study completion from JSON stdin"
+    )
+    study_record.add_argument("--json", action="store_true")
 
     queries = commands.add_parser(
         "queries", help="read-only analytics over the workspace database"
@@ -755,6 +764,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "review":
             from .review import REVIEW_ITEM_SCHEMA, REVIEW_QUEUE_SCHEMA, ReviewService
 
+            if args.review_command in {"study-load", "study-record"}:
+                from .study import StudyReviewService
+
+                study = StudyReviewService(workspace)
+                payload = (
+                    study.load(args.item) if args.review_command == "study-load"
+                    else study.record(sys.stdin.read(65_537))
+                )
+                _emit(payload, as_json=args.json)
+                return 0
             service = ReviewService(workspace)
             if args.review_command == "due":
                 _emit(
