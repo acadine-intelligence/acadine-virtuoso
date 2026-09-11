@@ -136,11 +136,49 @@ jobs:
       - name: Build plugin
         run: npm run build
 
+  hermes-plugin:
+    name: Hermes plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up bootstrap Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: plugins/hermes/package-lock.json
+      - name: Install pinned uv and adapter test dependencies
+        run: |
+          python -m pip install --only-binary=:all: --require-hashes -r ci/bootstrap.txt
+          uv sync --locked --group build --group hermes-test
+      - name: Exercise backend routes through the CLI
+        run: uv run --locked --group hermes-test python -m unittest discover -s plugins/hermes/tests -p 'test_*.py' -v
+      - name: Exercise the desktop module and browser journey
+        working-directory: plugins/hermes
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm test
+          npx playwright install --with-deps chromium
+          npm run test:browser
+
   verified:
     # Retain the repository's required status name, with the complete matrix behind it.
     name: Python 3.11
     if: ${{ always() }}
-    needs: [python, install, obsidian-plugin]
+    needs: [python, install, obsidian-plugin, hermes-plugin]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -154,7 +192,7 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           results = {name: row["result"] for name, row in needs.items()}
           failures = [name for name, result in results.items() if result != "success"]
-          if set(results) != {"python", "install", "obsidian-plugin"} or failures:
+          if set(results) != {"python", "install", "obsidian-plugin", "hermes-plugin"} or failures:
               raise SystemExit(f"Required checks did not pass: {results}")
           print("All required checks passed")
           PY

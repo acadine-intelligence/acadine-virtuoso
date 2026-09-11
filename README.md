@@ -115,6 +115,12 @@ The current Obsidian review queue omits learn-first items that still need study.
 
 To see the workspace queue inside Obsidian Bases without a second scheduler, run `virtuoso --workspace PATH export obsidian --out DIR` into a folder in your vault. It writes frontmatter-only stubs that mirror `review due`; a Base view filtered on that folder then shows exactly what the CLI considers due. The export is read-only and rewrites the folder on every run. See `docs/12-cli-reference.md`.
 
+## Hermes Desktop (optional)
+
+Virtuoso can run study and recall inside Hermes Desktop. The interface follows the current Hermes connection. The Python adapter invokes Virtuoso on that backend, so a MacBook can use a workspace held on another Mac without copying the database.
+
+Use `acadine-intelligence/acadine-virtuoso/plugins/hermes` in Desktop's Install from Git dialog. Install the CLI on the backend separately. See the [Desktop installation and testing guide](docs/20-hermes-desktop.md) for component enablement, backend paths, exact-revision testing, and recovery.
+
 ## Extension boundary
 
 External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. A scheduler can be selected as `module:<module-id>` from a private manifest under `workspace/modules/<module-id>/virtuoso.module.json`. Each `practice` or `review record` execution also requires `--allow-trusted-scheduler`; Python callers pass `allow_trusted=True`. Queue, query, switch, settings, and doctor commands validate the module without executing it. There is no public generic module-execution command and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use. The dependency-free fixed-ladder example under `examples/modules/fixed-ladder/` demonstrates the module protocol.

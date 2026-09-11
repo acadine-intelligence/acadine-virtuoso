@@ -1,8 +1,12 @@
 # virtuoso Hermes plugin
 
-Hermes agent tools wrapping the installed `virtuoso` CLI (`acadine-virtuoso`
-package). The plugin shells out with `--json`; it holds no scheduling logic of
-its own. This is an optional adapter. The CLI remains the canonical interface.
+Hermes agent tools and a native Desktop page wrapping the installed `virtuoso`
+CLI (`acadine-virtuoso` package). The plugin invokes the CLI with JSON contracts.
+It holds no scheduling logic. The CLI remains the canonical interface.
+
+The Desktop page supports learn-first study and measured direct recall. The
+interface runs on the Desktop machine. Its Python API and CLI run on the
+connected backend, where the workspace stays. See the [installation guide](../../docs/20-hermes-desktop.md).
 
 ## Tools
 
@@ -11,17 +15,22 @@ its own. This is an optional adapter. The CLI remains the canonical interface.
 - `virtuoso_transfer_record`: record a real-project transfer event with an optional artifact reference
 - `virtuoso_status`: workspace health
 
-All tools are service-gated on `shutil.which("virtuoso")`: if the CLI is not
-installed, the toolset never appears in agent schemas.
+The tools check the configured executable with `shutil.which()`. Without an
+executable setting they look for `virtuoso` on the backend PATH. If it is
+unavailable, the toolset does not appear in agent schemas.
 
 ## Install
 
 ```bash
-pip install -e /path/to/acadine-virtuoso   # provides the virtuoso CLI
-cp -r plugins/hermes ~/.hermes/plugins/virtuoso
+uv tool install --python 3.11 /path/to/acadine-virtuoso
+hermes plugins install acadine-intelligence/acadine-virtuoso/plugins/hermes
+hermes plugins enable virtuoso
 ```
 
-Then enable it in `config.yaml`:
+This installs the agent component on the backend. For the desktop component,
+use Install from Git on the interface machine or copy the reviewed
+`desktop/plugin.js` as described in the guide. Backend enablement is separate
+from the desktop enable switch. The backend configuration contains:
 
 ```yaml
 plugins:
@@ -38,11 +47,13 @@ plugins:
   entries:
     virtuoso:
       settings:
+        executable: /absolute/path/to/virtuoso
         workspace: /path/to/your-virtuoso-workspace
 ```
 
-Default workspace: `~/.virtuoso/workspace`. Override it with the `workspace:`
-plugin setting.
+The agent tools default to `~/.virtuoso/workspace`. The Desktop API requires an
+explicit workspace setting. Paths belong to the backend machine. Keep the CLI
+in its own environment rather than installing it into Hermes' Python environment.
 
 The plugin and Python package follow the same `0.1.0` release version.
 
@@ -68,6 +79,9 @@ so a valid free-text value that starts with `-` remains data.
 
 - Scheduling ownership stays split per the 2026-07-24 decision: Virtuoso owns
   learning items, Obsidian SR owns flashcards, the project system owns priority.
-- Review ratings flow through interactive `virtuoso practice` sessions (human
-  answers first); this plugin deliberately does not expose a non-interactive
-  rating shortcut.
+- Agent tools do not expose a rating shortcut. The Desktop page records an
+  explicit human response through the CLI's measured direct-review contract.
+- `dashboard/plugin_api.py` exports the scoped REST router. Hermes supplies its
+  HTTP authentication and plugin enablement checks. The plugin starts no server.
+- `desktop/plugin.js` is the shipped, uncompiled ESM module. npm dependencies
+  support tests only and are unnecessary on the interface machine.

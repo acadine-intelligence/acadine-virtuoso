@@ -272,9 +272,30 @@ printf '%s' "$SKIP_JSON" | \
   virtuoso --workspace PATH review skip --json
 ```
 
-Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface: "obsidian-plugin"`. Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
+Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface` (`"obsidian-plugin"` or `"hermes-desktop"`). Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
 
 Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. They reject a learn-first item that has no matching study event. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
+
+#### JSON study for interfaces
+
+`virtuoso --workspace PATH review study-load --item ID --json` returns `virtuoso/study-item@0.1`. The `item` object contains `item_id`, `title`, `focus`, `content_hash`, `learning_unit_hash`, and `learning_unit`. It omits the recall prompt and answer. Loading writes no evidence. Recall-first, retired, stale, and already-studied items fail with the existing typed review error contract.
+
+`virtuoso --workspace PATH review study-record --json` reads a JSON request from stdin, limited to 64 KiB. Its exact fields are:
+
+```json
+{
+  "schema": "virtuoso/study-completion@0.1",
+  "item_id": "example-item",
+  "item_content_hash": "REPLACE_WITH_SNAPSHOT_CONTENT_HASH",
+  "learning_unit_hash": "REPLACE_WITH_SNAPSHOT_LEARNING_UNIT_HASH",
+  "completed": true,
+  "surface": "hermes-desktop"
+}
+```
+
+Hashes must be the full lowercase SHA-256 values from the loaded snapshot. `completed` must be the JSON boolean `true`. Supported surfaces are `hermes-desktop`, `obsidian-plugin`, and `cli`. Unknown fields fail. The core checks current Markdown and database hashes inside the write transaction.
+
+The result schema is `virtuoso/study-result@0.1`. Its `study` object contains `event_id`, `item_id`, `item_content_hash`, `learning_unit_hash`, backend `occurred_at`, `surface`, and `claims_mastery: false`. A successful repeated completion of the same current item and learning-unit version returns the original event. Study creates no attempt, scheduler proposal, or capability claim. The interactive `learn --item ID` command is unchanged.
 
 JSON failures use `virtuoso/review-error@0.1` on stderr:
 

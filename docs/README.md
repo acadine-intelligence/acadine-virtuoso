@@ -6,6 +6,7 @@ Use the current guides for the implemented v0.1.0 behavior. The other records ex
 
 - [CLI reference](12-cli-reference.md): every command, flag, JSON schema, response key, and exit code.
 - [Agent usage](13-agent-usage.md): how an agent uses the canonical CLI and the optional adapters.
+- [Hermes Desktop](20-hermes-desktop.md): install the interface and use a local or remote backend workspace.
 - [Delivery contract](07-delivery-contract.md): observable product behavior and required checks.
 - [Production readiness](08-production-readiness.md): current operating limits and release conditions.
 

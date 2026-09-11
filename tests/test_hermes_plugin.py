@@ -371,6 +371,19 @@ class RunnerTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_explicit_backend_executable_is_used_for_tools_and_availability(self) -> None:
+        ctx = FakeContext()
+        ctx.get_config = lambda key: "/installed/virtuoso" if key == "executable" else "/workspace"
+        plugin.register(ctx)
+        completed = subprocess.CompletedProcess([], 0, '{"status":"healthy"}', "")
+        with (
+            patch.object(plugin.shutil, "which", side_effect=lambda value: value if value == "/installed/virtuoso" else None),
+            patch.object(plugin.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(ctx.tools["virtuoso_status"]["check_fn"]())
+            self.assertTrue(result(plugin.virtuoso_status(ctx))["success"])
+            self.assertEqual(run.call_args.args[0][0], "/installed/virtuoso")
+
     def test_transfer_tool_schema_and_handler_forward_artifact(self) -> None:
         ctx = FakeContext()
         plugin.register(ctx)

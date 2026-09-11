@@ -43,7 +43,7 @@ class InstallContractTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("  verified:", ci)
         summary = ci.split("  verified:", 1)[1]
-        self.assertIn("needs: [python, install, obsidian-plugin]", summary)
+        self.assertIn("needs: [python, install, obsidian-plugin, hermes-plugin]", summary)
         self.assertIn("always()", summary)
         self.assertIn("NEEDS_JSON", summary)
         self.assertIn("name: Python 3.11", summary)
@@ -54,16 +54,18 @@ class InstallContractTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         block = ci.split("  verified:", 1)[1]
         source = textwrap.dedent(block.split("python - <<'PY'\n", 1)[1].rsplit("          PY", 1)[0])
-        for status in ("success", "failure", "skipped", "cancelled", None):
-            with self.subTest(status=status):
-                needs = {name: {"result": "success"} for name in ("python", "install", "obsidian-plugin")}
-                if status is None:
-                    del needs["install"]
-                else:
-                    needs["install"]["result"] = status
-                result = subprocess.run([sys.executable, "-c", source], capture_output=True,
-                                        text=True, env={**os.environ, "NEEDS_JSON": json.dumps(needs)})
-                self.assertEqual(result.returncode == 0, status == "success", result.stderr)
+        required = ("python", "install", "obsidian-plugin", "hermes-plugin")
+        for job in required:
+            for status in ("success", "failure", "skipped", "cancelled", None):
+                with self.subTest(job=job, status=status):
+                    needs = {name: {"result": "success"} for name in required}
+                    if status is None:
+                        del needs[job]
+                    else:
+                        needs[job]["result"] = status
+                    result = subprocess.run([sys.executable, "-c", source], capture_output=True,
+                                            text=True, env={**os.environ, "NEEDS_JSON": json.dumps(needs)})
+                    self.assertEqual(result.returncode == 0, status == "success", result.stderr)
 
     def test_matrix_uses_uv_for_the_requested_interpreter(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text()

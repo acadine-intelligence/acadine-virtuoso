@@ -39,3 +39,5 @@ coverage/
 
 # Plugin local settings (personal paths)
 plugins/obsidian/data.json
+plugins/hermes/test-results/
+plugins/hermes/playwright-report/
