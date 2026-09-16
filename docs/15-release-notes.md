@@ -2,6 +2,10 @@
 
 The first public release is [v0.1.0](releases/v0.1.0.md) on GitHub Releases (tag at `1df2c99`, published 2026-09-04). Sections marked "Unreleased" landed on `main` after that tag and will ship in the next release. Sections under "Included in v0.1.0" landed before the tag. These notes record public repository milestones and the checks that accompanied them.
 
+## Unreleased version policy
+
+`main` reports `0.2.0` from `virtuoso --version` while the published release reports `0.1.0`. Before this change both reported `0.1.0`, so a source install and the published wheel were indistinguishable by version even though the wheel lacks the JSON study commands and the Hermes Desktop adapter. The source version now moves to the next release number as soon as `main` carries unreleased changes, and a repository test fails when unreleased sections exist under the published version number. The plugin manifests, `product.json`, and the release script carry the same number; the next release workflow run tags `v0.2.0`.
+
 ## Unreleased external schedulers
 
 Workspaces can select a trusted local scheduler as `module:<module-id>` from a private manifest under `workspace/modules/<module-id>/virtuoso.module.json`. The module receives one narrowly typed `scheduler.request` projection in the existing `virtuoso/module-request@0.1` envelope. It receives attempt facts, prior scheduler state, context, and its finite configuration object, but no workspace path, database path, or learner prose. The `scheduler-proposal` result now requires `proposed_state`.

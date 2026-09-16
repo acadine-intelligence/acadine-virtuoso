@@ -10,7 +10,7 @@ The CLI remains the only scheduler and evidence writer. This optional interface 
 
 Use Hermes Desktop with the native plugin SDK, `ctx.rest`, and Git plugin installation. The connected backend must support enabled plugin API routes. See the [official SDK guide](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk). Older Desktop and backend installations can need separate updates.
 
-Install the Virtuoso CLI and adapter from the same reviewed repository revision. A previous `v0.1.0` release can lack the JSON study commands even though its version string matches the development version. Use commit identity when testing an unreleased change.
+Install the Virtuoso CLI and adapter from the same reviewed repository revision. The published `v0.1.0` release lacks the JSON study commands; a source install reports `0.2.0` and includes them. Use commit identity when testing an unreleased change.
 
 ## Install from Git
 

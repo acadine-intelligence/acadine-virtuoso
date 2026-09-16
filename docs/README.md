@@ -1,6 +1,6 @@
 # Documentation index
 
-Use the current guides for the implemented v0.1.0 behavior. The other records explain research and design choices. They also preserve earlier verification.
+Use the current guides for the behavior on `main`, which is ahead of the published v0.1.0 release. The other records explain research and design choices. They also preserve earlier verification.
 
 ## Current user guides
 

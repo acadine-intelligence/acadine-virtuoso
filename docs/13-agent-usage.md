@@ -64,12 +64,12 @@ practice --item X --administer --response "<learner's transcribed answer>" \
 
 The attempt is marked `administered`, latency is stored as NULL/unknown (the tool measured nothing), and `--agent-help` defaults to `substantial`. Ask the learner for their answer and confidence BEFORE revealing the reference answer, exactly as the interactive protocol would. Do not pipe scripted stdin into interactive `practice`: that fabricates a near-zero latency measurement and pollutes the evidence.
 
-**Driving the interactive protocol directly (rarely appropriate).** Feed stdin lines in protocol order and read stdout — only sensible when a human is typing at a relayed live terminal, because the measured latency must belong to the learner. The sequence is:
+**Driving the interactive protocol directly (rarely appropriate).** Feed stdin lines in protocol order and read stdout. This is only sensible when a human is typing at a relayed live terminal, because the measured latency must belong to the learner. The sequence is:
 
 ```
 stdin:  <y|n>                     # Notes open?
 stdout: Challenge + prompt shown
-stdin:  <free-text recall>        # timed — answer BEFORE any reveal
+stdin:  <free-text recall>        # timed: answer BEFORE any reveal
 stdout: Initial recall time reported
 stdin:  retry | hint | reveal     # repeatable until reveal; hint adds "Response after hint:"
 stdout: reference answer shown

@@ -19,7 +19,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE_VERSION = "0.1.0"
+RELEASE_VERSION = "0.2.0"
 _STABLE_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _OBSIDIAN_ASSETS = ("main.js", "manifest.json", "versions.json")
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)

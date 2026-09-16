@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import re
+import subprocess
+import sys
 import tomllib
 import unittest
 from pathlib import Path
@@ -19,7 +22,7 @@ CURRENT_PUBLIC_GUIDES = (
 
 class PublicRepositoryContractTests(unittest.TestCase):
     def test_v010_release_metadata_agrees(self) -> None:
-        expected = "0.1.0"
+        expected = "0.2.0"
         project = tomllib.loads(
             (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )["project"]
@@ -71,6 +74,56 @@ class PublicRepositoryContractTests(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertNotIn("0.1.0.dev0", path.read_text(encoding="utf-8"))
+
+    def test_source_version_moves_past_the_published_release_when_unreleased(
+        self,
+    ) -> None:
+        # The published v0.1.0 wheel and a source install must not report the
+        # same version once main carries unreleased changes; installers used
+        # the version string to explain missing commands and were misled.
+        notes = (ROOT / "docs" / "15-release-notes.md").read_text(encoding="utf-8")
+        published = sorted(
+            tuple(int(part) for part in match.split("."))
+            for match in set(
+                re.findall(r"^## Included in v(\d+\.\d+\.\d+)$", notes, re.MULTILINE)
+            )
+        )
+        self.assertTrue(published, "release notes name no published release")
+        unreleased = re.findall(r"^## Unreleased ", notes, re.MULTILINE)
+        source = tuple(
+            int(part)
+            for part in tomllib.loads(
+                (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            )["project"]["version"].split(".")
+        )
+        if unreleased:
+            self.assertGreater(source, published[-1])
+        else:
+            self.assertEqual(source, published[-1])
+        self.assertIn(
+            "`0.2.0` on `main`",
+            (ROOT / "docs" / "12-cli-reference.md").read_text(encoding="utf-8"),
+        )
+
+    def test_source_version_carries_the_json_study_commands(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "virtuoso.cli", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "0.2.0")
+        review_help = subprocess.run(
+            [sys.executable, "-m", "virtuoso.cli", "--workspace", "unused", "review", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(review_help.returncode, 0, review_help.stderr)
+        for command in ("study-load", "study-record"):
+            with self.subTest(command=command):
+                self.assertIn(command, review_help.stdout)
 
     def test_cli_reference_covers_current_query_search_and_review_contracts(
         self,

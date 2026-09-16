@@ -18,7 +18,7 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_artifacts.py"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def _load_release_module() -> ModuleType:
@@ -48,10 +48,10 @@ def _add_tar_file(archive: tarfile.TarFile, name: str, content: bytes) -> None:
 def _release_fixture(root: Path) -> None:
     _write(
         root / "pyproject.toml",
-        "[project]\nname = \"acadine-virtuoso\"\nversion = \"0.1.0\"\n",
+        "[project]\nname = \"acadine-virtuoso\"\nversion = \"0.2.0\"\n",
     )
-    _write(root / "product.json", '{"release":{"version":"0.1.0"}}\n')
-    _write(root / "plugins/hermes/plugin.yaml", "name: virtuoso\nversion: 0.1.0\n")
+    _write(root / "product.json", '{"release":{"version":"0.2.0"}}\n')
+    _write(root / "plugins/hermes/plugin.yaml", "name: virtuoso\nversion: 0.2.0\n")
     _write(
         root / "plugins/obsidian/manifest.json",
         json.dumps(
@@ -67,32 +67,32 @@ def _release_fixture(root: Path) -> None:
     )
     _write(
         root / "plugins/obsidian/package.json",
-        '{"name":"virtuoso-obsidian","version":"0.1.0"}\n',
+        '{"name":"virtuoso-obsidian","version":"0.2.0"}\n',
     )
     _write(
         root / "plugins/obsidian/package-lock.json",
-        '{"name":"virtuoso-obsidian","version":"0.1.0",'
-        '"packages":{"":{"version":"0.1.0"}}}\n',
+        '{"name":"virtuoso-obsidian","version":"0.2.0",'
+        '"packages":{"":{"version":"0.2.0"}}}\n',
     )
-    _write(root / "plugins/obsidian/versions.json", '{"0.1.0":"1.5.0"}\n')
+    _write(root / "plugins/obsidian/versions.json", '{"0.2.0":"1.5.0"}\n')
     _write(root / "plugins/obsidian/main.js", "module.exports = {};\n")
 
-    wheel = root / "dist/python/acadine_virtuoso-0.1.0-py3-none-any.whl"
+    wheel = root / "dist/python/acadine_virtuoso-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("virtuoso/__init__.py", '__version__ = "0.1.0"\n')
+        archive.writestr("virtuoso/__init__.py", '__version__ = "0.2.0"\n')
         archive.writestr(
-            "acadine_virtuoso-0.1.0.dist-info/METADATA",
-            "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+            "acadine_virtuoso-0.2.0.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
         )
 
-    sdist = root / "dist/python/acadine_virtuoso-0.1.0.tar.gz"
+    sdist = root / "dist/python/acadine_virtuoso-0.2.0.tar.gz"
     with tarfile.open(sdist, "w:gz") as archive:
-        prefix = "acadine_virtuoso-0.1.0"
+        prefix = "acadine_virtuoso-0.2.0"
         _add_tar_file(
             archive,
             f"{prefix}/PKG-INFO",
-            b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+            b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
         )
         _add_tar_file(archive, f"{prefix}/README.md", b"# Fixture\n")
 
@@ -117,7 +117,7 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "0.1.0\n")
+        self.assertEqual(result.stdout, "0.2.0\n")
         self.assertEqual(result.stderr, "")
 
     def test_assemble_creates_and_verifies_the_exact_release_assets(self) -> None:
@@ -136,12 +136,12 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             names,
             [
                 "SHA256SUMS",
-                "acadine_virtuoso-0.1.0-py3-none-any.whl",
-                "acadine_virtuoso-0.1.0.tar.gz",
+                "acadine_virtuoso-0.2.0-py3-none-any.whl",
+                "acadine_virtuoso-0.2.0.tar.gz",
                 "main.js",
                 "manifest.json",
                 "versions.json",
-                "virtuoso-obsidian-0.1.0.zip",
+                "virtuoso-obsidian-0.2.0.zip",
             ],
         )
 
@@ -151,12 +151,12 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            wheel = root / "dist/release/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/release/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("../escape.py", "raise RuntimeError\n")
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
+                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
             _rewrite_checksums(root / "dist/release")
             with self.assertRaisesRegex(
@@ -170,15 +170,15 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            wheel = root / "dist/release/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/release/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 special = zipfile.ZipInfo("virtuoso/channel")
                 special.create_system = 3
                 special.external_attr = (stat.S_IFIFO | 0o644) << 16
                 archive.writestr(special, b"")
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
+                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
             _rewrite_checksums(root / "dist/release")
             with self.assertRaisesRegex(
@@ -192,13 +192,13 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            sdist = root / "dist/release/acadine_virtuoso-0.1.0.tar.gz"
+            sdist = root / "dist/release/acadine_virtuoso-0.2.0.tar.gz"
             with tarfile.open(sdist, "w:gz") as archive:
-                prefix = "acadine_virtuoso-0.1.0"
+                prefix = "acadine_virtuoso-0.2.0"
                 _add_tar_file(
                     archive,
                     f"{prefix}/PKG-INFO",
-                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
                 link = tarfile.TarInfo(f"{prefix}/escape")
                 link.type = tarfile.SYMTYPE
@@ -216,12 +216,12 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            wheel = root / "dist/release/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/release/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("project/.buildos/receipt.json", "{}\n")
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
+                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
             _rewrite_checksums(root / "dist/release")
             with self.assertRaisesRegex(
@@ -235,13 +235,13 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            sdist = root / "dist/release/acadine_virtuoso-0.1.0.tar.gz"
+            sdist = root / "dist/release/acadine_virtuoso-0.2.0.tar.gz"
             with tarfile.open(sdist, "w:gz") as archive:
-                prefix = "acadine_virtuoso-0.1.0"
+                prefix = "acadine_virtuoso-0.2.0"
                 _add_tar_file(
                     archive,
                     f"{prefix}/PKG-INFO",
-                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
                 private_path = b"/" + b"Users/maintainer/private-worktree\n"
                 _add_tar_file(archive, f"{prefix}/README.md", private_path)
@@ -258,13 +258,13 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            sdist = root / "dist/release/acadine_virtuoso-0.1.0.tar.gz"
+            sdist = root / "dist/release/acadine_virtuoso-0.2.0.tar.gz"
             with tarfile.open(sdist, "w:gz") as archive:
-                prefix = "acadine_virtuoso-0.1.0"
+                prefix = "acadine_virtuoso-0.2.0"
                 _add_tar_file(
                     archive,
                     f"{prefix}/PKG-INFO",
-                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    b"Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
                 private_path = b"/" + b"home/maintainer/private-worktree\n"
                 _add_tar_file(archive, f"{prefix}/README.md", private_path)
@@ -281,13 +281,13 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            wheel = root / "dist/release/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/release/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 private_path = b"C:" + b"\\Users\\maintainer\\repo\\module.py\n"
                 archive.writestr("virtuoso/module.py", private_path)
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
+                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
             _rewrite_checksums(root / "dist/release")
             with self.assertRaisesRegex(
@@ -301,15 +301,15 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            wheel = root / "dist/release/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/release/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr(
                     "virtuoso/build_path.txt",
                     str(root).encode("utf-8") + b"/src/virtuoso\n",
                 )
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.1.0\n",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
+                    "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 0.2.0\n",
                 )
             _rewrite_checksums(root / "dist/release")
             with self.assertRaisesRegex(
@@ -323,7 +323,7 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            bundle = root / "dist/release/virtuoso-obsidian-0.1.0.zip"
+            bundle = root / "dist/release/virtuoso-obsidian-0.2.0.zip"
             obsidian = root / "plugins/obsidian"
             with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 for name in sorted(("main.js", "manifest.json", "versions.json")):
@@ -358,7 +358,7 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            bundle = root / "dist/release/virtuoso-obsidian-0.1.0.zip"
+            bundle = root / "dist/release/virtuoso-obsidian-0.2.0.zip"
             first = bundle.read_bytes()
             for name in ("main.js", "manifest.json", "versions.json"):
                 os.utime(
@@ -427,14 +427,14 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             root = Path(tmp)
             _release_fixture(root)
             release.assemble_release(root)
-            sdist = root / "dist/release/acadine_virtuoso-0.1.0.tar.gz"
+            sdist = root / "dist/release/acadine_virtuoso-0.2.0.tar.gz"
             metadata = (
                 b"Metadata-Version: 2.4\n"
                 b"Name: acadine-virtuoso\n"
-                b"Version: 0.1.0\n"
+                b"Version: 0.2.0\n"
             )
             with tarfile.open(sdist, "w:gz") as archive:
-                prefix = "acadine_virtuoso-0.1.0"
+                prefix = "acadine_virtuoso-0.2.0"
                 _add_tar_file(archive, f"{prefix}/PKG-INFO", metadata)
                 _add_tar_file(
                     archive,
@@ -468,10 +468,10 @@ class ReleaseArtifactContractTests(unittest.TestCase):
             release_dir = root / "dist/release"
             before = {path.name: path.read_bytes() for path in release_dir.iterdir()}
 
-            wheel = root / "dist/python/acadine_virtuoso-0.1.0-py3-none-any.whl"
+            wheel = root / "dist/python/acadine_virtuoso-0.2.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr(
-                    "acadine_virtuoso-0.1.0.dist-info/METADATA",
+                    "acadine_virtuoso-0.2.0.dist-info/METADATA",
                     "Metadata-Version: 2.4\nName: acadine-virtuoso\nVersion: 9.9.9\n",
                 )
             with self.assertRaisesRegex(release.ReleaseArtifactError, "wrong version"):

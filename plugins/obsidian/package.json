@@ -1,6 +1,6 @@
 {
   "name": "virtuoso-obsidian",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Human review queue for Virtuoso learning items inside Obsidian.",
   "private": true,
   "scripts": {

@@ -55,7 +55,7 @@ The agent tools default to `~/.virtuoso/workspace`. The Desktop API requires an
 explicit workspace setting. Paths belong to the backend machine. Keep the CLI
 in its own environment rather than installing it into Hermes' Python environment.
 
-The plugin and Python package follow the same `0.1.0` release version.
+The plugin and Python package follow the same source version, `0.2.0` on `main`. The published `v0.1.0` release predates this plugin.
 
 ## Result and argument contract
 
