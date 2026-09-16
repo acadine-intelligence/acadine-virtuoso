@@ -18,7 +18,7 @@ SQLite migrations run transactionally. Before any future destructive migration, 
 
 Required before release: clean-environment installation, public CI, reproducible repository checks, representative journeys, exact-commit independent review, migration and restore proof, user acceptance, known limitations, and an approved distribution decision.
 
-The manual `.github/workflows/release.yml` path reuses required CI, builds the fixed v0.1.0 assets, verifies their checksums and archive boundaries, then creates a draft GitHub Release. It rejects any ref except `main` and stops if the tag or release exists. A maintainer still decides whether to publish the draft.
+The manual `.github/workflows/release.yml` path reuses required CI, builds the fixed assets for the source version, verifies their checksums and archive boundaries, then creates a draft GitHub Release. It rejects any ref except `main` and stops if the tag or release exists. A maintainer still decides whether to publish the draft.
 
 ## Distribution boundary
 

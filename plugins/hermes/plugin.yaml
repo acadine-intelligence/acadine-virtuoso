@@ -1,5 +1,5 @@
 name: virtuoso
-version: 0.1.0
+version: 0.2.0
 description: "Virtuoso learning tools and a native Desktop page. Uses the installed CLI and the configured workspace on the connected Hermes backend."
 author: Acadine
 kind: standalone

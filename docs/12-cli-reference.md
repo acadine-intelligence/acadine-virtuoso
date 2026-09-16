@@ -9,7 +9,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 ```
 
 - `--workspace PATH` is required for every command except `--version`, and always comes before the command. It selects the learner workspace directory created by `init`.
-- `--version` prints the package version (`0.1.0`) and exits 0; no workspace is needed.
+- `--version` prints the package version (`0.2.0` on `main`; `0.1.0` for the published release) and exits 0; no workspace is needed.
 - Most commands accept `--json`. On success, `--json` makes stdout a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
 
 ## Exit codes

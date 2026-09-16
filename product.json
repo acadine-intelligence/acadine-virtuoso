@@ -172,7 +172,7 @@
     "data_backup": "Runtime workspace backup is user-owned and local. Virtuoso will provide a consistent SQLite backup plus Markdown inventory and event export; source notes remain backed up by their owning folder or vault system."
   },
   "release": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "user_acceptance": {
       "status": "pending",
       "evidence": ""
