@@ -225,6 +225,9 @@ class PublicRepositoryContractTests(unittest.TestCase):
             "search embed --item",
             "search sem --model",
             "search status --json",
+            "learn --item ITEM",
+            "review study-load --item ITEM --json",
+            "review study-record --json",
         ):
             with self.subTest(command=command):
                 self.assertIn(command, agent_guide)
@@ -252,6 +255,28 @@ class PublicRepositoryContractTests(unittest.TestCase):
         for tool in registered_tools:
             self.assertIn(f"`{tool}`", hermes_guide)
         self.assertIn("workspace:", hermes_guide)
+
+    def test_public_docs_state_the_published_release_and_workspace_boundary(
+        self,
+    ) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        product = json.loads((ROOT / "product.json").read_text(encoding="utf-8"))
+        limitations = "\n".join(product["release"]["known_limitations"])
+        install_guide = (ROOT / "docs" / "18-installation.md").read_text(
+            encoding="utf-8"
+        )
+        for text, name in ((readme, "README"), (limitations, "product.json")):
+            with self.subTest(document=name):
+                self.assertIn("published on GitHub Releases", text)
+                self.assertNotIn("prepare a draft `v0.1.0`", text)
+                self.assertNotIn("prepare a draft v0.1.0", text)
+        self.assertIn("releases/tag/v0.1.0", readme)
+        self.assertIn("not on PyPI", readme)
+        self.assertIn("`--workspace PATH` on every command", readme)
+        self.assertIn(".learning/virtuoso", readme)
+        self.assertIn("refuses a directory that already holds files", readme)
+        self.assertIn("does not identify unreleased changes", install_guide)
+
 
     def test_public_docs_avoid_unsupported_release_and_interface_claims(self) -> None:
         paths = (

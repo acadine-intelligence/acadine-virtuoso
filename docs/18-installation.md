@@ -6,7 +6,9 @@ uv 0.10.10 is the tested package manager. Python 3.11.15 is the development pin.
 
 The README installs from the current source checkout with `uv tool install --python 3.11 .`. This is a normal, isolated tool installation. It copies the package into the tool environment. It does not require the source checkout when running the command. A developer uses `uv sync --locked` and `uv run --locked` in the checkout instead.
 
-For an available GitHub Release, download its wheel and `SHA256SUMS`. Verify the wheel against the corresponding checksum before installation. Pass the local wheel path to `uv tool install --python 3.11`. The package name is `acadine-virtuoso`; its executable is `virtuoso`. Draft assets require repository access. A draft or an Actions artifact is not a public package-registry release.
+To install the published `v0.1.0` release, download its wheel and `SHA256SUMS` from the GitHub Release page. Verify the wheel against the corresponding checksum before installation. Pass the local wheel path to `uv tool install --python 3.11`. The package name is `acadine-virtuoso`; its executable is `virtuoso`. A GitHub Release is not a package-registry release, and later draft releases require repository access until a maintainer publishes them.
+
+The release version string does not identify unreleased changes. A source install from `main` can report the same `virtuoso --version` as the published wheel while carrying commands the wheel lacks. Compare against the "Unreleased" sections in `docs/15-release-notes.md`, or record the exact commit, when a feature appears missing.
 
 Tool installation resolves the package metadata. It does not consume `uv.lock`. The current package pins its runtime dependencies explicitly. The lockfile also records the development and build environment. CI exports that lock to hash-checked installation requirements for its fresh-environment tests.
 
