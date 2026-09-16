@@ -21,7 +21,7 @@ Translate learner intent into commands like this:
 | "Compose a focused session from my evidence" | `compose --json`: show the proposal rationale, skipped material and uncertainty, then record the learner's choice with `compose decide --id ... --decision accept|change|reject --json` |
 | "Quiz me on <track>" / "today is a Go day" | `next --focus <track> --json`: selection scoped to one focus; a track with no items returns exit 2 with a clear error |
 | "Add this as a practice item" | `add --id ... --title ... --focus ... --prompt ... --answer ... [--hint ...] [--follow-up ...] --json` |
-| "I am new to this material" / "teach this before testing me" | `add ... --entry-mode learn-first --learning-unit "..." --json`, then `learn --item ITEM`; only the learner may choose `finish` |
+| "I am new to this material" / "teach this before testing me" | `add ... --entry-mode learn-first --learning-unit "..." --json`, then the learner studies: at a terminal, `learn --item ITEM`; through an interface or chat relay, `review study-load --item ITEM --json` shows the unit and `review study-record --json` records the completion. Only the learner may choose `finish` |
 | "Let's practice X" / "test me on X" | `practice --item X --agent-help <honest level>` (interactive; see the session protocol below) |
 | "Quiz me in chat" / learner answered out-of-band | `practice --item X --administer --response "..." --result ... --confidence N --json` (agent transcribes; latency stored as unknown) |
 | "How is my learning going?" / "show my evidence" | `attempts --json` and/or `doctor --json` |
@@ -84,7 +84,7 @@ Rules for scripted sessions: the recall answer must come before any `reveal`; a 
 
 ## Standard agent workflows
 
-**Morning pulse.** Run `next --json` and branch on `action`. For `learn`, ask the learner to run the local `learn` command and make their own finish decision. For `practice`, present only the prompt and title, then record the learner's answer through `practice --administer` or a live relay. Optionally run `transfer check due --json` first, since due checks outrank routine review.
+**Morning pulse.** Run `next --json` and branch on `action`. For `learn`, either ask the learner to run the local `learn` command, or relay the unit yourself: `review study-load --item ITEM --json` returns the learning unit without the prompt or answer, and `review study-record --json` (stdin request with `surface: "cli"` for a chat relay) records the completion only after the learner says they finished. Study records exposure, never an attempt or schedule. For `practice`, present only the prompt and title, then record the learner's answer through `practice --administer` or a live relay. Optionally run `transfer check due --json` first, since due checks outrank routine review.
 
 **Capture a concept.** After a work session, the agent drafts an item (prompt/answer/hint/follow-up) from the material and calls `add --json`. The human reviews the Markdown file in `workspace/items/`; items are human-owned prose.
 

@@ -27,7 +27,9 @@ virtuoso --version
 
 If uv reports that its executable directory is outside `PATH`, follow its instruction to run `uv tool update-shell`, then start a new shell. The `virtuoso` command works outside this checkout.
 
-For development, use the locked project environment in [CONTRIBUTING.md](CONTRIBUTING.md). For installation from a downloaded release and upgrade precautions, see [the installation guide](docs/18-installation.md). The current release workflow prepares drafts; this does not imply a published package is available.
+The checkout holds source code only. Your learning material lives in a separate workspace directory that you choose and pass as `--workspace PATH` on every command. `init` creates that directory and refuses a directory that already holds files, so do not point it at the checkout or at an existing project folder. A hidden folder inside a project, such as `.learning/virtuoso`, or a plain folder such as `~/my-practice` both work.
+
+For development, use the locked project environment in [CONTRIBUTING.md](CONTRIBUTING.md). To install a published wheel instead of the checkout, see [the installation guide](docs/18-installation.md). [v0.1.0](https://github.com/acadine-intelligence/acadine-virtuoso/releases/tag/v0.1.0) is published on GitHub Releases with a wheel, a source distribution, and `SHA256SUMS`. Virtuoso is not on PyPI. Features listed as unreleased in [the release notes](docs/15-release-notes.md) exist only in a source install.
 
 ## Five-minute tour
 
@@ -147,7 +149,7 @@ External modules use a JSON-over-stdin/stdout protocol with no shell indirection
 
 ## Status
 
-Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the implemented behavior. A maintainer can manually run the release workflow after required CI to prepare a draft `v0.1.0` GitHub Release. The workflow does not publish to a package registry or deploy the product.
+Virtuoso is early and under active dogfood. `product.json` records its current completion and adoption state. This README documents the behavior on `main`, which is ahead of the published `v0.1.0` release. A maintainer runs the release workflow by hand after required CI; it prepares a draft GitHub Release, and publishing stays a maintainer decision. The workflow does not publish to a package registry or deploy the product.
 
 ## Verify
 

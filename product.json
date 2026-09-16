@@ -180,7 +180,7 @@
     "known_limitations": [
       "The learn-first and active-recall CLI paths, read-only Markdown/Obsidian source index, reviewed curriculum and item import, project-transfer evidence, delayed transfer checks, local analytics, and item retrieval are implemented. The Obsidian interface currently handles practice only. A real two-week dogfood run remains pending.",
       "Connected sources provide path-scoped metadata, wikilinks, hash provenance, stale-link detection, and reviewed imports. Delayed transfer checks remain manually authored. Explicit field-owned two-way synchronization, direction-led planning, generated project exercises, XP, and meta-scheduler optimization remain future work.",
-      "The repository is public and source-checkout installation works. A manual workflow can prepare a draft v0.1.0 GitHub Release after required CI. No package registry release or end-user upgrade path exists yet."
+      "The repository is public and source-checkout installation works. v0.1.0 is published on GitHub Releases with a wheel, source distribution, and checksums; main carries unreleased changes beyond that tag. No package registry release exists, and upgrades remain a manual reinstall."
     ]
   },
   "adoption": {
