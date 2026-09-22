@@ -1,0 +1,21 @@
+{
+  "capabilities": {
+    "reads": [
+      "annotation.request"
+    ],
+    "returns": "annotation-answers"
+  },
+  "category": "annotator",
+  "command": {
+    "argv": [
+      "python3",
+      "rule_annotator.py"
+    ],
+    "timeout_seconds": 2
+  },
+  "id": "rule-annotator",
+  "network": "none",
+  "schema": "virtuoso/module@0.1",
+  "trust": "local-executable",
+  "version": "1.0.0"
+}

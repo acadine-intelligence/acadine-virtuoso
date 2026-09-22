@@ -52,7 +52,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 16
+_CURRENT_MIGRATION_VERSION = 17
 
 
 class WorkspaceError(VirtuosoError):
@@ -478,9 +478,12 @@ class WorkspaceService:
             raise WorkspaceError(f"invalid workspace configuration: {exc}") from exc
         if not isinstance(value, dict):
             raise WorkspaceError("workspace configuration must be a JSON object")
+        expected_fields = {"schema", "mode", "scheduler"}
+        if "annotator" in value:
+            expected_fields = expected_fields | {"annotator"}
         self._require_exact_fields(
             value,
-            {"schema", "mode", "scheduler"},
+            expected_fields,
             "workspace configuration",
         )
         if value["schema"] != WORKSPACE_SCHEMA:
@@ -501,7 +504,38 @@ class WorkspaceService:
         context = scheduler["context"]
         if not isinstance(context, str) or not context.strip():
             raise WorkspaceError("scheduler context must be a non-empty string")
+        if "annotator" in value:
+            annotator = value["annotator"]
+            if not isinstance(annotator, dict):
+                raise WorkspaceError("workspace annotator configuration must be a JSON object")
+            self._require_exact_fields(
+                annotator, {"allow_remote"}, "workspace annotator configuration"
+            )
+            if not isinstance(annotator["allow_remote"], bool):
+                raise WorkspaceError("annotator allow_remote must be true or false")
         return value
+
+    def annotator_settings(self) -> dict[str, Any]:
+        """The annotator consent block; absent means remote modules are refused."""
+        config = self.configuration()
+        annotator = config.get("annotator", {"allow_remote": False})
+        return {"allow_remote": bool(annotator["allow_remote"])}
+
+    def configure_annotator(self, *, allow_remote: bool) -> dict[str, Any]:
+        """Record per-workspace consent for annotator modules that leave the machine."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            config = self.configuration()
+            new_config = {**config, "annotator": {"allow_remote": allow_remote}}
+            self._replace_private_text(
+                self.config_path,
+                json.dumps(new_config, indent=2, sort_keys=True) + "\n",
+                label="workspace configuration",
+            )
+        return {
+            "schema": "virtuoso/annotator-settings@0.1",
+            "allow_remote": allow_remote,
+        }
 
     def scheduler_settings(self) -> SchedulerSettings:
         """The configured scheduler, validated by its backend and checked
@@ -566,36 +600,7 @@ class WorkspaceService:
             raise WorkspaceError(
                 "module scheduler algorithm must be module:<lowercase-dash-id>"
             )
-        modules_dir = self.root / "modules"
-        module_dir = modules_dir / module_id
-        manifest_path = module_dir / "virtuoso.module.json"
-        for path, directory in (
-            (modules_dir, True),
-            (module_dir, True),
-            (manifest_path, False),
-        ):
-            if path.is_symlink():
-                raise WorkspaceError(f"scheduler module path must not be a symlink: {path}")
-            try:
-                status = path.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise WorkspaceError(
-                    f"scheduler module manifest not found for {module_id}: {manifest_path}"
-                ) from exc
-            expected = stat_module.S_ISDIR if directory else stat_module.S_ISREG
-            if not expected(status.st_mode):
-                raise WorkspaceError(f"scheduler module path has the wrong type: {path}")
-            if stat_module.S_IMODE(status.st_mode) & 0o077:
-                expected_mode = "0700" if directory else "0600"
-                raise WorkspaceError(
-                    f"scheduler module path must be private ({expected_mode}): {path}"
-                )
-        try:
-            manifest = ModuleManifest.load(manifest_path)
-        except ModuleError as exc:
-            raise WorkspaceError(str(exc)) from exc
-        if manifest.path != manifest_path:
-            raise WorkspaceError("scheduler module manifest escaped its configured directory")
+        manifest = self._module_manifest(module_id, label="scheduler")
         if manifest.module_id != module_id:
             raise WorkspaceError(
                 "scheduler module manifest id does not match scheduler.algorithm"
@@ -606,6 +611,54 @@ class WorkspaceService:
             raise WorkspaceError(
                 "scheduler module must read exactly the scheduler.request projection"
             )
+        return manifest
+
+    def annotator_module_manifest(self, module_id: str) -> ModuleManifest:
+        """Load and validate an annotator manifest without executing it."""
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", module_id):
+            raise WorkspaceError("annotator module id must be lowercase dash-separated words")
+        manifest = self._module_manifest(module_id, label="annotator")
+        if manifest.module_id != module_id:
+            raise WorkspaceError("annotator module manifest id does not match the request")
+        if manifest.category != "annotator":
+            raise WorkspaceError("annotator module manifest category must be annotator")
+        if manifest.reads != ("annotation.request",):
+            raise WorkspaceError(
+                "annotator module must read exactly the annotation.request projection"
+            )
+        return manifest
+
+    def _module_manifest(self, module_id: str, *, label: str) -> ModuleManifest:
+        modules_dir = self.root / "modules"
+        module_dir = modules_dir / module_id
+        manifest_path = module_dir / "virtuoso.module.json"
+        for path, directory in (
+            (modules_dir, True),
+            (module_dir, True),
+            (manifest_path, False),
+        ):
+            if path.is_symlink():
+                raise WorkspaceError(f"{label} module path must not be a symlink: {path}")
+            try:
+                status = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"{label} module manifest not found for {module_id}: {manifest_path}"
+                ) from exc
+            expected = stat_module.S_ISDIR if directory else stat_module.S_ISREG
+            if not expected(status.st_mode):
+                raise WorkspaceError(f"{label} module path has the wrong type: {path}")
+            if stat_module.S_IMODE(status.st_mode) & 0o077:
+                expected_mode = "0700" if directory else "0600"
+                raise WorkspaceError(
+                    f"{label} module path must be private ({expected_mode}): {path}"
+                )
+        try:
+            manifest = ModuleManifest.load(manifest_path)
+        except ModuleError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        if manifest.path != manifest_path:
+            raise WorkspaceError(f"{label} module manifest escaped its configured directory")
         return manifest
 
     def _validated_scheduler_settings(self, scheduler: dict[str, Any]) -> SchedulerSettings:
@@ -1635,6 +1688,39 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'scheduler_switches is append-only');
                 END""",
+            # Migration 17: append-only typed annotations produced by annotator
+            # modules. Never read by selection, composition, or any scheduler.
+            """CREATE TABLE IF NOT EXISTS annotations (
+                annotation_id TEXT PRIMARY KEY,
+                subject_kind TEXT NOT NULL CHECK(subject_kind IN ('item')),
+                subject_id TEXT NOT NULL CHECK(length(subject_id) BETWEEN 1 AND 128),
+                subject_hash TEXT NOT NULL CHECK(length(subject_hash) = 64),
+                question_set_id TEXT NOT NULL CHECK(length(question_set_id) BETWEEN 1 AND 64),
+                question_set_hash TEXT NOT NULL CHECK(length(question_set_hash) = 64),
+                module_id TEXT NOT NULL CHECK(length(module_id) BETWEEN 1 AND 64),
+                module_version TEXT NOT NULL CHECK(length(module_version) BETWEEN 1 AND 64),
+                module_network TEXT NOT NULL CHECK(module_network IN ('none','remote')),
+                module_receipt_id TEXT NOT NULL
+                    REFERENCES module_run_receipts(receipt_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                answers_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE INDEX annotations_by_subject
+                ON annotations(subject_kind, subject_id, occurred_at)""",
+            """CREATE TRIGGER annotations_reject_update
+                BEFORE UPDATE ON annotations
+                BEGIN
+                    SELECT RAISE(ABORT, 'annotations is append-only');
+                END""",
+            """CREATE TRIGGER annotations_reject_delete
+                BEFORE DELETE ON annotations
+                BEGIN
+                    SELECT RAISE(ABORT, 'annotations is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1719,6 +1805,7 @@ class WorkspaceService:
                 14: statements[60:69],
                 15: statements[69:79],
                 16: statements[79:82],
+                17: statements[82:86],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -4922,6 +5009,170 @@ class WorkspaceService:
         if failure is not None:
             raise failure
         return result
+
+    def record_annotation(
+        self,
+        *,
+        subject_kind: str,
+        subject_id: str,
+        subject_hash: str,
+        question_set_id: str,
+        question_set_hash: str,
+        manifest: Any,
+        result: Any,
+        module_started_at: datetime,
+        module_completed_at: datetime,
+        surface: str,
+    ) -> dict[str, Any]:
+        """Append one annotation and its module receipt in one transaction.
+
+        The subject hash is re-checked inside the transaction so an item that
+        changed while the module ran produces no annotation.
+        """
+        if subject_kind != "item":
+            raise WorkspaceError(f"unsupported annotation subject kind: {subject_kind}")
+        manifest_sha256 = getattr(manifest, "manifest_sha256", None)
+        if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
+            raise WorkspaceError("module manifest has no load-time SHA-256 identity")
+        answers_json = json.dumps(result.payload["answers"], sort_keys=True, allow_nan=False)
+        occurred_at = datetime.now(timezone.utc)
+        annotation_id = "annotation-" + hashlib.sha256(
+            "\n".join(
+                (
+                    subject_kind,
+                    subject_id,
+                    subject_hash,
+                    question_set_id,
+                    question_set_hash,
+                    manifest.module_id,
+                    manifest.version,
+                    result.stdout_sha256,
+                    occurred_at.isoformat(),
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        receipt_id = f"module-run-{uuid.uuid4().hex}"
+        duration_ms = max(
+            0, round((module_completed_at - module_started_at).total_seconds() * 1000)
+        )
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT relative_path, content_hash, retired_at FROM items WHERE item_id = ?",
+                (subject_id,),
+            ).fetchone()
+            if row is None:
+                raise WorkspaceError(f"no learning item with id: {subject_id}")
+            if row["retired_at"] is not None:
+                raise WorkspaceError(f"item is retired: {subject_id}")
+            if row["content_hash"] != subject_hash:
+                raise WorkspaceError(
+                    f"item changed while the annotator ran: {subject_id}; run annotate again"
+                )
+            self._require_current_item_content_hash(
+                item_id=subject_id,
+                relative_path=row["relative_path"],
+                expected_hash=subject_hash,
+                action="annotating",
+            )
+            db.execute(
+                """
+                INSERT INTO module_run_receipts(
+                    receipt_id, module_id, module_version, category, kind,
+                    manifest_sha256, stdout_sha256, status, error,
+                    duration_ms, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', NULL, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    manifest.module_id,
+                    manifest.version,
+                    manifest.category,
+                    result.kind,
+                    manifest_sha256,
+                    result.stdout_sha256,
+                    duration_ms,
+                    module_started_at.isoformat(),
+                    module_completed_at.isoformat(),
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO annotations(
+                    annotation_id, subject_kind, subject_id, subject_hash,
+                    question_set_id, question_set_hash, module_id, module_version,
+                    module_network, module_receipt_id, answers_json, occurred_at, surface
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    annotation_id,
+                    subject_kind,
+                    subject_id,
+                    subject_hash,
+                    question_set_id,
+                    question_set_hash,
+                    manifest.module_id,
+                    manifest.version,
+                    manifest.network,
+                    receipt_id,
+                    answers_json,
+                    occurred_at.isoformat(),
+                    surface,
+                ),
+            )
+        return {
+            "annotation_id": annotation_id,
+            "subject_kind": subject_kind,
+            "subject_id": subject_id,
+            "subject_hash": subject_hash,
+            "question_set_id": question_set_id,
+            "question_set_hash": question_set_hash,
+            "module_id": manifest.module_id,
+            "module_version": manifest.version,
+            "module_network": manifest.network,
+            "module_receipt_id": receipt_id,
+            "answers": result.payload["answers"],
+            "occurred_at": occurred_at.isoformat(),
+            "surface": surface,
+        }
+
+    def list_annotations(
+        self, *, subject_kind: str | None = None, subject_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Annotations in occurrence order, with a stale flag against current item hashes."""
+        clauses: list[str] = []
+        params: list[str] = []
+        if subject_kind is not None:
+            clauses.append("a.subject_kind = ?")
+            params.append(subject_kind)
+        if subject_id is not None:
+            clauses.append("a.subject_id = ?")
+            params.append(subject_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT a.*, i.content_hash AS current_hash
+                FROM annotations AS a
+                LEFT JOIN items AS i
+                  ON a.subject_kind = 'item' AND i.item_id = a.subject_id
+                {where}
+                ORDER BY a.occurred_at, a.annotation_id
+                """,
+                params,
+            ).fetchall()
+        annotations: list[dict[str, Any]] = []
+        for row in rows:
+            value = {
+                key: row[key]
+                for key in row.keys()
+                if key not in {"answers_json", "current_hash", "created_at"}
+            }
+            value["answers"] = json.loads(row["answers_json"])
+            value["stale"] = row["current_hash"] != row["subject_hash"]
+            value["claims_mastery"] = False
+            annotations.append(value)
+        return annotations
 
     def list_module_receipts(self) -> list[dict[str, Any]]:
         with self._connect() as db:

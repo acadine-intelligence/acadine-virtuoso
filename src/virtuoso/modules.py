@@ -33,7 +33,9 @@ _ALLOWED_CATEGORIES = {
     "source-adapter": "source-projection",
     "scoring-signal": "score-proposal",
     "output-adapter": "output-receipt",
+    "annotator": "annotation-answers",
 }
+_ALLOWED_NETWORK = {"none", "remote"}
 _ALLOWED_READS = {
     "challenge.summary",
     "attempt.summary",
@@ -41,6 +43,7 @@ _ALLOWED_READS = {
     "scheduler.summary",
     "scheduler.request",
     "project.summary",
+    "annotation.request",
 }
 _PRIVATE_STATE_KEYS = {
     "access_token",
@@ -125,9 +128,19 @@ _PROJECTION_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
         "title": str,
         "summary": str,
     },
+    "annotation.request": {
+        "subject_kind": str,
+        "subject_id": str,
+        "subject_hash": str,
+        "question_set_id": str,
+        "question_set_hash": str,
+        "questions": list,
+        "subject": dict,
+    },
 }
 _RESULT_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
     "score-proposal": {"score": (int, float), "rationale": str},
+    "annotation-answers": {"answers": dict},
     "scheduler-proposal": {
         "due_at": str,
         "algorithm": str,
@@ -154,6 +167,7 @@ _RESULT_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
 }
 _RESULT_REQUIRED_FIELDS: dict[str, set[str]] = {
     "score-proposal": {"score"},
+    "annotation-answers": {"answers"},
     "scheduler-proposal": set(_RESULT_FIELDS["scheduler-proposal"]),
     "practice-proposal": set(_RESULT_FIELDS["practice-proposal"]),
     "source-projection": set(_RESULT_FIELDS["source-projection"]),
@@ -178,6 +192,21 @@ _SUPPORT_ACTION_KINDS = {
     "worked-feedback",
     "follow-up",
     "follow-up-offered",
+}
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_QUESTION_ID = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_ANNOTATION_SUBJECT_KINDS = {"item"}
+_ANNOTATION_PRIMITIVES = {"noul", "choice", "score"}
+_ANNOTATION_QUESTION_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "id": str,
+    "primitive": str,
+    "text": str,
+    "options": list,
+}
+_ANNOTATION_ANSWER_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "primitive": str,
+    "value": (str, int, float),
+    "confidence": (int, float),
 }
 
 
@@ -271,6 +300,7 @@ class ModuleManifest:
     returns: str
     trust: str
     manifest_sha256: str
+    network: str = "none"
 
     @classmethod
     def load(cls, path: Path | str) -> "ModuleManifest":
@@ -286,9 +316,11 @@ class ModuleManifest:
             raise ModuleError(
                 f"unsupported module schema: {value.get('schema')!r}; expected {MANIFEST_SCHEMA}"
             )
+        required_keys = {"schema", "id", "version", "category", "command", "capabilities", "trust"}
+        has_network = "network" in value
         _require_exact_keys(
             value,
-            {"schema", "id", "version", "category", "command", "capabilities", "trust"},
+            required_keys | {"network"} if has_network else required_keys,
             "manifest",
         )
 
@@ -304,6 +336,11 @@ class ModuleManifest:
             raise ModuleError(f"unsupported module category: {category!r}")
         if trust != "local-executable":
             raise ModuleError("module trust must be 'local-executable'")
+        network = value.get("network", "none")
+        if network not in _ALLOWED_NETWORK:
+            raise ModuleError("module network must be 'none' or 'remote'")
+        if category == "annotator" and not has_network:
+            raise ModuleError("annotator modules must declare network: none or remote")
 
         command = value["command"]
         if not isinstance(command, dict):
@@ -361,6 +398,7 @@ class ModuleManifest:
             returns=str(returns),
             trust=str(trust),
             manifest_sha256=hashlib.sha256(raw).hexdigest(),
+            network=str(network),
         )
 
 
@@ -646,6 +684,9 @@ class ModuleRunner:
                     raise ModuleError(f"{projection}.{field} must be a {type_name}")
             if projection == "attempt.summary" and "support_actions" in body:
                 cls._validate_support_actions(body["support_actions"])
+            if projection == "annotation.request":
+                _require_exact_keys(body, set(schema), "annotation.request")
+                cls._validate_annotation_request(body)
             if projection == "scheduler.request":
                 _require_exact_keys(body, set(schema), "scheduler.request")
                 attempt = body["attempt"]
@@ -711,6 +752,87 @@ class ModuleRunner:
             cls._validate_string_list(
                 payload["wikilinks"], "source-projection.wikilinks"
             )
+        if kind == "annotation-answers":
+            cls._validate_annotation_answers(payload["answers"])
+
+    @classmethod
+    def _validate_annotation_request(cls, body: dict[str, Any]) -> None:
+        for field in ("subject_hash", "question_set_hash"):
+            if not _SHA256_HEX.fullmatch(body[field]):
+                raise ModuleError(f"annotation.request.{field} must be a SHA-256 hex digest")
+        if body["subject_kind"] not in _ANNOTATION_SUBJECT_KINDS:
+            raise ModuleError("annotation.request.subject_kind is not supported")
+        questions = body["questions"]
+        if not questions:
+            raise ModuleError("annotation.request.questions must not be empty")
+        seen: set[str] = set()
+        for index, question in enumerate(questions):
+            label = f"annotation.request.questions[{index}]"
+            if not isinstance(question, dict):
+                raise ModuleError(f"{label} must be a JSON object")
+            _require_exact_keys(question, set(_ANNOTATION_QUESTION_FIELDS), label)
+            for field, child in question.items():
+                expected = _ANNOTATION_QUESTION_FIELDS[field]
+                if isinstance(child, bool) or not isinstance(child, expected):
+                    raise ModuleError(f"{label}.{field} has an invalid type")
+            if not _QUESTION_ID.fullmatch(question["id"]):
+                raise ModuleError(f"{label}.id must be lowercase words joined by underscores")
+            if question["id"] in seen:
+                raise ModuleError(f"{label}.id is duplicated")
+            seen.add(question["id"])
+            if question["primitive"] not in _ANNOTATION_PRIMITIVES:
+                raise ModuleError(f"{label}.primitive is not supported")
+            if not question["text"].strip():
+                raise ModuleError(f"{label}.text must be nonempty")
+            cls._validate_string_list(question["options"], f"{label}.options")
+            if question["primitive"] == "choice" and len(question["options"]) < 2:
+                raise ModuleError(f"{label}.options must list at least two choices")
+            if question["primitive"] != "choice" and question["options"]:
+                raise ModuleError(f"{label}.options must be empty unless primitive is choice")
+        for key, value in body["subject"].items():
+            if not isinstance(key, str) or not _QUESTION_ID.fullmatch(key):
+                raise ModuleError("annotation.request.subject keys must be lowercase words")
+            if not isinstance(value, (str, list)):
+                raise ModuleError(
+                    f"annotation.request.subject.{key} must be a string or string array"
+                )
+            if isinstance(value, list):
+                cls._validate_string_list(value, f"annotation.request.subject.{key}")
+
+    @classmethod
+    def _validate_annotation_answers(cls, answers: object) -> None:
+        assert isinstance(answers, dict)
+        if not answers:
+            raise ModuleError("annotation-answers.answers must not be empty")
+        for question_id, answer in answers.items():
+            label = f"annotation-answers.answers.{question_id}"
+            if not isinstance(question_id, str) or not _QUESTION_ID.fullmatch(question_id):
+                raise ModuleError("annotation-answers.answers keys must be question ids")
+            if not isinstance(answer, dict):
+                raise ModuleError(f"{label} must be a JSON object")
+            _require_exact_keys(answer, set(_ANNOTATION_ANSWER_FIELDS), label)
+            primitive = answer["primitive"]
+            if primitive not in _ANNOTATION_PRIMITIVES:
+                raise ModuleError(f"{label}.primitive is not supported")
+            confidence = answer["confidence"]
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not 0 <= confidence <= 1
+            ):
+                raise ModuleError(f"{label}.confidence must be a number from 0 to 1")
+            value = answer["value"]
+            if primitive == "noul":
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ModuleError(f"{label}.value must be a probability for noul")
+                if not 0 <= value <= 1:
+                    raise ModuleError(f"{label}.value must be a probability from 0 to 1")
+            elif primitive == "choice":
+                if not isinstance(value, str) or not value:
+                    raise ModuleError(f"{label}.value must be a nonempty label for choice")
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ModuleError(f"{label}.value must be a number for score")
 
     @classmethod
     def _validate_support_actions(cls, value: object) -> None:

@@ -536,6 +536,43 @@ def _parser() -> argparse.ArgumentParser:
     )
     transfer_check_complete.add_argument("--artifact")
     transfer_check_complete.add_argument("--json", action="store_true")
+
+    annotate = commands.add_parser(
+        "annotate",
+        help="run typed annotator modules and read their answers (never scheduling input)",
+    )
+    annotate_commands = annotate.add_subparsers(dest="annotate_command", required=True)
+    annotate_item = annotate_commands.add_parser(
+        "item", help="annotate one learning item with a local or approved remote module"
+    )
+    annotate_item.add_argument("--item", required=True)
+    annotate_item.add_argument("--module", required=True, help="annotator module id")
+    annotate_item.add_argument(
+        "--question-set",
+        default="item_quality_v1",
+        help="bundled question set id (see `annotate questions`)",
+    )
+    annotate_item.add_argument("--json", action="store_true")
+    annotate_list = annotate_commands.add_parser(
+        "list", help="list recorded annotations, newest last, with stale flags"
+    )
+    annotate_list.add_argument("--item")
+    annotate_list.add_argument("--json", action="store_true")
+    annotate_questions = annotate_commands.add_parser(
+        "questions", help="show the bundled question sets and their hashes"
+    )
+    annotate_questions.add_argument("--json", action="store_true")
+    annotate_allow_remote = annotate_commands.add_parser(
+        "allow-remote",
+        help="record consent for annotator modules that send the subject off this machine",
+    )
+    annotate_allow_remote.add_argument(
+        "--yes", action="store_true", help="confirm consent without a prompt"
+    )
+    annotate_allow_remote.add_argument(
+        "--revoke", action="store_true", help="withdraw consent for remote annotators"
+    )
+    annotate_allow_remote.add_argument("--json", action="store_true")
     return parser
 
 
@@ -887,6 +924,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "doctor":
             _emit(workspace.doctor(), as_json=args.json)
             return 0
+        if args.command == "annotate":
+            from .annotations import AnnotationService, list_question_sets
+
+            service = AnnotationService(workspace)
+            if args.annotate_command == "item":
+                _emit(
+                    service.annotate_item(
+                        item_id=args.item,
+                        module_id=args.module,
+                        question_set_id=args.question_set,
+                        surface="cli",
+                    ),
+                    as_json=args.json,
+                )
+                return 0
+            if args.annotate_command == "list":
+                _emit(service.list(item_id=args.item), as_json=args.json)
+                return 0
+            if args.annotate_command == "questions":
+                _emit(
+                    {
+                        "schema": "virtuoso/annotation-question-sets@0.1",
+                        "question_sets": list_question_sets(),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.annotate_command == "allow-remote":
+                if args.revoke:
+                    _emit(workspace.configure_annotator(allow_remote=False), as_json=args.json)
+                    return 0
+                if not args.yes:
+                    print(
+                        "Remote annotators send the item title, focus, prompt, answer, hint "
+                        "and follow-up to a service you configure. Nothing else leaves the "
+                        "machine. Re-run with --yes to record consent for this workspace.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                _emit(workspace.configure_annotator(allow_remote=True), as_json=args.json)
+                return 0
         if args.command == "scheduler":
             if args.scheduler_command == "show":
                 settings = workspace.scheduler_settings()
