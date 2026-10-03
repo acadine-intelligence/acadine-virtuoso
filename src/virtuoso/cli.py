@@ -885,6 +885,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 workspace.db_path, args.item
                             )
                         ],
+                        "annotations": workspace.list_annotations(
+                            subject_kind="item", subject_id=args.item
+                        ),
                     },
                     as_json=args.json,
                 )

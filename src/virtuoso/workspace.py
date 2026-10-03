@@ -5500,6 +5500,17 @@ class WorkspaceService:
             "stale_source_links": stale_source_links,
             "legacy_files": legacy_files,
             "workload": workload,
+            "annotations": self._annotation_report(),
+        }
+
+    def _annotation_report(self) -> dict[str, Any]:
+        """Counts for doctor. Stale annotations are information, never a fault."""
+        annotations = self.list_annotations()
+        stale = sorted({a["subject_id"] for a in annotations if a["stale"]})
+        return {
+            "total": len(annotations),
+            "stale": sum(1 for a in annotations if a["stale"]),
+            "stale_items": stale,
         }
 
     @staticmethod

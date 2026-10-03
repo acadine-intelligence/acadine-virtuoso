@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -299,6 +301,49 @@ class AnnotationContractTests(unittest.TestCase):
         self.assertEqual(listed["annotations"][0]["subject_hash"], current)
         with self.assertRaisesRegex(AnnotationError, "stale"):
             service.annotate_item(item_id="testing-effect", module_id="recorder")
+
+    def test_doctor_and_history_report_annotations_without_changing_health(self) -> None:
+        self._install()
+        service = AnnotationService(self.workspace)
+        service.annotate_item(item_id="testing-effect", module_id="recorder")
+        report = self.workspace.doctor()
+        self.assertEqual(report["status"], "healthy")
+        self.assertEqual(
+            report["annotations"], {"total": 1, "stale": 0, "stale_items": []}
+        )
+        with self._db() as db:
+            db.execute(
+                "UPDATE items SET content_hash = ? WHERE item_id = 'testing-effect'",
+                ("0" * 64,),
+            )
+        report = self.workspace.doctor()
+        self.assertEqual(
+            report["annotations"],
+            {"total": 1, "stale": 1, "stale_items": ["testing-effect"]},
+        )
+        # The item index was edited under the test, so doctor may flag the item
+        # itself. The annotation report alone must never flip health: the
+        # status must equal the status with the report stubbed out.
+        with mock.patch.object(
+            type(self.workspace),
+            "_annotation_report",
+            return_value={"total": 0, "stale": 0, "stale_items": []},
+        ):
+            baseline = self.workspace.doctor()["status"]
+        self.assertEqual(report["status"], baseline)
+        history = subprocess.run(
+            [
+                sys.executable, "-m", "virtuoso.cli", "--workspace", str(self.root),
+                "queries", "history", "--item", "testing-effect", "--json",
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(history.returncode, 0, history.stderr)
+        payload = json.loads(history.stdout)
+        self.assertEqual(payload["attempts"], [])
+        self.assertEqual(len(payload["annotations"]), 1)
+        self.assertTrue(payload["annotations"][0]["stale"])
+        self.assertFalse(payload["annotations"][0]["claims_mastery"])
 
     def test_list_flags_stale_when_index_hash_moves(self) -> None:
         self._install()
