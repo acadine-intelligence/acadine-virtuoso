@@ -337,8 +337,11 @@ class ModuleManifest:
         if trust != "local-executable":
             raise ModuleError("module trust must be 'local-executable'")
         network = value.get("network", "none")
-        if network not in _ALLOWED_NETWORK:
+        if not isinstance(network, str) or network not in _ALLOWED_NETWORK:
             raise ModuleError("module network must be 'none' or 'remote'")
+        if network == "remote" and category != "annotator":
+            # Only annotators have a consent gate; no other category may go remote.
+            raise ModuleError("only annotator modules may declare network: remote")
         if category == "annotator" and not has_network:
             raise ModuleError("annotator modules must declare network: none or remote")
 

@@ -960,9 +960,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 0
                 if not args.yes:
                     print(
-                        "Remote annotators send the item title, focus, prompt, answer, hint "
-                        "and follow-up to a service you configure. Nothing else leaves the "
-                        "machine. Re-run with --yes to record consent for this workspace.",
+                        "Remote annotators receive the item title, focus, prompt, answer, "
+                        "hint, follow-up, learning context and entry mode, and may send them "
+                        "to a service the module names. Virtuoso passes nothing else, but a "
+                        "module is a trusted local program and can read anything you can. "
+                        "Install only modules you trust. Re-run with --yes to record consent "
+                        "for this workspace.",
                         file=sys.stderr,
                     )
                     return 2

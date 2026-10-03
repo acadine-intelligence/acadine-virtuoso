@@ -20,6 +20,7 @@ from virtuoso.annotations import (
 from virtuoso.composition import SessionComposer
 from virtuoso.modules import ModuleError, ModuleManifest
 from virtuoso.practice import PracticeService
+from virtuoso.review import ReviewService
 from virtuoso.workspace import WorkspaceError, WorkspaceService
 
 # A minimal annotator that records what it received and answers every question.
@@ -206,6 +207,20 @@ class AnnotationContractTests(unittest.TestCase):
                 item_id="testing-effect", module_id="recorder"
             )
 
+    def test_non_annotator_modules_may_not_declare_remote(self) -> None:
+        manifest_path = self._install(
+            category="scheduler", reads=["scheduler.request"], returns="scheduler-proposal",
+            network="remote",
+        )
+        with self.assertRaisesRegex(ModuleError, "only annotator"):
+            ModuleManifest.load(manifest_path)
+
+    def test_non_string_network_is_a_module_error(self) -> None:
+        for index, bad in enumerate((["remote"], {"remote": True})):
+            manifest_path = self._install(module_id=f"bad-network-{index}", network=bad)
+            with self.assertRaisesRegex(ModuleError, "network must be"):
+                ModuleManifest.load(manifest_path)
+
     def test_scheduler_manifests_keep_loading_without_network(self) -> None:
         manifest_path = self._install(
             category="scheduler", reads=["scheduler.request"], returns="scheduler-proposal",
@@ -362,15 +377,28 @@ class AnnotationContractTests(unittest.TestCase):
     def test_selection_and_scheduling_ignore_annotations(self) -> None:
         self._install()
         now = datetime.now(timezone.utc)
-        before = self.workspace.select_next(now)
+
+        def snapshot() -> tuple[str, str]:
+            selected = self.workspace.select_next(now)
+            return (
+                json.dumps(
+                    [selected.item.item_id, selected.rationale], default=str
+                ),
+                json.dumps(
+                    [
+                        SessionComposer(self.workspace).compose(now=now),
+                        ReviewService(self.workspace).due(now),
+                    ],
+                    default=str,
+                    sort_keys=True,
+                ),
+            )
+
+        before = snapshot()
         AnnotationService(self.workspace).annotate_item(
             item_id="testing-effect", module_id="recorder"
         )
-        after = self.workspace.select_next(now)
-        self.assertEqual(before.item.item_id, after.item.item_id)
-        self.assertEqual(before.rationale, after.rationale)
-        session = SessionComposer(self.workspace).compose(now=now)
-        self.assertNotIn("annotation", json.dumps(session, default=str).lower())
+        self.assertEqual(snapshot(), before)
         outcome = PracticeService(self.workspace).run_administered(
             item_id="testing-effect",
             response="retrieval strengthens access",
@@ -380,22 +408,43 @@ class AnnotationContractTests(unittest.TestCase):
         self.assertNotIn("annotation", json.dumps(outcome, default=str).lower())
 
     def test_no_read_of_annotations_outside_the_annotation_paths(self) -> None:
+        import ast
+        import re
+
         src = Path(__file__).resolve().parents[1] / "src" / "virtuoso"
-        offenders = []
+        table_read = re.compile(r"\b(from|join)\s+annotations\b", re.IGNORECASE)
+        sql_readers: list[str] = []
+        callers: list[str] = []
         for path in sorted(src.glob("*.py")):
-            if path.name in {"annotations.py", "workspace.py", "cli.py"}:
-                continue
-            text = path.read_text()
-            if "FROM annotations" in text or "list_annotations" in text:
-                offenders.append(path.name)
-        self.assertEqual(offenders, [], "only the annotation paths may touch the table")
-        workspace_text = (src / "workspace.py").read_text()
-        reads = [
-            line.strip()
-            for line in workspace_text.splitlines()
-            if "FROM annotations" in line
-        ]
-        self.assertEqual(len(reads), 1, "one read path: list_annotations")
+            tree = ast.parse(path.read_text())
+            stack: list[str] = []
+
+            def visit(node: ast.AST) -> None:
+                named = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                if named:
+                    stack.append(node.name)
+                where = f"{path.name}:{stack[-1] if stack else '<module>'}"
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if table_read.search(node.value):
+                        sql_readers.append(where)
+                if isinstance(node, ast.Attribute) and node.attr == "list_annotations":
+                    callers.append(where)
+                for child in ast.iter_child_nodes(node):
+                    visit(child)
+                if named:
+                    stack.pop()
+
+            visit(tree)
+        self.assertEqual(
+            sorted(set(sql_readers)),
+            ["workspace.py:list_annotations"],
+            "only list_annotations may query the annotations table",
+        )
+        self.assertEqual(
+            sorted(set(callers)),
+            ["annotations.py:list", "cli.py:main", "workspace.py:_annotation_report"],
+            "a new list_annotations caller needs review: annotations must not reach scheduling",
+        )
 
     # --- schema ---
 
