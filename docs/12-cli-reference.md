@@ -84,6 +84,28 @@ Changing only the minimum preserves existing memory state; the next recorded att
 
 The minimum is a scheduling preference around FSRS. Delaying a review beyond its recommended time may reduce actual retention. SM-2 does not accept this setting. No database migration or retrospective rescheduling runs.
 
+### `annotate`
+
+Run a typed annotator module against one learning item and read what it answered. Annotations are evidence beside the item, never input to selection, composition, or any scheduler.
+
+```
+virtuoso --workspace PATH annotate item --item ITEM --module MODULE_ID [--question-set ID] [--json]
+virtuoso --workspace PATH annotate list [--item ITEM] [--json]
+virtuoso --workspace PATH annotate questions [--json]
+virtuoso --workspace PATH annotate allow-remote --yes [--json]
+virtuoso --workspace PATH annotate allow-remote --revoke [--json]
+```
+
+An annotator is a module with category `annotator` whose manifest reads exactly `annotation.request`, returns `annotation-answers`, and declares `network` as `none` or `remote`. The manifest lives at `workspace/modules/<module-id>/virtuoso.module.json` with the same private modes as scheduler modules. The module receives the item title, focus, prompt, answer, hint, follow-up, learning context, and entry mode plus the question set. It never receives attempts, schedules, or paths.
+
+Bundled question set `item_quality_v1` asks four questions about one item: `atomic` (`noul`, probability the prompt tests one idea), `answer_supports_prompt` (`noul`), `difficulty` (`choice`: `easy`, `moderate`, `hard`), and `hint_leaks_answer` (`noul`). Every answer carries `primitive`, `value`, and `confidence` from 0 to 1. Answers that miss a question, add one, use the wrong primitive, or choose an option outside the list fail with exit 2 and write nothing.
+
+`annotate item` output schema `virtuoso/annotation@0.1`: `annotation_id`, `subject_kind`, `subject_id`, `subject_hash`, `question_set_id`, `question_set_hash`, `module_id`, `module_version`, `module_network`, `module_receipt_id`, `answers`, `occurred_at`, `surface`, `stale`, and `claims_mastery: false`. The annotation and its module receipt land in one transaction (migration 17, `annotations`). Rows reject update and deletion. Staleness compares against the indexed item hash: once `sync` reindexes an item whose Markdown changed after the run, `annotate list`, `queries history --item` and `doctor` report the annotation `stale: true`. An edit that has not been synced is not yet stale; `annotate item` on an unsynced item exits 2. `doctor` reports an `annotations` object with `total`, `stale`, and `stale_items`; stale annotations are information and never change the health status.
+
+`allow-remote` records per-workspace consent for modules that declare `network: remote`. Without it such a module exits 2 before it runs. Without `--yes` the command prints what a remote module receives and exits 2. `--revoke` withdraws consent. Consent is stored in `virtuoso.json` under `annotator.allow_remote`.
+
+`examples/modules/rule-annotator/` is a dependency-free local annotator that demonstrates the contract.
+
 ## Items
 
 ### `add`
@@ -333,7 +355,7 @@ Output schema: `virtuoso/focus-performance@0.1`. The top-level `focuses` array c
 virtuoso --workspace PATH queries history --item ITEM [--json]
 ```
 
-Output schema: `virtuoso/item-history@0.1`. The response contains `item_id` and `attempts`. Each attempt contains `event_id`, `item_id`, `occurred_at`, `result`, `confidence`, `agent_help`, `administered`, and `latency_ms`. An administered attempt has `latency_ms: null`.
+Output schema: `virtuoso/item-history@0.1`. The response contains `item_id`, `attempts`, and `annotations`. Each attempt contains `event_id`, `item_id`, `occurred_at`, `result`, `confidence`, `agent_help`, `administered`, and `latency_ms`. An administered attempt has `latency_ms: null`. `annotations` lists the item's recorded annotator answers in occurrence order with a `stale` flag (see `annotate`); it is empty when no annotator has run.
 
 ### `queries workload`
 

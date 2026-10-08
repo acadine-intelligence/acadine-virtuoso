@@ -125,6 +125,35 @@ class PublicRepositoryContractTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, review_help.stdout)
 
+    def test_annotation_contract_is_documented_and_exposed(self) -> None:
+        annotate_help = subprocess.run(
+            [sys.executable, "-m", "virtuoso.cli", "--workspace", "unused", "annotate", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(annotate_help.returncode, 0, annotate_help.stderr)
+        for command in ("item", "list", "questions", "allow-remote"):
+            with self.subTest(command=command):
+                self.assertIn(command, annotate_help.stdout)
+        cli_reference = (ROOT / "docs" / "12-cli-reference.md").read_text(encoding="utf-8")
+        architecture = (ROOT / "docs" / "04-architecture.md").read_text(encoding="utf-8")
+        notes = (ROOT / "docs" / "15-release-notes.md").read_text(encoding="utf-8")
+        for text, needle in (
+            (cli_reference, "### `annotate`"),
+            (cli_reference, "annotate allow-remote --yes"),
+            (cli_reference, "never input to selection, composition, or any scheduler"),
+            (architecture, "Migration 17"),
+            (architecture, "annotator"),
+            (notes, "## Unreleased calibrated decision annotations"),
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        example = ROOT / "examples" / "modules" / "rule-annotator" / "virtuoso.module.json"
+        manifest = json.loads(example.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["category"], "annotator")
+        self.assertEqual(manifest["network"], "none")
+
     def test_cli_reference_covers_current_query_search_and_review_contracts(
         self,
     ) -> None:

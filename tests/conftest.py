@@ -81,8 +81,18 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_annotations_to_v16(db: sqlite3.Connection) -> None:
+    """Remove migration 17 annotation state from a fresh test database."""
+    db.execute("DROP TRIGGER IF EXISTS annotations_reject_update")
+    db.execute("DROP TRIGGER IF EXISTS annotations_reject_delete")
+    db.execute("DROP INDEX IF EXISTS annotations_by_subject")
+    db.execute("DROP TABLE IF EXISTS annotations")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 17")
+
+
 def downgrade_scheduler_switches_to_v15(db: sqlite3.Connection) -> None:
     """Remove migration 16 scheduler-switch state from a fresh test database."""
+    downgrade_annotations_to_v16(db)
     db.execute("DROP TRIGGER IF EXISTS scheduler_switches_reject_update")
     db.execute("DROP TRIGGER IF EXISTS scheduler_switches_reject_delete")
     db.execute("DROP TABLE IF EXISTS scheduler_switches")
