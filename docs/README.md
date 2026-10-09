@@ -24,6 +24,7 @@ Use the current guides for the behavior on `main`, which is ahead of the publish
 - [API consideration](14-api-consideration.md)
 - [Scheduler portfolio design](18-scheduler-portfolio-design.md): proposal for selectable and user-supplied scheduling algorithms (issue #47)
 - [Prerequisite navigation and diagnostics design](19-prerequisite-navigation-and-diagnostics-design.md): proposal for one-edge prerequisite moves and activity-driven diagnostic placement (issues #58 and #59)
+- [Server and MCP design](22-server-and-mcp-design.md): proposal for one open-source server, self-hosted or hosted, over MCP and HTTP
 
 These records include target designs and deferred work. They do not expand the interfaces documented in `12-cli-reference.md`.
 
