@@ -2,6 +2,8 @@
 
 This note considers an API beyond the CLI. It records a decision without making a commitment. Status: thinking, 2026-08-20; no API is built and none is owed by the current delivery contract.
 
+Update, 2026-10-09: remote chat, voice, and off-machine agent clients met the trigger below. `22-server-and-mcp-design.md` replaces the recommendation in this note.
+
 ## Surfaces that already exist
 
 1. **The CLI with `--json`**: stable JSON output, documented exit codes, plain-language stderr errors. This is the current integration contract (see `docs/12-cli-reference.md` and `docs/13-agent-usage.md`).
