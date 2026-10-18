@@ -17,7 +17,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `LearningError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. |
+| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `LearningError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. `serve` returns 2 when the server extra is missing or HTTP has no valid token. |
 
 Commands either complete and return 0 or return 2 without a partial state change.
 
@@ -461,6 +461,83 @@ views:
 ```
 
 The projection is a view, not a store. The workspace SQLite remains the only scheduler and evidence writer. Re-run the export after practice sessions, or on a schedule.
+
+## Server (optional)
+
+`serve` exposes a fixed set of learning operations over the Model Context Protocol (MCP) and plain HTTP JSON, for clients that cannot run the CLI themselves: a chat or voice assistant, or an agent on another machine. The design record is `22-server-and-mcp-design.md`. The server calls the same Python services as the CLI in the same process; it never spawns the CLI and never passes `allow_trusted`.
+
+### `serve`
+
+```
+virtuoso --workspace PATH serve --transport stdio
+virtuoso --workspace PATH serve --transport http [--host 127.0.0.1] [--port 8765] \
+  [--token-file FILE] [--allowed-host NAME]... [--allowed-origin ORIGIN]...
+```
+
+`serve` needs the optional server extra, which adds the official MCP Python SDK (`mcp==2.3.0`) and an ASGI server (`uvicorn==0.41.0`). Install it with `pip install "acadine-virtuoso[server]"`, or from a checkout with `uv tool install --python 3.11 ".[server]"`. Without the extra, `serve` exits 2 and names that install command. The base install keeps its two dependencies.
+
+- `--transport stdio` speaks MCP on stdin and stdout. A local MCP client starts the process; the process boundary is the authentication, so no token is used. Recorded evidence uses `surface: mcp`.
+- `--transport http` serves MCP streamable HTTP at `/mcp` (`surface: mcp`) and the JSON binding at `POST /v1/ops/<name>` (`surface: http`). It binds `127.0.0.1:8765` by default.
+
+HTTP needs a bearer token on every bind, loopback included, because any browser tab can reach a loopback port through DNS rebinding or a cross-origin request. The token comes from `--token-file` (a regular file readable by its owner only) or, without that flag, from `VIRTUOSO_SERVER_TOKEN`. It must be 32 to 512 printable characters with no spaces. Without a token, `serve --transport http` refuses to start and exits 2. The token is compared in constant time and is never logged or echoed. Access logs are off.
+
+Every HTTP request passes these checks before any operation runs, and a refused request writes nothing:
+
+| Check | Refusal |
+|---|---|
+| A CORS preflight (`OPTIONS`) | 403. The server sends no CORS headers. |
+| `Host` is not the bind address with its port, `localhost` with the port for a loopback bind, or an `--allowed-host` name | 403 |
+| `Origin` is present and not an `--allowed-origin` value. A request without `Origin`, as non-browser MCP clients send, is allowed | 403 |
+| Missing or wrong `Authorization: Bearer <token>` | 401 with `WWW-Authenticate: Bearer` |
+| Body larger than 64 KiB | 413 |
+
+#### Operations
+
+One operation registry defines each operation's name, kind, input schema and output schema. The MCP tool list and the `/v1/ops/<name>` routes are both generated from it, and both bindings validate every request and response against it. `tools/list` publishes the same input and output schemas, with `readOnlyHint` set for reads. Every input object rejects unknown fields. No operation accepts a workspace path, a module id, `allow_trusted` or a time; item ids are slugs, and the server clock writes every time.
+
+| Operation | Kind | Input | Output schema |
+|---|---|---|---|
+| `next_action` | read | optional `focus` | `virtuoso/server-next-action@0.1`: `action` (`learn`, `practice` or `none` when nothing is due), `item_id`, `title`, `focus`, hashes, `rationale`, `alternatives`, `uncertainty`. Never the prompt or answer. |
+| `study_load` | read | `item_id` | `virtuoso/study-item@0.1`: the learning unit, with no prompt or answer. |
+| `study_record` | write | `item_id`, `item_content_hash`, `learning_unit_hash`, `completed: true` | `virtuoso/study-result@0.1`. A retry for the same hashes returns the stored completion. |
+| `recall_start` | write | `item_id`, optional `client` (1 to 128 characters) | `virtuoso/recall-attempt@0.1`: `attempt_token`, the prompt, `hint_available`, `created_at`, `expires_at`. Never the answer or the hint text. |
+| `recall_hint` | write | `attempt_token` | `virtuoso/recall-hint@0.1`: the hint and `hint_shown_at`. Allowed once, before the response; a repeat returns the same hint. |
+| `recall_respond` | write | `attempt_token`, `response` (up to 16,000 characters, may be blank) | `virtuoso/recall-response@0.1`. A retry with the same text returns the stored response; different text fails with `already-responded`. |
+| `recall_reveal` | read | `attempt_token` | `virtuoso/recall-reveal@0.1`: the reference answer, only after `recall_respond`. Before that it fails with `response-required`. |
+| `recall_record` | write | `attempt_token`, `submission_id`, `result`, `confidence`, `agent_help`, `graded_by` | `virtuoso/recall-record@0.1`: `replayed`, the stored attempt and the scheduler proposal or `null`. |
+| `recall_skip` | write | `attempt_token`, `submission_id` | `virtuoso/recall-skip@0.1`: the skip event. The due date stays unchanged and the attempt closes. |
+| `workload` | read | none | `virtuoso/workload-by-focus@0.1`, as `queries workload`. |
+| `history` | read | `item_id` | `virtuoso/item-history@0.2`, as `queries history`. It never contains a prompt, an answer or a response. |
+
+Recall rules:
+
+- An attempt token is 32 lowercase hex characters, valid for 60 minutes from `recall_start`, and only on the binding that started it (`surface-mismatch` otherwise). Expiry compares times the server wrote: `created_at`, `expires_at` and the server clock. No client time takes part, and the database also rejects a response, hint or recording after `expires_at`.
+- The server refuses a hint, response, record or skip when its clock reads earlier than a time already stored for the attempt (`clock-order`). A record always follows its response.
+- `graded_by` and `agent_help` are required and have no default. `learner` means the learner chose the grade, even when an agent relayed it; the attempt, proposal and scheduler state are written in one transaction, as with `practice --administer`. `agent` stores the attempt as evidence only: no proposal, no scheduler state change, no change to `next`, `workload` or the due date.
+- `submission_id` is 32 lowercase hex characters chosen once per write. The attempt event id is `attempt-<submission_id>` and the skip event id is `skip-<submission_id>`. Replaying the same `submission_id` and values returns the original record with `replayed: true` and writes nothing. The same id with different values fails with `submission-conflict`.
+- A blank response cannot be recorded as `demonstrated` (`blank-demonstrated`).
+- Every stored attempt records `administered: true`, unknown latency (`null`), the reported `agent_help`, `graded_by`, the `surface` and the `client` name from `recall_start` (`null` when none was given). A hint shown through `recall_hint` is stored as `hint` support.
+- A workspace configured with an external scheduler refuses `recall_start` and `recall_record` with `cli-required`, naming the CLI path `practice --item ITEM --allow-trusted-scheduler`.
+
+#### Limits and errors
+
+`/v1/ops/<name>` accepts `POST` with `Content-Type: application/json` only; another method gets 405 and another content type 415, both with the `invalid-request` envelope. Request bodies and arguments are limited to 64 KiB, each operation to 30 seconds, and each response to one megabyte. Errors use the `virtuoso/review-error@0.1` envelope: `{"schema", "error": {"code", "message", "recovery"}}`. MCP returns the envelope as a tool result with `isError: true`. HTTP returns it with the status below. Each operation runs in one transaction, so a failure leaves no partial write. A timed-out write may still complete; retry it with the same `submission_id`.
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `invalid-request` | 400 | The arguments do not match the operation's input schema, or the body is not a JSON object. |
+| `unknown-operation`, `item-not-found`, `attempt-not-found` | 404 | No such operation, item or attempt token. |
+| `attempt-expired` | 410 | The attempt passed `expires_at`. Start a new attempt. |
+| `request-too-large` | 413 | The request is over 64 KiB. |
+| `blank-demonstrated` | 422 | A blank response was graded `demonstrated`. |
+| `learning-required`, `study-not-required`, `stale-content`, `surface-mismatch`, `attempt-closed`, `response-required`, `already-responded`, `hint-unavailable`, `no-hint`, `already-recorded`, `submission-conflict`, `cli-required`, `scheduler-changed`, `clock-order` | 409 | The request conflicts with the stored state. `recovery` names the next step. |
+| `unauthorized` | 401 | Missing or wrong bearer token. |
+| `forbidden` | 403 | Foreign `Host` or `Origin`, or a CORS preflight. |
+| `workspace-error`, `response-too-large`, `internal-error` | 500 | Server fault. Nothing was recorded. |
+| `workspace-busy` | 503 | Another writer holds the workspace. Retry the same request. |
+| `operation-timeout` | 504 | The operation took longer than 30 seconds. |
+
+Not exposed on any transport: `init`, `retire`, sources and scans, candidate decisions, scheduler configuration and switches, trusted modules and external schedulers, annotators, and exports. Whatever an operation returns (prompts, responses, answers) reaches the client's model provider under the learner's own account with that provider; the server sends nothing to a model itself.
 
 ## Retrieval
 

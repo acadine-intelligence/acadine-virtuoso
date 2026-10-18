@@ -1,6 +1,6 @@
 # Server and MCP design
 
-Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). Migration 19 also carries the attempt `client` column and the pending-attempt hint, recording time and expiry rules, so the server needs no further migration for phase 1. The server itself is not built yet. Beyond those core changes, this record does not expand the interfaces in `12-cli-reference.md`.
+Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). Migration 19 also carries the attempt `client` column and the pending-attempt hint, recording time and expiry rules, so the server needs no further migration for phase 1. Phase 1 server core is built: `virtuoso serve` over stdio and token-authenticated HTTP, the operation registry, both bindings, the split recall contract with `recall_hint`, and the limits and error envelope. `12-cli-reference.md` documents the shipped command and operations. `export workspace` is not built yet and follows in its own change. Phases 2 to 4 are not started.
 
 ## Decision
 
@@ -67,6 +67,7 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 | `study_load` | read | The learning unit for a learn-first item, without prompt or answer. |
 | `study_record` | write | Records study completion only after the learner says they finished. A repeat for the same item and learning-unit hashes returns the stored completion instead of the core's "already completed" error, so a client retry is safe. |
 | `recall_start` | write | Opens a recall attempt. Returns the prompt, hint availability, and an attempt token. Never the answer. |
+| `recall_hint` | write | Returns the hint once, before the response, and sets `hint_shown_at`. |
 | `recall_respond` | write | Stores the learner's transcribed response against the attempt token. Required before reveal. |
 | `recall_reveal` | read | Returns the reference answer, and only after `recall_respond` for the same token. |
 | `recall_record` | write | Records result, confidence, `agent_help`, and who graded. A learner-graded result writes the attempt, scheduler proposal, and state in one transaction. An agent-graded result writes the attempt only. Idempotent on `submission_id`. |
@@ -78,7 +79,9 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 
 The current review contract returns the answer in the item snapshot and trusts the interface to hide it. A chat model is not a trustworthy interface for that rule: once the answer is in its context, it can leak it. So the server splits recall into `recall_start`, `recall_respond`, `recall_reveal`, and `recall_record`. The server holds the open attempt and refuses to reveal the answer before a response exists. A blank response cannot be graded `demonstrated`, matching the CLI.
 
-The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new. A restarted server can still finish or expire it. The row also stores the surface, the client name, when a hint was shown (`hint_shown_at`) and when the attempt was recorded (`recorded_at`), so `hint_used` survives a restart. The database enforces the expiry: a response, a hint or a recording time after `expires_at` is rejected, so an expired attempt records nothing even if the server misses the expiry. The recorded attempt must match the row's item version, response, surface and client.
+`recall_hint` sits between `recall_start` and `recall_respond`. It is allowed once, while the attempt is open and before a response exists, so a hint always precedes the reveal, and it sets the row's `hint_shown_at`. The stored attempt then carries `hint` support. A hint after the response is refused: the split contract stores one response per attempt, so a hint could no longer change it.
+
+The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new. A restarted server can still finish or expire it. The row also stores the surface, the client name, when a hint was shown (`hint_shown_at`) and when the attempt was recorded (`recorded_at`), so `hint_used` survives a restart. The database enforces the expiry: a response, a hint or a recording time after `expires_at` is rejected, so an expired attempt records nothing even if the server misses the expiry. Expiry compares only times the server wrote: `created_at`, `expires_at`, and the server clock for `responded_at`, `hint_shown_at` and `recorded_at`. No operation accepts a time from a caller. The server also refuses a hint, response, record or skip when its clock reads earlier than a time already stored for the attempt, which the database cannot check, so a recording always follows its response. The recorded attempt must match the row's item version, response, surface and client.
 
 ### Evidence honesty
 
@@ -179,7 +182,7 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 ## Open questions
 
 - Whether a target chat assistant's voice mode calls MCP tools. Phase 3 answers this with a developer-mode test before any client package work.
-- How the hint is released. A hint comes after `recall_start` and before `recall_reveal`, and the current contract records `hint_used`, so the split contract probably needs a `recall_hint` operation between them. The storage is settled: the pending row's `hint_shown_at` is set once, while the row is open or responded and before it expires.
+- Resolved in phase 1: the hint is released by `recall_hint`, between `recall_start` and `recall_respond` (see "The answer stays hidden"). The database still accepts `hint_shown_at` on a responded row; the server does not use that path.
 
 ## Relationship to earlier decisions
 
