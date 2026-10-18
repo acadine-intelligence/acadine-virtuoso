@@ -61,6 +61,8 @@ def _fill(token: str, choices: set[str] | None) -> str:
 def _taught_commands(text: str) -> list[list[str]]:
     taught = []
     for span in re.findall(r"`([^`\n]+)`", text):
+        if not re.match(r"[a-z][a-z-]* ", span):
+            continue
         tokens = shlex.split(re.sub(r"[\[\]]", "", span))
         # Any span that opens with a bare word and carries a flag is a command.
         # An unknown subcommand then fails to parse instead of being skipped.
