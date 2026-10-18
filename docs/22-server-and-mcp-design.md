@@ -9,7 +9,7 @@ Virtuoso gets one open-source server, `virtuoso serve`. It exposes a fixed set o
 - **Self-hosted.** A learner runs the server against their own workspace, on their own machine or host.
 - **Hosted.** An operator runs the same server for many learners. Each learner gets an isolated workspace. The operator supplies sign-in and account management in front of the server.
 
-The server is MIT-licensed like the rest of the repository. The CLI stays the reference behavior. The standalone CLI path and its runtime dependencies do not change. CLI JSON contracts change only where the core changes listed under "Core changes" add fields, and each such schema gets a version bump.
+The server is MIT-licensed like the rest of the repository. The CLI stays the reference behavior. The standalone CLI path and its runtime dependencies do not change. CLI JSON contracts change only where the core changes listed under "Core changes" add fields. Each changed output that carries a schema id gets a version bump.
 
 ## Why now
 
@@ -72,7 +72,7 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 | `recall_record` | write | Records result, confidence, `agent_help`, and who graded. A learner-graded result writes the attempt, scheduler proposal, and state in one transaction. An agent-graded result writes the attempt only. Idempotent on `submission_id`. |
 | `recall_skip` | write | Appends a skip event. The due date stays unchanged. |
 | `workload` | read | Due counts per focus, the same projection as `queries workload`. |
-| `history` | read | Evidence for one item, the same projection as `queries history` (`virtuoso/item-history@0.1`). That projection carries result, confidence, `agent_help`, timing and annotations. It never carries the prompt, the reference answer or a stored response, so it cannot leak the answer for a due item. A test pins this. |
+| `history` | read | Evidence for one item, the same projection as `queries history` (`virtuoso/item-history@0.2` after the core changes below). That projection carries result, confidence, `agent_help`, timing and annotations. It never carries the prompt, the reference answer or a stored response, so it cannot leak the answer for a due item. A test pins this. |
 
 ### The answer stays hidden
 
@@ -92,14 +92,14 @@ The open attempt lives in the workspace database as a pending row with an expiry
 
 ### Core changes
 
-Phase 1 changes the core in these places, and nowhere else:
+Phase 1 changes the core in at least these places. The phase 1 implementation PR fixes the exact seams and lists any further change in its description:
 
 - One migration adds the pending-attempt table and two attempt columns: `graded_by` and `surface`. Attempts have no `surface` column today; skips, study events, annotations and composition decisions do.
-- `ReviewService` gains a path that records an agent-graded attempt without a scheduler proposal or state change.
+- The attempt write path gains a mode that records an agent-graded attempt without a scheduler proposal or state change. Today `WorkspaceService.record_attempt` requires both, and `ReviewService.record` and `practice --administer` reach it through `PracticeService`, so the change spans `PracticeService` and `WorkspaceService.record_attempt`. If `recall_record` reuses the review request contract, that contract gains `graded_by` and a new schema version.
 - Composition ignores agent-graded attempts when it chooses the next target.
 - `practice --administer` gains `--graded-by learner|agent`, default `learner`.
-- The study surface allow list (`hermes-desktop`, `obsidian-plugin`, `cli`) adds `mcp` and `http`.
-- Attempt listings and exports gain the new columns. `queries history` adds `graded_by` to each attempt, which bumps the schema to `virtuoso/item-history@0.2`. `queries workload` counts due items from scheduler state, so agent-graded attempts never change it. `queries focus` reports agent-graded attempts in their own count.
+- The study surface allow list (`hermes-desktop`, `obsidian-plugin`, `cli`) and the skip surface allow list (`obsidian-plugin`, `hermes-desktop`) add `mcp` and `http`.
+- `attempts --json` (which has no schema id) and the new `export workspace` carry the new columns. `queries history` adds `graded_by` to each attempt, which bumps the schema to `virtuoso/item-history@0.2`. `queries workload` counts due items from scheduler state, so agent-graded attempts never change it. `queries focus` keeps its outcome counts and mean confidence over learner-graded attempts only and adds an `agent_graded` count, which bumps the schema to `virtuoso/focus-performance@0.2`.
 
 ### Not exposed
 
@@ -169,6 +169,8 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 - An agent-graded `recall_record` stores the attempt and leaves the scheduler state and due date unchanged.
 - `practice --administer --graded-by agent` does the same on the CLI. Without the flag, the attempt records `graded_by: learner` and feeds the scheduler as today.
 - `next` and `compose` return the same output before and after an agent-graded attempt is recorded.
+- `queries history` returns `virtuoso/item-history@0.2` with `graded_by` on each attempt. `queries focus` returns `virtuoso/focus-performance@0.2`, whose outcome counts exclude agent-graded attempts and whose `agent_graded` count includes them.
+- Study and skip writes from the `mcp` and `http` surfaces are accepted, and an unknown surface is still rejected.
 - `history` output for a due item contains no prompt, reference answer or response text.
 - No operation accepts a path, a module id, or `allow_trusted`.
 - Every write's stored evidence shows `surface`, unknown latency, the reported `agent_help`, and `graded_by`.
