@@ -11,17 +11,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from . import credentials as credential_resolution
+from .credentials import CredentialError, HostReader, ResolvedCredential
 from .errors import VirtuosoError
-from .modules import ModuleError, ModuleRunner
+from .modules import ModuleError, ModuleManifest, ModuleRunner
 from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
 QUESTION_SET_SCHEMA = "virtuoso/annotation-question-set@0.1"
 ANNOTATION_SCHEMA = "virtuoso/annotation@0.1"
 ANNOTATION_LIST_SCHEMA = "virtuoso/annotation-list@0.1"
+ANNOTATOR_DOCTOR_SCHEMA = "virtuoso/annotator-doctor@0.1"
 
 # The bundled question set. The hash of its canonical JSON travels with every
 # annotation, so a later wording change never masquerades as the same question.
@@ -150,8 +155,16 @@ class AnnotationService:
         module_id: str,
         question_set_id: str = ITEM_QUALITY_QUESTION_SET["id"],
         surface: str = "cli",
+        host_credential: HostReader | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Run one annotator on one item and record the answers as evidence."""
+        """Run one annotator on one item and record the answers as evidence.
+
+        ``host_credential`` is a reader a host offers for this run only. It is
+        called after the consent gate and only when the manifest accepts the
+        host source. The resolved value goes to the module environment and
+        nowhere else.
+        """
         question_set = QuestionSet.bundled(question_set_id)
         if question_set.subject_kind != "item":
             raise AnnotationError(
@@ -168,11 +181,50 @@ class AnnotationService:
                 "allowed remote annotators. Run `virtuoso annotate allow-remote --yes` "
                 "after reading what the module sends, or use a local module."
             )
+        if host_credential is not None and not manifest.credentials:
+            raise AnnotationError(
+                f"annotator {module_id} declares no credentials; omit --host-credential-stdin"
+            )
         try:
             item = self.workspace.load_item(item_id)
         except WorkspaceError as exc:
             raise AnnotationError(str(exc)) from exc
+        # Resolve after consent and before the module starts. Nothing has been
+        # written yet, so a failure here leaves the workspace untouched.
+        resolved: tuple[ResolvedCredential, ...] = ()
+        try:
+            resolved = tuple(
+                credential_resolution.resolve(
+                    spec,
+                    host_reader=host_credential,
+                    environ=os.environ if environ is None else environ,
+                )
+                for spec in manifest.credentials
+            )
+        except CredentialError as exc:
+            raise AnnotationError(f"annotator {module_id}: {exc}") from exc
+        secrets = tuple(credential.value for credential in resolved)
+        try:
+            return self._run_and_record(
+                manifest=manifest,
+                item=item,
+                question_set=question_set,
+                surface=surface,
+                resolved=resolved,
+            )
+        except AnnotationError as exc:
+            message = credential_resolution.redact(str(exc), secrets)
+            raise AnnotationError(message) from None
 
+    def _run_and_record(
+        self,
+        *,
+        manifest: ModuleManifest,
+        item: LearningItem,
+        question_set: QuestionSet,
+        surface: str,
+        resolved: tuple[ResolvedCredential, ...],
+    ) -> dict[str, Any]:
         request = {
             "schema": "virtuoso/module-request@0.1",
             "projections": {
@@ -189,7 +241,14 @@ class AnnotationService:
         }
         module_started_at = datetime.now(timezone.utc)
         try:
-            result = ModuleRunner().run(manifest, request, allow_trusted=True)
+            result = ModuleRunner().run(
+                manifest,
+                request,
+                allow_trusted=True,
+                credential_environment={
+                    credential.name: credential.value for credential in resolved
+                },
+            )
         except ModuleError as exc:
             raise AnnotationError(str(exc)) from exc
         module_completed_at = datetime.now(timezone.utc)
@@ -207,6 +266,8 @@ class AnnotationService:
                 module_started_at=module_started_at,
                 module_completed_at=module_completed_at,
                 surface=surface,
+                credential_source=resolved[0].source if resolved else None,
+                credential_provider=resolved[0].provider if resolved else None,
             )
         except WorkspaceError as exc:
             raise AnnotationError(str(exc)) from exc
@@ -214,6 +275,48 @@ class AnnotationService:
         record["stale"] = False
         record["claims_mastery"] = False
         return record
+
+    def doctor(self, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+        """Per installed remote annotator, which credential sources resolve.
+
+        Reads env and keychain values to test them and discards them. Never
+        runs a module and never writes. The host source is offered per run,
+        so it reports ``per-run``.
+        """
+        environment = os.environ if environ is None else environ
+        allow_remote = bool(self.workspace.annotator_settings()["allow_remote"])
+        try:
+            manifests, errors = self.workspace.installed_annotators()
+        except WorkspaceError as exc:
+            raise AnnotationError(str(exc)) from exc
+        annotators = []
+        for manifest in manifests:
+            if manifest.network != "remote":
+                continue
+            reports = [
+                credential_resolution.probe(spec, environ=environment)
+                for spec in manifest.credentials
+            ]
+            annotators.append(
+                {
+                    "module_id": manifest.module_id,
+                    "module_version": manifest.version,
+                    "network": manifest.network,
+                    "credentials": reports,
+                    "ready": allow_remote
+                    and all(report["local_source"] is not None for report in reports),
+                }
+            )
+        return {
+            "schema": ANNOTATOR_DOCTOR_SCHEMA,
+            "allow_remote": allow_remote,
+            "keychain_tool": credential_resolution.keychain_tool(),
+            "keychain_service": credential_resolution.KEYCHAIN_SERVICE,
+            "precedence": list(credential_resolution.CREDENTIAL_SOURCES),
+            "annotators": annotators,
+            "errors": errors,
+            "values_shown": False,
+        }
 
     def list(self, *, item_id: str | None = None) -> dict[str, Any]:
         try:

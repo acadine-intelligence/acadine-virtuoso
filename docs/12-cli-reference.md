@@ -89,20 +89,57 @@ The minimum is a scheduling preference around FSRS. Delaying a review beyond its
 Run a typed annotator module against one learning item and read what it answered. Annotations are evidence beside the item, never input to selection, composition, or any scheduler.
 
 ```
-virtuoso --workspace PATH annotate item --item ITEM --module MODULE_ID [--question-set ID] [--json]
+virtuoso --workspace PATH annotate item --item ITEM --module MODULE_ID [--question-set ID] [--host-credential-stdin] [--json]
 virtuoso --workspace PATH annotate list [--item ITEM] [--json]
 virtuoso --workspace PATH annotate questions [--json]
 virtuoso --workspace PATH annotate allow-remote --yes [--json]
 virtuoso --workspace PATH annotate allow-remote --revoke [--json]
+virtuoso --workspace PATH annotate doctor [--json]
 ```
 
 An annotator is a module with category `annotator` whose manifest reads exactly `annotation.request`, returns `annotation-answers`, and declares `network` as `none` or `remote`. The manifest lives at `workspace/modules/<module-id>/virtuoso.module.json` with the same private modes as scheduler modules. The module receives the item title, focus, prompt, answer, hint, follow-up, learning context, and entry mode plus the question set. It never receives attempts, schedules, or paths.
 
 Bundled question set `item_quality_v1` asks four questions about one item: `atomic` (`noul`, probability the prompt tests one idea), `answer_supports_prompt` (`noul`), `difficulty` (`choice`: `easy`, `moderate`, `hard`), and `hint_leaks_answer` (`noul`). Every answer carries `primitive`, `value`, and `confidence` from 0 to 1. Answers that miss a question, add one, use the wrong primitive, or choose an option outside the list fail with exit 2 and write nothing.
 
-`annotate item` output schema `virtuoso/annotation@0.1`: `annotation_id`, `subject_kind`, `subject_id`, `subject_hash`, `question_set_id`, `question_set_hash`, `module_id`, `module_version`, `module_network`, `module_receipt_id`, `answers`, `occurred_at`, `surface`, `stale`, and `claims_mastery: false`. The annotation and its module receipt land in one transaction (migration 17, `annotations`). Rows reject update and deletion. Staleness compares against the indexed item hash: once `sync` reindexes an item whose Markdown changed after the run, `annotate list`, `queries history --item` and `doctor` report the annotation `stale: true`. An edit that has not been synced is not yet stale; `annotate item` on an unsynced item exits 2. `doctor` reports an `annotations` object with `total`, `stale`, and `stale_items`; stale annotations are information and never change the health status.
+`annotate item` output schema `virtuoso/annotation@0.1`: `annotation_id`, `subject_kind`, `subject_id`, `subject_hash`, `question_set_id`, `question_set_hash`, `module_id`, `module_version`, `module_network`, `module_receipt_id`, `answers`, `occurred_at`, `surface`, `credential_source`, `credential_provider`, `stale`, and `claims_mastery: false`. The annotation and its module receipt land in one transaction (migration 17, `annotations`). Rows reject update and deletion. Staleness compares against the indexed item hash: once `sync` reindexes an item whose Markdown changed after the run, `annotate list`, `queries history --item` and `doctor` report the annotation `stale: true`. An edit that has not been synced is not yet stale; `annotate item` on an unsynced item exits 2. `doctor` reports an `annotations` object with `total`, `stale`, and `stale_items`; stale annotations are information and never change the health status.
 
 `allow-remote` records per-workspace consent for modules that declare `network: remote`. Without it such a module exits 2 before it runs. Without `--yes` the command prints what a remote module receives and exits 2. `--revoke` withdraws consent. Consent is stored in `virtuoso.json` under `annotator.allow_remote`.
+
+#### Annotator credentials
+
+A remote annotator that calls a hosted model can declare the credential it needs, by name only:
+
+```json
+"credentials": [
+  {"name": "TYPESAFE_API_KEY", "provider": "typesafe", "sources": ["host", "env", "keychain"]}
+]
+```
+
+Only a module with category `annotator` and `network: remote` may declare `credentials`; any other manifest that declares the field fails to load. The array holds exactly one entry in this version. Each entry has exactly `name`, `provider`, and `sources`, and any other field fails the manifest. `name` must match `^[A-Z][A-Z0-9_]{0,63}$` and must not be a name that changes how the module process starts (`PATH`, `HOME`, `SHELL`, `LANG`, `IFS`, `ENV`, `BASH_ENV`, `TMPDIR`, `PWD`, `USER`, `LOGNAME`, or a name starting with `LC_`, `LD_`, `DYLD_`, or `PYTHON`). `provider` is lowercase dash-separated words of at most 64 characters. `sources` is a non-empty list without repeats drawn from `host`, `env`, and `keychain`. A manifest with no `credentials` field behaves exactly as before.
+
+At run time Virtuoso checks the `allow-remote` consent first. Without consent the run exits 2 before any source is read. It then resolves the credential from the sources the manifest lists, always in this order:
+
+1. `host`: a host agent pipes the value on stdin for this run only and passes `--host-credential-stdin`. Virtuoso reads one line of at most 4096 bytes and strips one trailing newline. It refuses a terminal so a typed key is never echoed. An empty or invalid host value exits 2 and does not fall back to a local source, because the host asked for this run to use its key. Passing the flag to a module that does not list `host`, or that declares no credentials, exits 2.
+2. `env`: the variable named `name` in the environment Virtuoso was started with.
+3. `keychain`: the OS keychain entry with service `virtuoso` and account `name`. On macOS Virtuoso runs `security find-generic-password -s virtuoso -a NAME -w`; on Linux it runs `secret-tool lookup service virtuoso account NAME`. Store an entry with `security add-generic-password -s virtuoso -a NAME -w` or `secret-tool store --label=virtuoso service virtuoso account NAME`. A missing tool, a non-zero exit, a timeout, an empty entry, or any other platform means this source does not resolve. No runtime dependency is added.
+
+A value must be one non-empty line of at most 4096 bytes; anything else does not resolve. When no listed source resolves, `annotate item` exits 2 before the module starts and before any network call, writes nothing, and names the sources it tried without any value.
+
+The host source uses stdin rather than an argument or an environment variable. Arguments are visible to other local users in the process list. Environment variables are inherited by every child process, including the keychain helper, and are often copied into crash reports and debug logs. A pipe is read once by Virtuoso alone and ends with the run.
+
+The resolved value goes only into the module subprocess environment under its declared `name`, beside the fixed `PATH`, `LANG`, `LC_ALL`, and `PYTHONIOENCODING`. It never enters the workspace database, `virtuoso.json`, exports, receipts, command output, or error messages. The module's stderr is discarded, and an error message that would contain the value shows `[redacted]` instead. The module receipt and the annotation row record only `credential_source` (`host`, `env`, or `keychain`) and `credential_provider` (migration 18 appends both nullable columns to `module_run_receipts` and `annotations`; existing rows keep `null`). A local annotator records `null` for both. A module is still a trusted local program: it can use or send its credential however it chooses, so install only modules you trust.
+
+`annotate doctor` reports, per installed remote annotator, which sources resolve, and never prints a value. It never runs a module and never writes. Output schema `virtuoso/annotator-doctor@0.1`:
+
+- `allow_remote`: the workspace consent.
+- `keychain_tool`: `security`, `secret-tool`, or `null` on other platforms.
+- `keychain_service`: `virtuoso`.
+- `precedence`: `["host", "env", "keychain"]`.
+- `annotators`: one entry per valid annotator with `network: remote`, with `module_id`, `module_version`, `network`, `credentials`, and `ready`. Each credential has `name`, `provider`, `local_source` (the first of `env` or `keychain` that resolves, or `null`), and `sources` mapping `host`, `env`, and `keychain` to `resolves`, `unresolved`, `unavailable` (no keychain tool), `per-run` (host values exist only during a run), or `not-declared`. `ready` is true when the workspace allows remote annotators and every credential resolves locally. A run with a host value can succeed when `ready` is false.
+- `errors`: `module_id` and the refusal message for each module directory whose manifest cannot be loaded.
+- `values_shown: false`.
+
+On macOS the keychain check can prompt for keychain access.
 
 `examples/modules/rule-annotator/` is a dependency-free local annotator that demonstrates the contract.
 
