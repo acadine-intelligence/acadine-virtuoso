@@ -1,6 +1,6 @@
 # Server and MCP design
 
-Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). The server itself is not built yet. Beyond those core changes, this record does not expand the interfaces in `12-cli-reference.md`.
+Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). Migration 19 also carries the attempt `client` column and the pending-attempt hint, recording time and expiry rules, so the server needs no further migration for phase 1. The server itself is not built yet. Beyond those core changes, this record does not expand the interfaces in `12-cli-reference.md`.
 
 ## Decision
 
@@ -78,11 +78,11 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 
 The current review contract returns the answer in the item snapshot and trusts the interface to hide it. A chat model is not a trustworthy interface for that rule: once the answer is in its context, it can leak it. So the server splits recall into `recall_start`, `recall_respond`, `recall_reveal`, and `recall_record`. The server holds the open attempt and refuses to reveal the answer before a response exists. A blank response cannot be graded `demonstrated`, matching the CLI.
 
-The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new. A restarted server can still finish or expire it. An expired attempt records nothing.
+The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new. A restarted server can still finish or expire it. The row also stores the surface, the client name, when a hint was shown (`hint_shown_at`) and when the attempt was recorded (`recorded_at`), so `hint_used` survives a restart. The database enforces the expiry: a response, a hint or a recording time after `expires_at` is rejected, so an expired attempt records nothing even if the server misses the expiry. The recorded attempt must match the row's item version, response, surface and client.
 
 ### Evidence honesty
 
-- `surface` records the client, for example `mcp` or `http`, plus the client name the caller supplies.
+- `surface` records the client, for example `mcp` or `http`, plus the client name the caller supplies. The name is stored in the attempt's `client` column, which is `null` when no name is given and for CLI attempts.
 - Latency is stored as unknown. The server cannot measure when a learner started thinking, and a client clock is a claim, not a measurement. This matches `practice --administer`.
 - `agent_help` is required on `recall_record` and has no default of `none`. It is the existing attempt field with the existing values (`none`, `light`, `substantial`, `unknown`). The tool description tells the model to report its own help honestly.
 - `graded_by` is required: `learner` or `agent`. It is a new attempt column and needs a migration in phase 1.
@@ -94,7 +94,7 @@ The open attempt lives in the workspace database as a pending row with an expiry
 
 Phase 1 changes the core in at least these places. The phase 1 implementation PR fixes the exact seams and lists any further change in its description:
 
-- One migration adds the pending-attempt table and two attempt columns: `graded_by` and `surface`. Attempts have no `surface` column today; skips, study events, annotations and composition decisions do.
+- One migration adds the pending-attempt table and three attempt columns: `graded_by`, `surface` and `client`. Before it, attempts had no `surface` column; skips, study events, annotations and composition decisions did. The same migration makes attempts append-only: an update or deletion is rejected, so a stored grade cannot move from `agent` to `learner`.
 - The attempt write path gains a mode that records an agent-graded attempt without a scheduler proposal or state change. Today `WorkspaceService.record_attempt` requires both, and `ReviewService.record` and `practice --administer` reach it through `PracticeService`, so the change spans `PracticeService` and `WorkspaceService.record_attempt`. If `recall_record` reuses the review request contract, that contract gains `graded_by` and a new schema version.
 - Composition ignores agent-graded attempts when it chooses the next target.
 - `practice --administer` gains `--graded-by learner|agent`, default `learner`.
@@ -168,18 +168,18 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 - A request with a foreign `Host` or `Origin`, or a CORS preflight, gets 403 and writes nothing.
 - An agent-graded `recall_record` stores the attempt and leaves the scheduler state and due date unchanged.
 - `practice --administer --graded-by agent` does the same on the CLI. Without the flag, the attempt records `graded_by: learner` and feeds the scheduler as today.
-- `next` and `compose` return the same output before and after an agent-graded attempt is recorded.
+- `next` returns the same output before and after an agent-graded attempt is recorded. `compose` returns the same content; its proposal id and timestamp come from the clock.
 - `queries history` returns `virtuoso/item-history@0.2` with `graded_by` on each attempt. `queries focus` returns `virtuoso/focus-performance@0.2`, whose outcome counts exclude agent-graded attempts and whose `agent_graded` count includes them.
 - Study and skip writes from the `mcp` and `http` surfaces are accepted, and an unknown surface is still rejected.
 - `history` output for a due item contains no prompt, reference answer or response text.
 - No operation accepts a path, a module id, or `allow_trusted`.
-- Every write's stored evidence shows `surface`, unknown latency, the reported `agent_help`, and `graded_by`.
+- Every write's stored evidence shows `surface`, the client name, unknown latency, the reported `agent_help`, and `graded_by`.
 - An exported workspace opens and passes `doctor` with the CLI on a clean machine.
 
 ## Open questions
 
 - Whether a target chat assistant's voice mode calls MCP tools. Phase 3 answers this with a developer-mode test before any client package work.
-- How the hint is released. A hint comes after `recall_start` and before `recall_reveal`, and the current contract records `hint_used`, so the split contract probably needs a `recall_hint` operation between them.
+- How the hint is released. A hint comes after `recall_start` and before `recall_reveal`, and the current contract records `hint_used`, so the split contract probably needs a `recall_hint` operation between them. The storage is settled: the pending row's `hint_shown_at` is set once, while the row is open or responded and before it expires.
 
 ## Relationship to earlier decisions
 
