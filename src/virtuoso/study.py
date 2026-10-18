@@ -10,6 +10,10 @@ from .review import ReviewContractError, ReviewError
 from .workspace import WorkspaceError, WorkspaceService
 
 
+# Clients allowed to record study completion. The server binds use mcp and http.
+STUDY_SURFACES = ("hermes-desktop", "obsidian-plugin", "cli", "mcp", "http")
+
+
 class StudyReviewService:
     def __init__(self, workspace: WorkspaceService) -> None:
         self.workspace = workspace
@@ -38,7 +42,7 @@ class StudyReviewService:
         ):
             if not isinstance(request[field], str) or not re.fullmatch(pattern, request[field]):
                 raise ReviewContractError(f"Invalid {field}.")
-        if request["surface"] not in ("hermes-desktop", "obsidian-plugin", "cli"):
+        if request["surface"] not in STUDY_SURFACES:
             raise ReviewContractError("Unsupported study surface.")
         try:
             event = self.workspace.record_study_completion(

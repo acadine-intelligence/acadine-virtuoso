@@ -371,10 +371,13 @@ class SessionComposer:
                     learning_context=learning_context,
                     focus=focus,
                 )
+                # Agent-graded attempts are evidence only and never choose
+                # the next target; only learner grades are read here.
                 attempt_rows = db.execute(
                     """SELECT event_id, item_id, result, agent_help, support_json,
                               occurred_at, created_at
                        FROM attempts
+                       WHERE graded_by = 'learner'
                        ORDER BY occurred_at DESC, created_at DESC, event_id"""
                 ).fetchall()
         except WorkloadDataError as exc:

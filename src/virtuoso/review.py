@@ -21,6 +21,8 @@ REVIEW_SKIP_RESULT_SCHEMA = "virtuoso/review-skip-result@0.1"
 _SUBMISSION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RESULTS = {"demonstrated", "partial", "not-demonstrated"}
+# Clients allowed to record a skip. The server binds use mcp and http.
+SKIP_SURFACES = ("obsidian-plugin", "hermes-desktop", "mcp", "http")
 
 
 class ReviewError(VirtuosoError):
@@ -272,8 +274,10 @@ class ReviewService:
             raise ReviewContractError(
                 "item_content_hash must be 64 lowercase hexadecimal characters"
             )
-        if request["surface"] not in ("obsidian-plugin", "hermes-desktop"):
-            raise ReviewContractError("surface must be obsidian-plugin or hermes-desktop")
+        if request["surface"] not in SKIP_SURFACES:
+            raise ReviewContractError(
+                "surface must be obsidian-plugin, hermes-desktop, mcp, or http"
+            )
         occurred_at = self._timestamp(request["occurred_at"], "occurred_at")
         try:
             return self.workspace.record_review_skip(
@@ -301,6 +305,13 @@ class ReviewService:
 
     @staticmethod
     def attempt_result_payload(result: PracticeResult) -> dict[str, Any]:
+        # Review records are learner-graded, so a proposal always exists.
+        if result.proposal is None:
+            raise ReviewError(
+                "review attempt has no scheduler proposal",
+                code="record-failed",
+                recovery="retry-submit",
+            )
         return {
             "schema": REVIEW_ATTEMPT_RESULT_SCHEMA,
             "attempt": {

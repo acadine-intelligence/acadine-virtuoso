@@ -354,6 +354,8 @@ class PracticeServiceTests(unittest.TestCase):
             "agent_help": attempt.agent_help,
             "support_actions": [asdict(action) for action in attempt.support_actions],
             "administered": attempt.administered,
+            "graded_by": attempt.graded_by,
+            "surface": attempt.surface,
         }
         proposal_payload = {
             "proposal_id": proposal.proposal_id,

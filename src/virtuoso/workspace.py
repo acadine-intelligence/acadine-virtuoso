@@ -42,6 +42,8 @@ _ITEM_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SOURCE_KINDS = {"markdown", "obsidian"}
+# Who chose an attempt's grade. Only learner grades feed the scheduler.
+_GRADED_BY = ("learner", "agent")
 _OBSIDIAN_EXCLUDED_DIRECTORIES = frozenset({".obsidian", ".trash"})
 _TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
 _TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
@@ -52,7 +54,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 18
+_CURRENT_MIGRATION_VERSION = 19
 
 
 class WorkspaceError(VirtuosoError):
@@ -1801,6 +1803,129 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'module_run_receipts is append-only');
                 END""",
+            # Migration 19 (issue #69): who chose the grade and which client
+            # recorded the attempt. Existing rows were all graded by the
+            # learner (an agent relaying a learner's grade is still a learner
+            # grade). Their client was never recorded, so surface stays NULL
+            # (unknown) rather than inventing one.
+            """ALTER TABLE attempts ADD COLUMN graded_by TEXT NOT NULL
+                DEFAULT 'learner'
+                CHECK(
+                    graded_by = 'learner'
+                    OR (graded_by = 'agent' AND administered = 1)
+                )""",
+            """ALTER TABLE attempts ADD COLUMN surface TEXT
+                CHECK(surface IS NULL OR length(surface) BETWEEN 1 AND 64)""",
+            # An agent-graded attempt is evidence only. It never becomes the
+            # source of a scheduler proposal or of current scheduler state.
+            """CREATE TRIGGER scheduler_proposals_reject_agent_graded
+                BEFORE INSERT ON scheduler_proposals
+                WHEN (
+                    SELECT graded_by FROM attempts
+                    WHERE event_id = NEW.source_event_id
+                ) = 'agent'
+                BEGIN
+                    SELECT RAISE(ABORT, 'agent-graded attempts do not feed the scheduler');
+                END""",
+            """CREATE TRIGGER scheduler_state_reject_agent_graded_insert
+                BEFORE INSERT ON scheduler_state
+                WHEN (
+                    SELECT graded_by FROM attempts
+                    WHERE event_id = NEW.source_event_id
+                ) = 'agent'
+                BEGIN
+                    SELECT RAISE(ABORT, 'agent-graded attempts do not feed the scheduler');
+                END""",
+            """CREATE TRIGGER scheduler_state_reject_agent_graded_update
+                BEFORE UPDATE ON scheduler_state
+                WHEN (
+                    SELECT graded_by FROM attempts
+                    WHERE event_id = NEW.source_event_id
+                ) = 'agent'
+                BEGIN
+                    SELECT RAISE(ABORT, 'agent-graded attempts do not feed the scheduler');
+                END""",
+            # One open recall attempt for the split recall contract: the
+            # prompt shown, the learner's response once given, and its expiry.
+            # Rows move forward only (open -> responded -> recorded, or to
+            # expired) and are never deleted, so the table keeps the
+            # append-only intent of the evidence tables around it.
+            """CREATE TABLE IF NOT EXISTS pending_attempts (
+                attempt_token TEXT PRIMARY KEY
+                    CHECK(length(attempt_token) BETWEEN 32 AND 128),
+                item_id TEXT NOT NULL
+                    REFERENCES items(item_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                item_content_hash TEXT NOT NULL CHECK(length(item_content_hash) = 64),
+                prompt_shown TEXT NOT NULL CHECK(length(prompt_shown) >= 1),
+                response TEXT,
+                responded_at TEXT,
+                state TEXT NOT NULL DEFAULT 'open'
+                    CHECK(state IN ('open', 'responded', 'recorded', 'expired')),
+                attempt_event_id TEXT UNIQUE
+                    REFERENCES attempts(event_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                CHECK((response IS NULL) = (responded_at IS NULL)),
+                CHECK(
+                    (state = 'open' AND response IS NULL AND attempt_event_id IS NULL)
+                    OR (state = 'responded' AND response IS NOT NULL
+                        AND attempt_event_id IS NULL)
+                    OR (state = 'recorded' AND response IS NOT NULL
+                        AND attempt_event_id IS NOT NULL)
+                    OR (state = 'expired' AND attempt_event_id IS NULL)
+                )
+            )""",
+            """CREATE TRIGGER pending_attempts_require_open_insert
+                BEFORE INSERT ON pending_attempts
+                WHEN NEW.state IS NOT 'open'
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempts start open');
+                END""",
+            """CREATE TRIGGER pending_attempts_forward_only
+                BEFORE UPDATE ON pending_attempts
+                WHEN NEW.attempt_token IS NOT OLD.attempt_token
+                    OR NEW.item_id IS NOT OLD.item_id
+                    OR NEW.item_content_hash IS NOT OLD.item_content_hash
+                    OR NEW.prompt_shown IS NOT OLD.prompt_shown
+                    OR NEW.surface IS NOT OLD.surface
+                    OR NEW.created_at IS NOT OLD.created_at
+                    OR NEW.expires_at IS NOT OLD.expires_at
+                    OR NOT (
+                        (OLD.state = 'open' AND NEW.state = 'responded')
+                        OR (OLD.state = 'open' AND NEW.state = 'expired'
+                            AND NEW.response IS NULL)
+                        OR (OLD.state = 'responded'
+                            AND NEW.state IN ('recorded', 'expired'))
+                    )
+                    OR (
+                        OLD.state <> 'open'
+                        AND (
+                            NEW.response IS NOT OLD.response
+                            OR NEW.responded_at IS NOT OLD.responded_at
+                        )
+                    )
+                    OR (
+                        NEW.state = 'recorded'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM attempts
+                            WHERE event_id = NEW.attempt_event_id
+                              AND item_id = NEW.item_id
+                              AND item_content_hash = NEW.item_content_hash
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt transition is not allowed');
+                END""",
+            """CREATE TRIGGER pending_attempts_reject_delete
+                BEFORE DELETE ON pending_attempts
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending_attempts rows are never deleted');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1887,6 +2012,7 @@ class WorkspaceService:
                 16: statements[79:82],
                 17: statements[82:86],
                 18: statements[86:92],
+                19: statements[92:101],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -4485,10 +4611,18 @@ class WorkspaceService:
         self,
         *,
         attempt: dict[str, Any],
-        proposal: dict[str, Any],
-        state_json: str,
+        proposal: dict[str, Any] | None,
+        state_json: str | None,
         module_receipt: dict[str, Any] | None = None,
     ) -> None:
+        """Append one attempt.
+
+        A learner-graded attempt (`graded_by: learner`) writes the attempt,
+        its scheduler proposal and the new scheduler state in one
+        transaction. An agent-graded attempt (`graded_by: agent`) is
+        evidence only: it requires `proposal`, `state_json` and
+        `module_receipt` to be None and writes the attempt row alone.
+        """
         self._require_exact_fields(
             attempt,
             {
@@ -4506,9 +4640,33 @@ class WorkspaceService:
                 "agent_help",
                 "support_actions",
                 "administered",
+                "graded_by",
+                "surface",
             },
             "attempt",
         )
+        graded_by = attempt["graded_by"]
+        if graded_by not in _GRADED_BY:
+            raise WorkspaceError("attempt graded_by must be 'learner' or 'agent'")
+        surface = attempt["surface"]
+        if surface is not None and (
+            not isinstance(surface, str) or not 1 <= len(surface) <= 64
+        ):
+            raise WorkspaceError(
+                "attempt surface must be null or contain 1 to 64 characters"
+            )
+        if graded_by == "agent":
+            if proposal is not None or state_json is not None or module_receipt is not None:
+                raise WorkspaceError(
+                    "agent-graded attempts are evidence only and carry no "
+                    "scheduler proposal, state or module receipt"
+                )
+            self._record_agent_graded_attempt(attempt)
+            return
+        if proposal is None or state_json is None:
+            raise WorkspaceError(
+                "learner-graded attempts require a scheduler proposal and state"
+            )
         self._require_exact_fields(
             proposal,
             {
@@ -4774,8 +4932,9 @@ class WorkspaceService:
                 INSERT INTO attempts(
                     event_id, item_id, item_content_hash, occurred_at,
                     initial_response, initial_latency_ms, result, confidence,
-                    open_notes, agent_help, support_json, administered
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    open_notes, agent_help, support_json, administered,
+                    graded_by, surface
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt["event_id"],
@@ -4790,6 +4949,8 @@ class WorkspaceService:
                     attempt["agent_help"],
                     support_json,
                     int(administered),
+                    graded_by,
+                    surface,
                 ),
             )
             if not administered:
@@ -4876,6 +5037,91 @@ class WorkspaceService:
                         module_receipt["completed_at"],
                     ),
                 )
+            self._require_current_item_content_hash(
+                item_id=attempt["item_id"],
+                relative_path=item_row["relative_path"],
+                expected_hash=attempt["item_content_hash"],
+                action="recording",
+            )
+
+    def _record_agent_graded_attempt(self, attempt: dict[str, Any]) -> None:
+        """Append an agent-graded attempt as evidence only.
+
+        No scheduler runs, no proposal is stored and current scheduler state
+        is untouched, so the due date stays where the learner's last grade
+        put it. Latency is unknown because the attempt was administered.
+        """
+        self._parse_aware_datetime(
+            attempt["occurred_at"], label="attempt occurred timestamp"
+        )
+        if attempt["administered"] is not True:
+            raise WorkspaceError(
+                "agent-graded attempts must be administered with unknown latency"
+            )
+        if (
+            attempt["initial_latency_ms"] is not None
+            or attempt["started_at"] is not None
+            or attempt["completed_at"] is not None
+        ):
+            raise WorkspaceError(
+                "administered attempts must record latency as unknown (None)"
+            )
+        if not isinstance(attempt["support_actions"], list):
+            raise WorkspaceError("attempt support_actions must be an array")
+        try:
+            support_json = json.dumps(
+                attempt["support_actions"], sort_keys=True, allow_nan=False
+            )
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceError(f"attempt contains invalid JSON: {exc}") from exc
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            item_row = db.execute(
+                """SELECT content_hash, relative_path, entry_mode,
+                          learning_unit_hash
+                   FROM items WHERE item_id = ?""",
+                (attempt["item_id"],),
+            ).fetchone()
+            if item_row is None:
+                raise WorkspaceError(
+                    f"no learning item with id: {attempt['item_id']}"
+                )
+            if item_row["content_hash"] != attempt["item_content_hash"]:
+                raise WorkspaceError(
+                    "attempt item content identity does not match the indexed learning item"
+                )
+            self._require_current_item_content_hash(
+                item_id=attempt["item_id"],
+                relative_path=item_row["relative_path"],
+                expected_hash=attempt["item_content_hash"],
+                action="recording",
+            )
+            self._require_practice_ready_row(
+                db, item_row, item_id=attempt["item_id"]
+            )
+            db.execute(
+                """
+                INSERT INTO attempts(
+                    event_id, item_id, item_content_hash, occurred_at,
+                    initial_response, initial_latency_ms, result, confidence,
+                    open_notes, agent_help, support_json, administered,
+                    graded_by, surface
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 'agent', ?)
+                """,
+                (
+                    attempt["event_id"],
+                    attempt["item_id"],
+                    attempt["item_content_hash"],
+                    attempt["occurred_at"],
+                    attempt["initial_response"],
+                    attempt["result"],
+                    attempt["confidence"],
+                    int(attempt["open_notes"]),
+                    attempt["agent_help"],
+                    support_json,
+                    attempt["surface"],
+                ),
+            )
             self._require_current_item_content_hash(
                 item_id=attempt["item_id"],
                 relative_path=item_row["relative_path"],

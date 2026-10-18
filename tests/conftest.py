@@ -81,8 +81,29 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_server_core_to_v18(db: sqlite3.Connection) -> None:
+    """Remove migration 19 attempt grader and surface columns, the
+    agent-graded scheduler guards, and the pending-attempt table."""
+    for trigger in (
+        "pending_attempts_require_open_insert",
+        "pending_attempts_forward_only",
+        "pending_attempts_reject_delete",
+        "scheduler_proposals_reject_agent_graded",
+        "scheduler_state_reject_agent_graded_insert",
+        "scheduler_state_reject_agent_graded_update",
+    ):
+        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    db.execute("DROP TABLE IF EXISTS pending_attempts")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+    for column in ("surface", "graded_by"):
+        if column in columns:
+            db.execute(f"ALTER TABLE attempts DROP COLUMN {column}")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 19")
+
+
 def downgrade_credentials_to_v17(db: sqlite3.Connection) -> None:
     """Remove migration 18 credential columns and receipt triggers."""
+    downgrade_server_core_to_v18(db)
     db.execute("DROP TRIGGER IF EXISTS module_run_receipts_reject_update")
     db.execute("DROP TRIGGER IF EXISTS module_run_receipts_reject_delete")
     for table in ("annotations", "module_run_receipts"):

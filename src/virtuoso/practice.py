@@ -17,6 +17,7 @@ from .workspace import LearningItem, WorkspaceError, WorkspaceService
 
 _RESULTS = {"demonstrated", "partial", "not-demonstrated"}
 _AGENT_HELP = {"none", "light", "substantial", "unknown"}
+_GRADED_BY = ("learner", "agent")
 
 
 class PracticeError(VirtuosoError):
@@ -61,6 +62,11 @@ class AttemptRecord:
     agent_help: str
     support_actions: tuple[SupportAction, ...]
     administered: bool = False
+    # `learner` when the learner chose the grade, even if an agent relayed
+    # it. `agent` grades are evidence only and never feed the scheduler.
+    graded_by: str = "learner"
+    # The client that recorded the attempt, or None when it is not known.
+    surface: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +90,8 @@ class SchedulerProposal:
 @dataclass(frozen=True)
 class PracticeResult:
     attempt: AttemptRecord
-    proposal: SchedulerProposal
+    # None only for an agent-graded attempt, which proposes no schedule.
+    proposal: SchedulerProposal | None
 
 
 class PracticeService:
@@ -225,6 +232,7 @@ class PracticeService:
             open_notes=open_notes,
             agent_help=agent_help,
             support_actions=tuple(support),
+            surface="cli",
         )
         proposal = self._schedule(
             item=item, attempt=attempt, allow_trusted=allow_trusted
@@ -250,6 +258,8 @@ class PracticeService:
         agent_help: str = "substantial",
         now: datetime | None = None,
         allow_trusted: bool = False,
+        graded_by: str = "learner",
+        surface: str = "cli",
     ) -> PracticeResult:
         """Record an agent-administered attempt with honest attribution.
 
@@ -259,7 +269,15 @@ class PracticeService:
         NULL/unknown — never 0 ms and never fabricated — and the attempt
         row carries an explicit `administered` marker. `agent_help`
         defaults to `substantial` unless the caller states otherwise.
+
+        `graded_by="learner"` (the default) means the learner chose the
+        grade and the scheduler runs as for any attempt. `graded_by="agent"`
+        stores the attempt as evidence only: no scheduler or module runs,
+        no proposal is written, and scheduler state and the due date stay
+        unchanged. The result's `proposal` is then None.
         """
+        if graded_by not in _GRADED_BY:
+            raise PracticeError("graded_by must be learner or agent")
         if result not in _RESULTS:
             raise PracticeError(
                 "result must be one of demonstrated, partial, or not-demonstrated"
@@ -307,7 +325,12 @@ class PracticeService:
             agent_help=agent_help,
             support_actions=(),
             administered=True,
+            graded_by=graded_by,
+            surface=surface,
         )
+        if graded_by == "agent":
+            self._persist(attempt=attempt, proposal=None)
+            return PracticeResult(attempt=attempt, proposal=None)
         proposal = self._schedule(
             item=item, attempt=attempt, allow_trusted=allow_trusted
         )
@@ -329,8 +352,14 @@ class PracticeService:
         open_notes: bool,
         support_actions: tuple[SupportAction, ...],
         allow_trusted: bool = False,
+        surface: str | None = None,
     ) -> PracticeResult:
-        """Record one measured attempt completed by a local user interface."""
+        """Record one measured attempt completed by a local user interface.
+
+        The learner grades a direct attempt, so it always feeds the
+        scheduler. `surface` is None when the request does not name its
+        client, as with `virtuoso/review-attempt@0.1`.
+        """
         if result not in _RESULTS:
             raise PracticeError(
                 "result must be one of demonstrated, partial, or not-demonstrated"
@@ -393,6 +422,7 @@ class PracticeService:
             agent_help="none",
             support_actions=support_actions,
             administered=False,
+            surface=surface,
         )
         proposal = self._schedule(
             item=item, attempt=attempt, allow_trusted=allow_trusted
@@ -605,7 +635,7 @@ class PracticeService:
         )
 
     def _persist(
-        self, *, attempt: AttemptRecord, proposal: SchedulerProposal
+        self, *, attempt: AttemptRecord, proposal: SchedulerProposal | None
     ) -> None:
         try:
             self.workspace.record_attempt(
@@ -634,8 +664,10 @@ class PracticeService:
                         asdict(action) for action in attempt.support_actions
                     ],
                     "administered": attempt.administered,
+                    "graded_by": attempt.graded_by,
+                    "surface": attempt.surface,
                 },
-                proposal={
+                proposal=None if proposal is None else {
                     "proposal_id": proposal.proposal_id,
                     "source_event_id": proposal.source_event_id,
                     "item_id": proposal.item_id,
@@ -649,8 +681,8 @@ class PracticeService:
                     "rationale": proposal.rationale,
                     "created_at": proposal.created_at.isoformat(),
                 },
-                state_json=proposal.proposed_state_json,
-                module_receipt=proposal.module_receipt,
+                state_json=None if proposal is None else proposal.proposed_state_json,
+                module_receipt=None if proposal is None else proposal.module_receipt,
             )
         except sqlite3.IntegrityError:
             raise
