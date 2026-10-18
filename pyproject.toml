@@ -16,6 +16,13 @@ dependencies = [
   "typing-extensions==4.16.0",
 ]
 
+[project.optional-dependencies]
+# Optional network server (docs/22). The base install keeps two dependencies.
+server = [
+  "mcp==2.3.0",
+  "uvicorn==0.41.0",
+]
+
 [dependency-groups]
 build = ["setuptools==80.9.0"]
 hermes-test = [

@@ -123,6 +123,10 @@ Virtuoso can run study and recall inside Hermes Desktop. The interface follows t
 
 Use `acadine-intelligence/acadine-virtuoso/plugins/hermes` in Desktop's Install from Git dialog. Install the CLI on the backend separately. See the [Desktop installation and testing guide](docs/20-hermes-desktop.md) for component enablement, backend paths, exact-revision testing, and recovery.
 
+## Server and MCP (optional)
+
+Chat and voice assistants, and agents on other machines, can use `virtuoso serve`: MCP over stdio for a local app, or MCP and JSON over HTTP with a required bearer token. It needs the optional extra, `pip install "acadine-virtuoso[server]"`; the base install is unchanged. The server keeps the answer hidden until the learner responds and records who graded each attempt. See the server section of `docs/12-cli-reference.md` and `docs/22-server-and-mcp-design.md`.
+
 ## Extension boundary
 
 External modules use a JSON-over-stdin/stdout protocol with no shell indirection, bounded output, and fail-closed process limits. A scheduler can be selected as `module:<module-id>` from a private manifest under `workspace/modules/<module-id>/virtuoso.module.json`. Each `practice` or `review record` execution also requires `--allow-trusted-scheduler`; Python callers pass `allow_trusted=True`. Queue, query, switch, settings, and doctor commands validate the module without executing it. There is no public generic module-execution command and no consent dialog. Initial categories: scheduler, practice-format, source-adapter, scoring-signal, output-adapter. Modules are trusted local executables and should be reviewed before use. The dependency-free fixed-ladder example under `examples/modules/fixed-ladder/` demonstrates the module protocol.

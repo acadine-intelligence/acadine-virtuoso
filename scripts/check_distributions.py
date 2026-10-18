@@ -113,7 +113,18 @@ def check_distributions(dist_dir: Path, requirements: Path) -> None:
             doctor = command("doctor")
             if doctor["status"] != "healthy" or doctor["attempts"] != 1:
                 raise ValueError("installed workspace is unhealthy")
-            print(f"PASS {artifact.name}: isolated install, practice and doctor")
+            # The base install has no server extra: serve must refuse plainly.
+            served = subprocess.run(
+                [cli, "--workspace", workspace, "serve", "--transport", "stdio"],
+                cwd=work, env=env, text=True, capture_output=True, timeout=120,
+                check=False, stdin=subprocess.DEVNULL,
+            )
+            if served.returncode != 2 or 'acadine-virtuoso[server]' not in served.stderr:
+                raise ValueError(
+                    "installed CLI without the server extra did not refuse serve: "
+                    f"{served.returncode} {served.stderr}"
+                )
+            print(f"PASS {artifact.name}: isolated install, practice, doctor and serve refusal")
 
 
 def main() -> int:

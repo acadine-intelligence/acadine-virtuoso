@@ -81,10 +81,32 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_skip_links_to_v19(db: sqlite3.Connection) -> None:
+    """Remove migration 20: the skip-to-attempt link column, its index, and
+    the triggers that keep a responded attempt from being skipped or
+    restarted before it is recorded, and the one-live-attempt index with its
+    creation and expiry triggers."""
+    for trigger in (
+        "review_skips_require_unresponded_attempt",
+        "review_skips_require_open_attempt",
+        "pending_attempts_reject_start_while_awaiting_record",
+        "pending_attempts_reject_future_creation",
+        "pending_attempts_expire_response_only_after_expiry",
+    ):
+        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    db.execute("DROP INDEX IF EXISTS review_skips_by_pending_attempt")
+    db.execute("DROP INDEX IF EXISTS pending_attempts_one_live_per_item")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(review_skips)")}
+    if "pending_attempt_token" in columns:
+        db.execute("ALTER TABLE review_skips DROP COLUMN pending_attempt_token")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 20")
+
+
 def downgrade_server_core_to_v18(db: sqlite3.Connection) -> None:
     """Remove migration 19 attempt grader, surface and client columns, the
     append-only attempt triggers, the agent-graded scheduler guards, and the
     pending-attempt table with its triggers."""
+    downgrade_skip_links_to_v19(db)
     for trigger in (
         "attempts_reject_update",
         "attempts_reject_delete",

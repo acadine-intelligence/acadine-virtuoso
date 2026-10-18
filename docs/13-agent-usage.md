@@ -2,6 +2,14 @@
 
 How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Virtuoso. The CLI with `--json` is the canonical integration surface. The optional Hermes plugin wraps four common CLI journeys. The optional Obsidian plugin provides a local review interface. This document can be pasted into an agent's context or linked from an `AGENTS.md`. For a ready-made skill that runs the capture and recall journeys below, see `examples/agent-skills/`.
 
+## MCP server or CLI
+
+Use the CLI with `--json` when the agent can run a shell on the machine that holds the workspace (Pi, Claude Code, Codex, Hermes). It is the reference integration and needs no server.
+
+Use the MCP server (`virtuoso serve`, see the server section of `12-cli-reference.md`) when the client cannot start a process there: a chat or voice assistant, an MCP-only desktop app, or an agent on another machine. A local MCP app spawns `virtuoso --workspace PATH serve --transport stdio`. A remote client connects to `--transport http` at `/mcp` with the bearer token. The server needs the `[server]` extra.
+
+Over MCP, follow the tools in order: `next_action`; for `learn`, `study_load` then `study_record` after the learner says they finished; for `practice`, `recall_start`, show the prompt, optionally `recall_hint` if the learner asks, `recall_respond` with the learner's own words, `recall_reveal`, then `recall_record` with the learner's grade. Set `graded_by: agent` only when you chose the grade; it is then evidence only. Report your own help honestly in `agent_help`; it has no default. Reuse the same `submission_id` when retrying a write. The server will not reveal an answer before a response exists, and it never returns answers from `next_action`, `recall_start` or `history`.
+
 ## The five rules
 
 1. **Always pass `--json`.** Human output is `key: value` lines; JSON output is the stable machine contract. Parse stdout, never scrape the human format.

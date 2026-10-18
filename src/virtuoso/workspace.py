@@ -48,13 +48,16 @@ _OBSIDIAN_EXCLUDED_DIRECTORIES = frozenset({".obsidian", ".trash"})
 _TRANSFER_OUTCOMES = {"successful", "partial", "unsuccessful"}
 _TRANSFER_INDEPENDENCE = {"independent", "guided", "agent-produced", "unknown"}
 _TRANSFER_EVENT_ID = re.compile(r"^transfer-[0-9a-f]{32}$")
+# A server client name: printable ASCII from a fixed set, so a stored name
+# cannot carry control characters, terminal escapes or bidi marks.
+_CLIENT_NAME = re.compile(r"[A-Za-z0-9 ._:/@+-]{1,128}")
 _TRANSFER_CHECK_ID = re.compile(r"^transfer-check-[0-9a-f]{32}$")
 _TRANSFER_CONTEXT_KINDS = {"changed", "novel"}
 _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 19
+_CURRENT_MIGRATION_VERSION = 20
 
 
 class WorkspaceError(VirtuosoError):
@@ -2010,6 +2013,96 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'pending_attempts rows are never deleted');
                 END""",
+            # Migration 20 (issue #69 review): a stored response is finished
+            # only by recording it. A skip names the pending attempt it
+            # closes, so a replay can check the skip belongs to that attempt,
+            # and the database refuses a skip of an attempt that already has
+            # a response. CLI skips leave the column NULL.
+            """ALTER TABLE review_skips ADD COLUMN pending_attempt_token TEXT""",
+            """CREATE UNIQUE INDEX review_skips_by_pending_attempt
+                ON review_skips(pending_attempt_token)""",
+            """CREATE TRIGGER review_skips_require_unresponded_attempt
+                BEFORE INSERT ON review_skips
+                WHEN NEW.pending_attempt_token IS NOT NULL
+                    AND (
+                        SELECT state FROM pending_attempts
+                        WHERE attempt_token = NEW.pending_attempt_token
+                    ) = 'responded'
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
+                END""",
+            """CREATE TRIGGER review_skips_require_open_attempt
+                BEFORE INSERT ON review_skips
+                WHEN NEW.pending_attempt_token IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pending_attempts
+                        WHERE attempt_token = NEW.pending_attempt_token
+                          AND state IN ('open', 'responded')
+                          AND item_id = NEW.item_id
+                          AND item_content_hash = NEW.item_content_hash
+                          AND surface = NEW.surface
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt is not open');
+                END""",
+            # At most one live pending attempt (open or responded) per item,
+            # whatever its item version. Two live attempts would let a
+            # client store a wrong response on one, reveal, record the other
+            # as demonstrated and let the first expire. A database from
+            # version 19 could hold several, so before the index is built
+            # each item keeps one: its newest responded row if it has one
+            # (closing it would drop a stored response), otherwise its
+            # newest open row. The others become expired and record nothing.
+            """UPDATE pending_attempts SET state = 'expired'
+                WHERE state IN ('open', 'responded')
+                  AND attempt_token IS NOT (
+                      SELECT keep.attempt_token FROM pending_attempts AS keep
+                      WHERE keep.item_id = pending_attempts.item_id
+                        AND keep.state IN ('open', 'responded')
+                      ORDER BY keep.state = 'responded' DESC,
+                               julianday(keep.created_at) DESC,
+                               keep.rowid DESC
+                      LIMIT 1
+                  )""",
+            """CREATE UNIQUE INDEX pending_attempts_one_live_per_item
+                ON pending_attempts(item_id)
+                WHERE state IN ('open', 'responded')""",
+            # A new attempt for an item waits while an earlier one, of any
+            # item version, still has a response that is not recorded. The
+            # row stays responded until it is recorded or, after expires_at
+            # by the database clock, closed as expired (next trigger), so
+            # this check needs no caller-written time.
+            """CREATE TRIGGER pending_attempts_reject_start_while_awaiting_record
+                BEFORE INSERT ON pending_attempts
+                WHEN EXISTS (
+                    SELECT 1 FROM pending_attempts
+                    WHERE item_id = NEW.item_id
+                      AND state = 'responded'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
+                END""",
+            # created_at may not run ahead of the database clock by more than
+            # five minutes, so a forged future creation time cannot stretch
+            # an attempt's window or sort it ahead of the real one.
+            """CREATE TRIGGER pending_attempts_reject_future_creation
+                BEFORE INSERT ON pending_attempts
+                WHEN NOT ifnull(
+                    julianday(NEW.created_at) <= julianday('now', '+5 minutes'), 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt creation time is in the future');
+                END""",
+            # A stored response is closed unrecorded only once its expiry has
+            # passed by the database clock. An open row, with no response,
+            # may still move to expired at any time (a skip or a supersede).
+            """CREATE TRIGGER pending_attempts_expire_response_only_after_expiry
+                BEFORE UPDATE ON pending_attempts
+                WHEN OLD.state = 'responded' AND NEW.state = 'expired'
+                    AND NOT ifnull(julianday('now') > julianday(OLD.expires_at), 0)
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -2097,6 +2190,7 @@ class WorkspaceService:
                 17: statements[82:86],
                 18: statements[86:92],
                 19: statements[92:106],
+                20: statements[106:115],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -3455,6 +3549,29 @@ class WorkspaceService:
                         f"trigger {trigger_name} definition does not match"
                     )
 
+            # PRAGMA index_list reports only that an index is partial, not
+            # its WHERE clause, so a named index is compared by its SQL too.
+            for index_name, object_type in sorted(expected_objects):
+                if object_type != "index":
+                    continue
+                expected_sql = expected_db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()[0]
+                actual_sql = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()[0]
+                if (expected_sql is None) != (actual_sql is None) or (
+                    expected_sql is not None
+                    and cls._normalized_schema_sql(actual_sql)
+                    != cls._normalized_schema_sql(expected_sql)
+                ):
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"index {index_name} definition does not match"
+                    )
+
             for table_name, object_type in sorted(expected_objects):
                 if object_type != "table":
                     continue
@@ -4698,6 +4815,7 @@ class WorkspaceService:
         proposal: dict[str, Any] | None,
         state_json: str | None,
         module_receipt: dict[str, Any] | None = None,
+        pending_attempt: dict[str, str] | None = None,
     ) -> None:
         """Append one attempt.
 
@@ -4706,6 +4824,11 @@ class WorkspaceService:
         transaction. An agent-graded attempt (`graded_by: agent`) is
         evidence only: it requires `proposal`, `state_json` and
         `module_receipt` to be None and writes the attempt row alone.
+
+        `pending_attempt` (`attempt_token` and `recorded_at`) closes the
+        split-recall row that opened this attempt in the same transaction,
+        so the attempt and the closed row are written together or not at
+        all. The database triggers check that the row matches the attempt.
         """
         self._require_exact_fields(
             attempt,
@@ -4749,13 +4872,17 @@ class WorkspaceService:
             )
         if client is not None and surface is None:
             raise WorkspaceError("attempt client requires a surface")
+        if pending_attempt is not None:
+            self._require_exact_fields(
+                pending_attempt, {"attempt_token", "recorded_at"}, "pending attempt"
+            )
         if graded_by == "agent":
             if proposal is not None or state_json is not None or module_receipt is not None:
                 raise WorkspaceError(
                     "agent-graded attempts are evidence only and carry no "
                     "scheduler proposal, state or module receipt"
                 )
-            self._record_agent_graded_attempt(attempt)
+            self._record_agent_graded_attempt(attempt, pending_attempt=pending_attempt)
             return
         if proposal is None or state_json is None:
             raise WorkspaceError(
@@ -5132,6 +5259,10 @@ class WorkspaceService:
                         module_receipt["completed_at"],
                     ),
                 )
+            if pending_attempt is not None:
+                self._close_pending_attempt(
+                    db, pending_attempt, event_id=attempt["event_id"]
+                )
             self._require_current_item_content_hash(
                 item_id=attempt["item_id"],
                 relative_path=item_row["relative_path"],
@@ -5139,7 +5270,30 @@ class WorkspaceService:
                 action="recording",
             )
 
-    def _record_agent_graded_attempt(self, attempt: dict[str, Any]) -> None:
+    @staticmethod
+    def _close_pending_attempt(
+        db: sqlite3.Connection, pending_attempt: dict[str, str], *, event_id: str
+    ) -> None:
+        """Mark a responded split-recall row as recorded by `event_id`."""
+        cursor = db.execute(
+            """UPDATE pending_attempts
+               SET state = 'recorded', attempt_event_id = ?, recorded_at = ?
+               WHERE attempt_token = ? AND state = 'responded'""",
+            (
+                event_id,
+                pending_attempt["recorded_at"],
+                pending_attempt["attempt_token"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise WorkspaceError("pending attempt is not awaiting a record")
+
+    def _record_agent_graded_attempt(
+        self,
+        attempt: dict[str, Any],
+        *,
+        pending_attempt: dict[str, str] | None = None,
+    ) -> None:
         """Append an agent-graded attempt as evidence only.
 
         No scheduler runs, no proposal is stored and current scheduler state
@@ -5218,6 +5372,10 @@ class WorkspaceService:
                     attempt["client"],
                 ),
             )
+            if pending_attempt is not None:
+                self._close_pending_attempt(
+                    db, pending_attempt, event_id=attempt["event_id"]
+                )
             self._require_current_item_content_hash(
                 item_id=attempt["item_id"],
                 relative_path=item_row["relative_path"],
@@ -5258,7 +5416,18 @@ class WorkspaceService:
         item_content_hash: str,
         occurred_at: str,
         surface: str,
+        pending_attempt_token: str | None = None,
     ) -> dict[str, str]:
+        """Append one skip event; the due date stays unchanged.
+
+        `pending_attempt_token` closes the open split-recall row for the
+        same item version in the same transaction (its state becomes
+        `expired`), so a skipped attempt can no longer be recorded. Only an
+        open row can be skipped: once a response is stored the attempt is
+        finished by recording it, and migration 20 refuses the skip in the
+        database too. The skip row keeps the token, so a replay can prove
+        which attempt the skip closed.
+        """
         if not isinstance(event_id, str) or not event_id.startswith("skip-"):
             raise WorkspaceError("review skip event id is invalid")
         if not isinstance(item_content_hash, str) or len(item_content_hash) != 64:
@@ -5305,11 +5474,23 @@ class WorkspaceService:
                 db.execute(
                     """
                     INSERT INTO review_skips(
-                        event_id, item_id, item_content_hash, occurred_at, surface
-                    ) VALUES (?, ?, ?, ?, ?)
+                        event_id, item_id, item_content_hash, occurred_at, surface,
+                        pending_attempt_token
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    tuple(payload.values()),
+                    (*payload.values(), pending_attempt_token),
                 )
+                if pending_attempt_token is not None:
+                    cursor = db.execute(
+                        """UPDATE pending_attempts SET state = 'expired'
+                           WHERE attempt_token = ?
+                             AND item_id = ?
+                             AND item_content_hash = ?
+                             AND state = 'open'""",
+                        (pending_attempt_token, item_id, item_content_hash),
+                    )
+                    if cursor.rowcount != 1:
+                        raise WorkspaceError("pending attempt is not open")
                 self._require_current_item_content_hash(
                     item_id=item_id,
                     relative_path=row["relative_path"],
@@ -5327,6 +5508,253 @@ class WorkspaceService:
                    FROM review_skips ORDER BY occurred_at, event_id"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # Split recall contract (docs/22). Every time below comes from the
+    # server's own clock; no caller supplies one. The database triggers from
+    # migration 19 enforce the forward-only states and the expiry.
+    _PENDING_ATTEMPT_COLUMNS = (
+        "attempt_token, item_id, item_content_hash, prompt_shown, response, "
+        "responded_at, state, attempt_event_id, surface, client, "
+        "hint_shown_at, recorded_at, created_at, expires_at"
+    )
+
+    def create_pending_attempt(
+        self,
+        *,
+        attempt_token: str,
+        item_id: str,
+        item_content_hash: str,
+        prompt_shown: str,
+        surface: str,
+        client: str | None,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        if not isinstance(attempt_token, str) or re.fullmatch(
+            r"[0-9a-f]{32,128}", attempt_token
+        ) is None:
+            raise WorkspaceError("pending attempt token must be 32 to 128 hex characters")
+        if not isinstance(surface, str) or not 1 <= len(surface) <= 64:
+            raise WorkspaceError("pending attempt surface must contain 1 to 64 characters")
+        if client is not None and (
+            not isinstance(client, str) or _CLIENT_NAME.fullmatch(client) is None
+        ):
+            raise WorkspaceError(
+                "pending attempt client must be null or 1 to 128 letters, digits, "
+                "spaces or . _ : / @ + -"
+            )
+        for value in (created_at, expires_at):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise WorkspaceError("pending attempt times must be timezone-aware")
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    """SELECT content_hash, relative_path, entry_mode,
+                              learning_unit_hash, retired_at
+                       FROM items WHERE item_id = ?""",
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(f"no learning item with id: {item_id}")
+                if row["retired_at"] is not None:
+                    raise WorkspaceError(f"learning item is retired: {item_id}")
+                if row["content_hash"] != item_content_hash:
+                    raise WorkspaceError(
+                        "stale item content; reload the item before starting recall"
+                    )
+                self._require_current_item_content_hash(
+                    item_id=item_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=item_content_hash,
+                    action="starting recall",
+                )
+                self._require_practice_ready_row(db, row, item_id=item_id)
+                created = created_at.astimezone(timezone.utc).isoformat()
+                # One live attempt per item (migration 20 index). A stored
+                # response that has not expired by this start's clock waits
+                # for its record, whatever item version it belongs to.
+                waiting = db.execute(
+                    """SELECT 1 FROM pending_attempts
+                       WHERE item_id = ? AND state = 'responded'
+                         AND NOT ifnull(julianday(?) > julianday(expires_at), 0)""",
+                    (item_id, created),
+                ).fetchone()
+                if waiting is not None:
+                    raise WorkspaceError(
+                        "pending attempt has a response and awaits recall_record"
+                    )
+                # In the same transaction as the insert: an expired response
+                # closes as expired and records nothing (docs/22), and an
+                # open attempt without a response is superseded, losing
+                # nothing. The database refuses the first before expires_at.
+                db.execute(
+                    """UPDATE pending_attempts SET state = 'expired'
+                       WHERE item_id = ? AND state = 'responded'""",
+                    (item_id,),
+                )
+                db.execute(
+                    """UPDATE pending_attempts SET state = 'expired'
+                       WHERE item_id = ? AND state = 'open'""",
+                    (item_id,),
+                )
+                db.execute(
+                    """INSERT INTO pending_attempts(
+                           attempt_token, item_id, item_content_hash, prompt_shown,
+                           surface, client, created_at, expires_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        attempt_token,
+                        item_id,
+                        item_content_hash,
+                        prompt_shown,
+                        surface,
+                        client,
+                        created,
+                        expires_at.astimezone(timezone.utc).isoformat(),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"pending attempt could not be opened: {exc}") from exc
+        stored = self.pending_attempt(attempt_token)
+        assert stored is not None
+        return stored
+
+    def attempt_awaiting_record(
+        self, item_id: str, *, now: datetime
+    ) -> dict[str, Any] | None:
+        """The item's unexpired pending attempt that has a response but no
+        record, if any, for any item version. `create_pending_attempt` and
+        migration 20 enforce the same rule on insert."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise WorkspaceError("pending attempt times must be timezone-aware")
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {self._PENDING_ATTEMPT_COLUMNS} FROM pending_attempts "
+                "WHERE item_id = ? AND state = 'responded' "
+                "AND julianday(expires_at) >= julianday(?) "
+                "ORDER BY expires_at DESC LIMIT 1",
+                (item_id, now.astimezone(timezone.utc).isoformat()),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def live_pending_attempt(self, item_id: str) -> dict[str, Any] | None:
+        """The item's live (open or responded) pending attempt, if any.
+
+        The migration 20 index allows one; should a damaged database hold
+        more, the newest is the live one and the others are refused.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {self._PENDING_ATTEMPT_COLUMNS} FROM pending_attempts "
+                "WHERE item_id = ? AND state IN ('open', 'responded') "
+                "ORDER BY julianday(created_at) DESC, rowid DESC LIMIT 1",
+                (item_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def pending_attempt(self, attempt_token: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {self._PENDING_ATTEMPT_COLUMNS} FROM pending_attempts "
+                "WHERE attempt_token = ?",
+                (attempt_token,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_pending_response(
+        self, *, attempt_token: str, response: str, responded_at: datetime
+    ) -> dict[str, Any]:
+        if not isinstance(response, str):
+            raise WorkspaceError("pending attempt response must be text")
+        if responded_at.tzinfo is None or responded_at.utcoffset() is None:
+            raise WorkspaceError("pending attempt times must be timezone-aware")
+        self._update_pending_attempt(
+            """UPDATE pending_attempts
+               SET state = 'responded', response = ?, responded_at = ?
+               WHERE attempt_token = ? AND state = 'open'""",
+            (
+                response,
+                responded_at.astimezone(timezone.utc).isoformat(),
+                attempt_token,
+            ),
+            refusal="pending attempt is not open",
+        )
+        stored = self.pending_attempt(attempt_token)
+        assert stored is not None
+        return stored
+
+    def record_pending_hint(
+        self, *, attempt_token: str, hint_shown_at: datetime
+    ) -> dict[str, Any]:
+        if hint_shown_at.tzinfo is None or hint_shown_at.utcoffset() is None:
+            raise WorkspaceError("pending attempt times must be timezone-aware")
+        self._update_pending_attempt(
+            """UPDATE pending_attempts SET hint_shown_at = ?
+               WHERE attempt_token = ? AND state = 'open'
+                 AND hint_shown_at IS NULL""",
+            (hint_shown_at.astimezone(timezone.utc).isoformat(), attempt_token),
+            refusal="pending attempt is not open for a hint",
+        )
+        stored = self.pending_attempt(attempt_token)
+        assert stored is not None
+        return stored
+
+    def _update_pending_attempt(
+        self, statement: str, parameters: tuple[Any, ...], *, refusal: str
+    ) -> None:
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                cursor = db.execute(statement, parameters)
+                if cursor.rowcount != 1:
+                    raise WorkspaceError(refusal)
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"pending attempt could not be updated: {exc}") from exc
+
+    def attempt_evidence(self, event_id: str) -> dict[str, Any] | None:
+        """One stored attempt with its proposal, if any, for a write receipt."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT event_id, item_id, item_content_hash, occurred_at,
+                          initial_response, initial_latency_ms, result, confidence,
+                          open_notes, agent_help, support_json, administered,
+                          graded_by, surface, client
+                   FROM attempts WHERE event_id = ?""",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            proposal = db.execute(
+                """SELECT proposal_id, algorithm, algorithm_version,
+                          learning_context, due_at
+                   FROM scheduler_proposals WHERE source_event_id = ?""",
+                (event_id,),
+            ).fetchone()
+        attempt = dict(row)
+        attempt["open_notes"] = bool(attempt["open_notes"])
+        attempt["administered"] = bool(attempt["administered"])
+        try:
+            attempt["support_actions"] = self._load_json(
+                attempt.pop("support_json"), label="attempt support JSON"
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise WorkspaceError(f"invalid attempt support JSON: {exc}") from exc
+        return {
+            "attempt": attempt,
+            "proposal": dict(proposal) if proposal is not None else None,
+        }
+
+    def review_skip(self, event_id: str) -> dict[str, Any] | None:
+        """One skip event with the pending attempt token it closed, if any."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT event_id, item_id, item_content_hash, occurred_at, surface,
+                          pending_attempt_token
+                   FROM review_skips WHERE event_id = ?""",
+                (event_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def list_proposals(self) -> list[dict[str, Any]]:
         with self._connect() as db:

@@ -459,7 +459,7 @@ class AnnotationContractTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-        self.assertEqual(version, 19)
+        self.assertEqual(version, 20)
         self.assertIn("annotations", tables)
 
     def test_question_set_hash_is_stable_and_changes_with_wording(self) -> None:

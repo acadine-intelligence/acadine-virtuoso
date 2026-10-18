@@ -596,7 +596,81 @@ def _parser() -> argparse.ArgumentParser:
         help="report which credential sources resolve per remote annotator, without values",
     )
     annotate_doctor.add_argument("--json", action="store_true")
+
+    serve = commands.add_parser(
+        "serve",
+        help="serve learning operations over MCP and HTTP (needs the [server] extra)",
+    )
+    serve.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        required=True,
+        help="stdio for a local MCP client, http for MCP at /mcp and JSON at /v1/ops",
+    )
+    serve.add_argument("--host", default="127.0.0.1", help="HTTP bind address")
+    serve.add_argument("--port", type=int, default=8765, help="HTTP port")
+    serve.add_argument(
+        "--token-file",
+        type=Path,
+        help="file holding the bearer token (owner-only); otherwise VIRTUOSO_SERVER_TOKEN",
+    )
+    serve.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="extra Host name to answer to, for example behind a proxy (repeatable)",
+    )
+    serve.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="browser Origin allowed to call the server (repeatable)",
+    )
     return parser
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """Run `virtuoso serve`. Imports the server extra only here."""
+    import os
+
+    from .server import SERVER_EXTRA_INSTALL, missing_server_dependencies
+
+    missing = missing_server_dependencies()
+    if missing:
+        print(
+            "Error: virtuoso serve needs the optional server extra "
+            f"(missing: {', '.join(missing)}). Install it with: {SERVER_EXTRA_INSTALL}",
+            file=sys.stderr,
+        )
+        return 2
+    from .server.operations import ServerCore
+    from .server.security import ServerConfigError, load_token
+
+    token = None
+    if args.transport == "http":
+        if not 0 <= args.port <= 65535:
+            print("Error: --port must be between 0 and 65535", file=sys.stderr)
+            return 2
+        try:
+            token = load_token(environ=os.environ, token_file=args.token_file)
+        except ServerConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+    workspace = WorkspaceService.open(args.workspace)
+    core = ServerCore(workspace)
+    from .server import transports
+
+    if args.transport == "stdio":
+        return transports.serve_stdio(core)
+    assert token is not None
+    return transports.serve_http(
+        core,
+        token=token,
+        host=args.host,
+        port=args.port,
+        allowed_hosts=tuple(args.allowed_host),
+        allowed_origins=tuple(args.allowed_origin),
+    )
 
 
 def _remote_annotator_lines(disclosure: dict[str, Any]) -> str:
@@ -644,6 +718,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.json,
             )
             return 0
+        if args.command == "serve":
+            return _serve(args)
 
         workspace = WorkspaceService.open(args.workspace)
         if args.command == "add":
