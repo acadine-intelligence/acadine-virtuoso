@@ -67,6 +67,9 @@ class AttemptRecord:
     graded_by: str = "learner"
     # The client that recorded the attempt, or None when it is not known.
     surface: str | None = None
+    # The client name the caller supplied beside the surface, or None. CLI
+    # attempts record None because the CLI is the surface itself.
+    client: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +263,7 @@ class PracticeService:
         allow_trusted: bool = False,
         graded_by: str = "learner",
         surface: str = "cli",
+        client: str | None = None,
     ) -> PracticeResult:
         """Record an agent-administered attempt with honest attribution.
 
@@ -275,6 +279,10 @@ class PracticeService:
         stores the attempt as evidence only: no scheduler or module runs,
         no proposal is written, and scheduler state and the due date stay
         unchanged. The result's `proposal` is then None.
+
+        `surface` names the recording client and `client` the client name a
+        caller supplies beside it. The CLI passes `surface="cli"` and no
+        client name.
         """
         if graded_by not in _GRADED_BY:
             raise PracticeError("graded_by must be learner or agent")
@@ -327,6 +335,7 @@ class PracticeService:
             administered=True,
             graded_by=graded_by,
             surface=surface,
+            client=client,
         )
         if graded_by == "agent":
             self._persist(attempt=attempt, proposal=None)
@@ -666,6 +675,7 @@ class PracticeService:
                     "administered": attempt.administered,
                     "graded_by": attempt.graded_by,
                     "surface": attempt.surface,
+                    "client": attempt.client,
                 },
                 proposal=None if proposal is None else {
                     "proposal_id": proposal.proposal_id,

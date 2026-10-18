@@ -1816,6 +1816,27 @@ class WorkspaceService:
                 )""",
             """ALTER TABLE attempts ADD COLUMN surface TEXT
                 CHECK(surface IS NULL OR length(surface) BETWEEN 1 AND 64)""",
+            # The client name the caller supplies beside the surface, for
+            # example an MCP client's own name. NULL means no name was given;
+            # CLI attempts record NULL because the CLI is the surface itself.
+            """ALTER TABLE attempts ADD COLUMN client TEXT
+                CHECK(
+                    client IS NULL
+                    OR (surface IS NOT NULL AND length(client) BETWEEN 1 AND 128)
+                )""",
+            # Attempts are append-only evidence. No code path updates or
+            # deletes an attempt, and a rewrite of graded_by from agent to
+            # learner would let an agent grade feed the scheduler.
+            """CREATE TRIGGER attempts_reject_update
+                BEFORE UPDATE ON attempts
+                BEGIN
+                    SELECT RAISE(ABORT, 'attempts is append-only');
+                END""",
+            """CREATE TRIGGER attempts_reject_delete
+                BEFORE DELETE ON attempts
+                BEGIN
+                    SELECT RAISE(ABORT, 'attempts is append-only');
+                END""",
             # An agent-graded attempt is evidence only. It never becomes the
             # source of a scheduler proposal or of current scheduler state.
             """CREATE TRIGGER scheduler_proposals_reject_agent_graded
@@ -1846,10 +1867,12 @@ class WorkspaceService:
                     SELECT RAISE(ABORT, 'agent-graded attempts do not feed the scheduler');
                 END""",
             # One open recall attempt for the split recall contract: the
-            # prompt shown, the learner's response once given, and its expiry.
-            # Rows move forward only (open -> responded -> recorded, or to
-            # expired) and are never deleted, so the table keeps the
-            # append-only intent of the evidence tables around it.
+            # prompt shown, whether and when a hint was shown, the learner's
+            # response once given, and its expiry. Rows move forward only
+            # (open -> responded -> recorded, or to expired) and are never
+            # deleted, so the table keeps the append-only intent of the
+            # evidence tables around it. A restarted server reads the hint
+            # state from hint_shown_at, so hint_used survives a restart.
             """CREATE TABLE IF NOT EXISTS pending_attempts (
                 attempt_token TEXT PRIMARY KEY
                     CHECK(length(attempt_token) BETWEEN 32 AND 128),
@@ -1868,9 +1891,13 @@ class WorkspaceService:
                     ON UPDATE RESTRICT
                     ON DELETE RESTRICT,
                 surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                client TEXT CHECK(client IS NULL OR length(client) BETWEEN 1 AND 128),
+                hint_shown_at TEXT,
+                recorded_at TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 CHECK((response IS NULL) = (responded_at IS NULL)),
+                CHECK((state = 'recorded') = (recorded_at IS NOT NULL)),
                 CHECK(
                     (state = 'open' AND response IS NULL AND attempt_event_id IS NULL)
                     OR (state = 'responded' AND response IS NOT NULL
@@ -1882,9 +1909,21 @@ class WorkspaceService:
             )""",
             """CREATE TRIGGER pending_attempts_require_open_insert
                 BEFORE INSERT ON pending_attempts
-                WHEN NEW.state IS NOT 'open'
+                WHEN NEW.state IS NOT 'open' OR NEW.hint_shown_at IS NOT NULL
                 BEGIN
                     SELECT RAISE(ABORT, 'pending attempts start open');
+                END""",
+            # Expiry is enforced here, not only by the server: both times
+            # must parse, and the expiry must come after creation.
+            # julianday() reads ISO 8601 offsets, so times written with
+            # different offsets compare as instants.
+            """CREATE TRIGGER pending_attempts_require_valid_expiry
+                BEFORE INSERT ON pending_attempts
+                WHEN julianday(NEW.created_at) IS NULL
+                    OR julianday(NEW.expires_at) IS NULL
+                    OR julianday(NEW.expires_at) <= julianday(NEW.created_at)
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt expiry must follow its creation');
                 END""",
             """CREATE TRIGGER pending_attempts_forward_only
                 BEFORE UPDATE ON pending_attempts
@@ -1893,6 +1932,7 @@ class WorkspaceService:
                     OR NEW.item_content_hash IS NOT OLD.item_content_hash
                     OR NEW.prompt_shown IS NOT OLD.prompt_shown
                     OR NEW.surface IS NOT OLD.surface
+                    OR NEW.client IS NOT OLD.client
                     OR NEW.created_at IS NOT OLD.created_at
                     OR NEW.expires_at IS NOT OLD.expires_at
                     OR NOT (
@@ -1901,6 +1941,19 @@ class WorkspaceService:
                             AND NEW.response IS NULL)
                         OR (OLD.state = 'responded'
                             AND NEW.state IN ('recorded', 'expired'))
+                        -- Recording the hint is the only same-state update.
+                        OR (OLD.state IN ('open', 'responded')
+                            AND NEW.state = OLD.state
+                            AND OLD.hint_shown_at IS NULL
+                            AND NEW.hint_shown_at IS NOT NULL)
+                    )
+                    -- hint_shown_at is set once, in its own update.
+                    OR (
+                        NEW.hint_shown_at IS NOT OLD.hint_shown_at
+                        AND NOT (
+                            OLD.hint_shown_at IS NULL
+                            AND NEW.state = OLD.state
+                        )
                     )
                     OR (
                         OLD.state <> 'open'
@@ -1909,6 +1962,8 @@ class WorkspaceService:
                             OR NEW.responded_at IS NOT OLD.responded_at
                         )
                     )
+                    -- The recorded attempt is the one this row opened: same
+                    -- item version, response, surface and client.
                     OR (
                         NEW.state = 'recorded'
                         AND NOT EXISTS (
@@ -1916,10 +1971,39 @@ class WorkspaceService:
                             WHERE event_id = NEW.attempt_event_id
                               AND item_id = NEW.item_id
                               AND item_content_hash = NEW.item_content_hash
+                              AND initial_response = NEW.response
+                              AND surface IS NEW.surface
+                              AND client IS NEW.client
                         )
                     )
                 BEGIN
                     SELECT RAISE(ABORT, 'pending attempt transition is not allowed');
+                END""",
+            # Nothing happens to a pending attempt after it expires: no
+            # response, no hint and no recording. A time that does not parse
+            # counts as after expiry. Moving to expired is always allowed.
+            """CREATE TRIGGER pending_attempts_reject_after_expiry
+                BEFORE UPDATE ON pending_attempts
+                WHEN (
+                        OLD.state = 'open' AND NEW.state = 'responded'
+                        AND NOT ifnull(
+                            julianday(NEW.responded_at) <= julianday(NEW.expires_at), 0
+                        )
+                    )
+                    OR (
+                        NEW.hint_shown_at IS NOT OLD.hint_shown_at
+                        AND NOT ifnull(
+                            julianday(NEW.hint_shown_at) <= julianday(NEW.expires_at), 0
+                        )
+                    )
+                    OR (
+                        NEW.state = 'recorded'
+                        AND NOT ifnull(
+                            julianday(NEW.recorded_at) <= julianday(NEW.expires_at), 0
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt has expired');
                 END""",
             """CREATE TRIGGER pending_attempts_reject_delete
                 BEFORE DELETE ON pending_attempts
@@ -2012,7 +2096,7 @@ class WorkspaceService:
                 16: statements[79:82],
                 17: statements[82:86],
                 18: statements[86:92],
-                19: statements[92:101],
+                19: statements[92:106],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -4642,6 +4726,7 @@ class WorkspaceService:
                 "administered",
                 "graded_by",
                 "surface",
+                "client",
             },
             "attempt",
         )
@@ -4655,6 +4740,15 @@ class WorkspaceService:
             raise WorkspaceError(
                 "attempt surface must be null or contain 1 to 64 characters"
             )
+        client = attempt["client"]
+        if client is not None and (
+            not isinstance(client, str) or not 1 <= len(client) <= 128
+        ):
+            raise WorkspaceError(
+                "attempt client must be null or contain 1 to 128 characters"
+            )
+        if client is not None and surface is None:
+            raise WorkspaceError("attempt client requires a surface")
         if graded_by == "agent":
             if proposal is not None or state_json is not None or module_receipt is not None:
                 raise WorkspaceError(
@@ -4933,8 +5027,8 @@ class WorkspaceService:
                     event_id, item_id, item_content_hash, occurred_at,
                     initial_response, initial_latency_ms, result, confidence,
                     open_notes, agent_help, support_json, administered,
-                    graded_by, surface
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    graded_by, surface, client
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt["event_id"],
@@ -4951,6 +5045,7 @@ class WorkspaceService:
                     int(administered),
                     graded_by,
                     surface,
+                    client,
                 ),
             )
             if not administered:
@@ -5105,8 +5200,8 @@ class WorkspaceService:
                     event_id, item_id, item_content_hash, occurred_at,
                     initial_response, initial_latency_ms, result, confidence,
                     open_notes, agent_help, support_json, administered,
-                    graded_by, surface
-                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 'agent', ?)
+                    graded_by, surface, client
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 'agent', ?, ?)
                 """,
                 (
                     attempt["event_id"],
@@ -5120,6 +5215,7 @@ class WorkspaceService:
                     attempt["agent_help"],
                     support_json,
                     attempt["surface"],
+                    attempt["client"],
                 ),
             )
             self._require_current_item_content_hash(

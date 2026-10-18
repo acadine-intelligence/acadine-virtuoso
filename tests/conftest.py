@@ -82,11 +82,16 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
 
 
 def downgrade_server_core_to_v18(db: sqlite3.Connection) -> None:
-    """Remove migration 19 attempt grader and surface columns, the
-    agent-graded scheduler guards, and the pending-attempt table."""
+    """Remove migration 19 attempt grader, surface and client columns, the
+    append-only attempt triggers, the agent-graded scheduler guards, and the
+    pending-attempt table with its triggers."""
     for trigger in (
+        "attempts_reject_update",
+        "attempts_reject_delete",
         "pending_attempts_require_open_insert",
+        "pending_attempts_require_valid_expiry",
         "pending_attempts_forward_only",
+        "pending_attempts_reject_after_expiry",
         "pending_attempts_reject_delete",
         "scheduler_proposals_reject_agent_graded",
         "scheduler_state_reject_agent_graded_insert",
@@ -95,7 +100,8 @@ def downgrade_server_core_to_v18(db: sqlite3.Connection) -> None:
         db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     db.execute("DROP TABLE IF EXISTS pending_attempts")
     columns = {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
-    for column in ("surface", "graded_by"):
+    # client's CHECK names surface, so client goes first.
+    for column in ("client", "surface", "graded_by"):
         if column in columns:
             db.execute(f"ALTER TABLE attempts DROP COLUMN {column}")
     db.execute("DELETE FROM schema_migrations WHERE version >= 19")

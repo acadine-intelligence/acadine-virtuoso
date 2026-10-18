@@ -106,15 +106,17 @@ class MigrationNineteenTests(_Fixture):
         )}
         self.assertIn("graded_by", columns)
         self.assertIn("surface", columns)
+        self.assertIn("client", columns)
         self.assertEqual(columns["graded_by"][3], 1)  # NOT NULL
         self.assertEqual(columns["surface"][3], 0)  # nullable: NULL means unknown
+        self.assertEqual(columns["client"][3], 0)  # nullable: NULL means not named
         pending = {row[1] for row in _rows(
             self.workspace.db_path, "PRAGMA table_info(pending_attempts)"
         )}
         self.assertEqual(pending, {
             "attempt_token", "item_id", "item_content_hash", "prompt_shown",
             "response", "responded_at", "state", "attempt_event_id", "surface",
-            "created_at", "expires_at",
+            "client", "hint_shown_at", "recorded_at", "created_at", "expires_at",
         })
 
     def test_upgrade_from_v18_backfills_learner_and_unknown_surface(self) -> None:
@@ -139,11 +141,13 @@ class MigrationNineteenTests(_Fixture):
         upgraded = _rows(
             reopened.db_path,
             "SELECT event_id, item_id, result, confidence, administered,"
-            " initial_latency_ms, graded_by, surface FROM attempts ORDER BY event_id",
+            " initial_latency_ms, graded_by, surface, client FROM attempts"
+            " ORDER BY event_id",
         )
         self.assertEqual([row[:6] for row in upgraded], legacy)
         self.assertEqual({row[6] for row in upgraded}, {"learner"})
         self.assertEqual({row[7] for row in upgraded}, {None})
+        self.assertEqual({row[8] for row in upgraded}, {None})
         self.assertEqual(_scheduler_rows(reopened.db_path), state_before)
         self.assertEqual(_proposal_rows(reopened.db_path), proposals_before)
         self.assertEqual(
@@ -151,14 +155,86 @@ class MigrationNineteenTests(_Fixture):
         )
         self.assertEqual(_rows(reopened.db_path, "SELECT COUNT(*) FROM pending_attempts"), [(0,)])
 
+    def _insert_attempt(
+        self, db: sqlite3.Connection, *, graded_by: str, administered: int
+    ) -> None:
+        item = self.workspace.load_item("item-a")
+        db.execute(
+            """INSERT INTO attempts(
+                   event_id, item_id, item_content_hash, occurred_at,
+                   initial_response, initial_latency_ms, result, confidence,
+                   open_notes, agent_help, support_json, administered, graded_by)
+               VALUES ('attempt-raw', 'item-a', ?, ?, 'r', ?, 'partial', 3, 0,
+                       'none', '[]', ?, ?)""",
+            (item.content_hash, self.now.isoformat(),
+             None if administered else 100, administered, graded_by),
+        )
+
     def test_schema_rejects_unknown_grader_and_measured_agent_grade(self) -> None:
-        self._learner("item-a", "demonstrated", 4)
         with sqlite3.connect(self.workspace.db_path) as db:
             with self.assertRaises(sqlite3.IntegrityError):
-                db.execute("UPDATE attempts SET graded_by = 'model'")
+                self._insert_attempt(db, graded_by="model", administered=1)
             with self.assertRaises(sqlite3.IntegrityError):
                 # A measured (non-administered) attempt cannot be agent-graded.
-                db.execute("UPDATE attempts SET graded_by = 'agent'")
+                self._insert_attempt(db, graded_by="agent", administered=0)
+            # Control: the same row with a valid grader is accepted.
+            self._insert_attempt(db, graded_by="agent", administered=1)
+
+    def test_attempts_reject_update_and_delete(self) -> None:
+        # Attempts are append-only evidence. Rewriting an agent grade as a
+        # learner grade by plain SQL would let it feed the scheduler.
+        self._learner("item-a", "demonstrated", 4)
+        agent = self._agent("item-b")
+        query = "SELECT * FROM attempts ORDER BY event_id"
+        before = _rows(self.workspace.db_path, query)
+        with sqlite3.connect(self.workspace.db_path) as db:
+            for statement, params in [
+                ("UPDATE attempts SET graded_by = 'learner' WHERE event_id = ?",
+                 (agent.attempt.event_id,)),
+                ("UPDATE attempts SET result = 'demonstrated' WHERE event_id = ?",
+                 (agent.attempt.event_id,)),
+                ("UPDATE attempts SET confidence = 5", ()),
+                ("UPDATE attempts SET surface = 'mcp'", ()),
+                ("DELETE FROM attempts WHERE event_id = ?", (agent.attempt.event_id,)),
+                ("DELETE FROM attempts", ()),
+            ]:
+                with self.subTest(statement=statement):
+                    with self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "attempts is append-only"
+                    ):
+                        db.execute(statement, params)
+        self.assertEqual(_rows(self.workspace.db_path, query), before)
+        self.assertEqual(
+            [a["graded_by"] for a in self.workspace.list_attempts()
+             if a["event_id"] == agent.attempt.event_id],
+            ["agent"],
+        )
+
+    def test_scheduler_state_update_rejects_agent_graded_source(self) -> None:
+        # The learner grade creates state for item-a. Pointing that state at
+        # a later agent-graded attempt, with new state derived from it, must
+        # fail and leave the learner-derived state in place.
+        self._learner("item-a", "demonstrated", 4)
+        agent = self._agent("item-a", result="not-demonstrated", confidence=1)
+        before = _scheduler_rows(self.workspace.db_path)
+        self.assertEqual(len(before), 1)
+        derived = json.dumps({"due": (self.now + timedelta(minutes=6)).isoformat()})
+        with sqlite3.connect(self.workspace.db_path) as db:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "agent-graded attempts do not feed the scheduler"
+            ):
+                db.execute(
+                    "UPDATE scheduler_state SET source_event_id = ?, state_json = ?,"
+                    " updated_at = ? WHERE item_id = 'item-a'",
+                    (agent.attempt.event_id, derived,
+                     (self.now + timedelta(minutes=5)).isoformat()),
+                )
+            # Control: an update that keeps the learner source is accepted.
+            db.execute(
+                "UPDATE scheduler_state SET updated_at = updated_at"
+                " WHERE item_id = 'item-a'"
+            )
+        self.assertEqual(_scheduler_rows(self.workspace.db_path), before)
 
     def test_schema_rejects_scheduler_writes_sourced_from_agent_grades(self) -> None:
         result = self._agent("item-a")
@@ -187,41 +263,87 @@ class MigrationNineteenTests(_Fixture):
 
 
 class PendingAttemptTableTests(_Fixture):
-    def _open(self, db: sqlite3.Connection, token: str = "t" * 32) -> None:
+    TOKEN = "t" * 32
+    CLIENT = "Example Client"
+    RESPONSE = "the learner's transcribed answer"
+
+    def _open(
+        self,
+        db: sqlite3.Connection,
+        token: str = TOKEN,
+        *,
+        content_hash: str | None = None,
+        client: str | None = CLIENT,
+        created_at: str | None = None,
+        expires_at: str | None = None,
+    ) -> None:
         item = self.workspace.load_item("item-a")
         db.execute(
             """INSERT INTO pending_attempts(
                    attempt_token, item_id, item_content_hash, prompt_shown,
-                   surface, created_at, expires_at)
-               VALUES (?, 'item-a', ?, ?, 'mcp', ?, ?)""",
-            (token, item.content_hash, item.prompt, self.now.isoformat(),
-             (self.now + timedelta(minutes=30)).isoformat()),
+                   surface, client, created_at, expires_at)
+               VALUES (?, 'item-a', ?, ?, 'mcp', ?, ?, ?)""",
+            (token, content_hash or item.content_hash, item.prompt, client,
+             created_at or self.now.isoformat(),
+             expires_at or (self.now + timedelta(minutes=30)).isoformat()),
         )
 
+    def _respond(self, db: sqlite3.Connection, minutes: int = 1) -> None:
+        db.execute(
+            "UPDATE pending_attempts SET state = 'responded', response = ?,"
+            " responded_at = ?",
+            (self.RESPONSE, (self.now + timedelta(minutes=minutes)).isoformat()),
+        )
+
+    def _record(self, db: sqlite3.Connection, event_id: str, minutes: int = 2) -> None:
+        db.execute(
+            "UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?,"
+            " recorded_at = ?",
+            (event_id, (self.now + timedelta(minutes=minutes)).isoformat()),
+        )
+
+    def _server_attempt(
+        self,
+        item_id: str = "item-a",
+        *,
+        response: str = RESPONSE,
+        surface: str = "mcp",
+        client: str | None = CLIENT,
+    ) -> str:
+        return PracticeService(self.workspace).run_administered(
+            item_id=item_id,
+            response=response,
+            result="partial",
+            confidence=3,
+            graded_by="agent",
+            surface=surface,
+            client=client,
+            now=self.now + timedelta(minutes=2),
+        ).attempt.event_id
+
+    def _state(self) -> tuple:
+        return _rows(
+            self.workspace.db_path,
+            "SELECT state, response, hint_shown_at, attempt_event_id, recorded_at"
+            " FROM pending_attempts",
+        )[0]
+
     def test_forward_lifecycle_open_responded_recorded(self) -> None:
-        recorded = self._agent("item-a")
+        recorded = self._server_attempt()
         with sqlite3.connect(self.workspace.db_path) as db:
             db.execute("PRAGMA foreign_keys = ON")
             self._open(db)
             self.assertEqual(
-                db.execute("SELECT state, response FROM pending_attempts").fetchone(),
-                ("open", None),
+                db.execute("SELECT state, response, client FROM pending_attempts").fetchone(),
+                ("open", None, self.CLIENT),
             )
-            db.execute(
-                "UPDATE pending_attempts SET state = 'responded', response = 'x',"
-                " responded_at = ?", (self.now.isoformat(),),
-            )
-            db.execute(
-                "UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?",
-                (recorded.attempt.event_id,),
-            )
-            self.assertEqual(
-                db.execute("SELECT state FROM pending_attempts").fetchone(), ("recorded",)
-            )
+            self._respond(db)
+            self._record(db, recorded)
+        self.assertEqual(self._state()[0], "recorded")
+        self.assertEqual(self._state()[3], recorded)
 
     def test_rejects_invalid_inserts_transitions_and_deletes(self) -> None:
-        recorded = self._agent("item-a")
-        other = self._agent("item-b")
+        recorded = self._server_attempt()
         item = self.workspace.load_item("item-a")
         with sqlite3.connect(self.workspace.db_path) as db:
             db.execute("PRAGMA foreign_keys = ON")
@@ -238,6 +360,7 @@ class PendingAttemptTableTests(_Fixture):
             rejected = [
                 "UPDATE pending_attempts SET state = 'recorded'",
                 "UPDATE pending_attempts SET prompt_shown = 'other prompt'",
+                "UPDATE pending_attempts SET client = 'Other Client'",
                 "UPDATE pending_attempts SET expires_at = '2099-01-01T00:00:00+00:00'",
                 "UPDATE pending_attempts SET state = 'expired', response = 'late'",
                 "DELETE FROM pending_attempts",
@@ -246,32 +369,212 @@ class PendingAttemptTableTests(_Fixture):
                 with self.subTest(statement=statement):
                     with self.assertRaises(sqlite3.IntegrityError):
                         db.execute(statement)
-            db.execute(
-                "UPDATE pending_attempts SET state = 'responded', response = 'x',"
-                " responded_at = ?", (self.now.isoformat(),),
-            )
-            for statement, params in [
-                ("UPDATE pending_attempts SET response = 'changed'", ()),
-                ("UPDATE pending_attempts SET state = 'open', response = NULL,"
-                 " responded_at = NULL", ()),
-                # The recorded attempt must be for the same item version.
-                ("UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?",
-                 (other.attempt.event_id,)),
-            ]:
+            self._respond(db)
+            for statement in (
+                "UPDATE pending_attempts SET response = 'changed'",
+                "UPDATE pending_attempts SET state = 'open', response = NULL,"
+                " responded_at = NULL",
+            ):
                 with self.subTest(statement=statement):
                     with self.assertRaises(sqlite3.IntegrityError):
-                        db.execute(statement, params)
-            db.execute(
-                "UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?",
-                (recorded.attempt.event_id,),
-            )
+                        db.execute(statement)
+            self._record(db, recorded)
             for statement in (
                 "UPDATE pending_attempts SET state = 'expired'",
+                "UPDATE pending_attempts SET recorded_at = NULL",
                 "DELETE FROM pending_attempts",
             ):
                 with self.subTest(statement=statement):
                     with self.assertRaises(sqlite3.IntegrityError):
                         db.execute(statement)
+
+    def test_insert_requires_parseable_expiry_after_creation(self) -> None:
+        later = (self.now + timedelta(minutes=30)).isoformat()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            for label, kwargs in [
+                ("unparseable expiry", {"expires_at": "soon"}),
+                ("unparseable creation", {"created_at": "today"}),
+                ("expiry at creation", {"expires_at": self.now.isoformat()}),
+                ("expiry before creation",
+                 {"created_at": later, "expires_at": self.now.isoformat()}),
+                ("blank client", {"client": ""}),
+            ]:
+                with self.subTest(label=label):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        self._open(db, **kwargs)
+            # Control: a NULL client means the caller did not name one.
+            self._open(db, client=None)
+        self.assertEqual(
+            _rows(self.workspace.db_path, "SELECT client FROM pending_attempts"), [(None,)]
+        )
+
+    def test_responded_but_expired_row_cannot_be_recorded(self) -> None:
+        recorded = self._server_attempt()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            self._open(db, expires_at=(self.now + timedelta(minutes=10)).isoformat())
+            self._respond(db, minutes=5)
+            for label, recorded_at in [
+                ("after expiry", (self.now + timedelta(minutes=11)).isoformat()),
+                # Same instant written with another offset is still after.
+                ("after expiry in another offset",
+                 (self.now + timedelta(minutes=10, seconds=1)).astimezone(
+                     timezone(timedelta(hours=2))).isoformat()),
+                ("missing recording time", None),
+                ("unparseable recording time", "later"),
+            ]:
+                with self.subTest(label=label):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(
+                            "UPDATE pending_attempts SET state = 'recorded',"
+                            " attempt_event_id = ?, recorded_at = ?",
+                            (recorded, recorded_at),
+                        )
+            # The expired row can still move to expired, recording nothing.
+            db.execute("UPDATE pending_attempts SET state = 'expired'")
+        self.assertEqual(self._state()[0], "expired")
+        self.assertIsNone(self._state()[3])
+
+    def test_recording_exactly_at_expiry_is_accepted(self) -> None:
+        recorded = self._server_attempt()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            self._open(db, expires_at=(self.now + timedelta(minutes=10)).isoformat())
+            self._respond(db, minutes=5)
+            self._record(db, recorded, minutes=10)
+        self.assertEqual(self._state()[0], "recorded")
+
+    def test_response_after_expiry_is_rejected(self) -> None:
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self._open(db, expires_at=(self.now + timedelta(minutes=10)).isoformat())
+            with self.assertRaises(sqlite3.IntegrityError):
+                self._respond(db, minutes=11)
+        self.assertEqual(self._state()[0], "open")
+
+    def test_recorded_attempt_must_match_the_pending_row(self) -> None:
+        matching = self._server_attempt()
+        mismatches = {
+            "other item": self._server_attempt("item-b"),
+            "other surface": self._server_attempt(surface="http"),
+            "other client": self._server_attempt(client="Other Client"),
+            "no client": self._server_attempt(client=None),
+            "other response": self._server_attempt(response="a different answer"),
+        }
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            # A pending row for another version of item-a.
+            self._open(db, "v" * 32, content_hash="f" * 64)
+            db.execute(
+                "UPDATE pending_attempts SET state = 'responded', response = ?,"
+                " responded_at = ?",
+                (self.RESPONSE, (self.now + timedelta(minutes=1)).isoformat()),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                self._record(db, matching)
+            self._open(db)
+            db.execute(
+                "UPDATE pending_attempts SET state = 'responded', response = ?,"
+                " responded_at = ? WHERE attempt_token = ?",
+                (self.RESPONSE, (self.now + timedelta(minutes=1)).isoformat(), self.TOKEN),
+            )
+            for label, event_id in mismatches.items():
+                with self.subTest(label=label):
+                    with self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "pending attempt transition is not allowed"
+                    ):
+                        db.execute(
+                            "UPDATE pending_attempts SET state = 'recorded',"
+                            " attempt_event_id = ?, recorded_at = ?"
+                            " WHERE attempt_token = ?",
+                            (event_id, (self.now + timedelta(minutes=2)).isoformat(),
+                             self.TOKEN),
+                        )
+            db.execute(
+                "UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?,"
+                " recorded_at = ? WHERE attempt_token = ?",
+                (matching, (self.now + timedelta(minutes=2)).isoformat(), self.TOKEN),
+            )
+        self.assertEqual(
+            _rows(
+                self.workspace.db_path,
+                "SELECT attempt_token, state, attempt_event_id FROM pending_attempts"
+                " ORDER BY attempt_token",
+            ),
+            [(self.TOKEN, "recorded", matching), ("v" * 32, "responded", None)],
+        )
+
+    def test_hint_state_is_set_once_and_survives_a_restart(self) -> None:
+        hinted_at = (self.now + timedelta(minutes=1)).isoformat()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self._open(db)
+            db.execute("UPDATE pending_attempts SET hint_shown_at = ?", (hinted_at,))
+            for statement, params in [
+                ("UPDATE pending_attempts SET hint_shown_at = NULL", ()),
+                ("UPDATE pending_attempts SET hint_shown_at = ?",
+                 ((self.now + timedelta(minutes=2)).isoformat(),)),
+            ]:
+                with self.subTest(statement=statement):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(statement, params)
+        reopened = WorkspaceService.open(self.root)
+        reopened.doctor()
+        self.assertEqual(
+            _rows(reopened.db_path, "SELECT state, hint_shown_at FROM pending_attempts"),
+            [("open", hinted_at)],
+        )
+
+    def test_hint_after_response_is_allowed_but_not_after_expiry_or_recording(self) -> None:
+        recorded = self._server_attempt()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            self._open(db, expires_at=(self.now + timedelta(minutes=10)).isoformat())
+            self._open(db, "u" * 32)
+            # A hint time after expiry is rejected.
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "UPDATE pending_attempts SET hint_shown_at = ? WHERE attempt_token = ?",
+                    ((self.now + timedelta(minutes=11)).isoformat(), self.TOKEN),
+                )
+            self._respond(db)
+            # A hint after the response, before reveal, is allowed.
+            db.execute(
+                "UPDATE pending_attempts SET hint_shown_at = ? WHERE attempt_token = ?",
+                ((self.now + timedelta(minutes=2)).isoformat(), self.TOKEN),
+            )
+            db.execute(
+                "UPDATE pending_attempts SET state = 'recorded', attempt_event_id = ?,"
+                " recorded_at = ? WHERE attempt_token = ?",
+                (recorded, (self.now + timedelta(minutes=3)).isoformat(), self.TOKEN),
+            )
+            db.execute(
+                "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                ("u" * 32,),
+            )
+            for token in (self.TOKEN, "u" * 32):
+                with self.subTest(token=token[0]):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(
+                            "UPDATE pending_attempts SET hint_shown_at = ?"
+                            " WHERE attempt_token = ?",
+                            ((self.now + timedelta(minutes=4)).isoformat(), token),
+                        )
+
+    def test_state_change_cannot_clear_or_rewrite_the_hint(self) -> None:
+        hinted_at = (self.now + timedelta(minutes=1)).isoformat()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self._open(db)
+            db.execute("UPDATE pending_attempts SET hint_shown_at = ?", (hinted_at,))
+            for statement, params in [
+                ("UPDATE pending_attempts SET state = 'responded', response = 'x',"
+                 " responded_at = ?, hint_shown_at = NULL", (hinted_at,)),
+                ("UPDATE pending_attempts SET state = 'expired', hint_shown_at = NULL", ()),
+                ("UPDATE pending_attempts SET state = 'expired', hint_shown_at = ?",
+                 ((self.now + timedelta(minutes=2)).isoformat(),)),
+            ]:
+                with self.subTest(statement=statement):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(statement, params)
+        self.assertEqual(self._state()[:3], ("open", None, hinted_at))
 
 
 class AgentGradedWritePathTests(_Fixture):
@@ -319,10 +622,12 @@ class AgentGradedWritePathTests(_Fixture):
         self.assertEqual(state[0][3], state[1][3])
         self._learner("item-c", "demonstrated", 5)
         by_item = {a["item_id"]: a for a in self.workspace.list_attempts()}
+        # CLI attempts name no client: the CLI is the surface itself.
         self.assertEqual(
-            {item: (a["graded_by"], a["surface"]) for item, a in by_item.items()},
-            {"item-a": ("learner", "cli"), "item-b": ("learner", "cli"),
-             "item-c": ("learner", "cli")},
+            {item: (a["graded_by"], a["surface"], a["client"])
+             for item, a in by_item.items()},
+            {"item-a": ("learner", "cli", None), "item-b": ("learner", "cli", None),
+             "item-c": ("learner", "cli", None)},
         )
 
     def test_record_attempt_enforces_grader_and_proposal_pairing(self) -> None:
@@ -347,6 +652,7 @@ class AgentGradedWritePathTests(_Fixture):
             "administered": True,
             "graded_by": "agent",
             "surface": "cli",
+            "client": None,
         }
         proposal = {
             "proposal_id": "proposal-x",
@@ -369,6 +675,10 @@ class AgentGradedWritePathTests(_Fixture):
             ("unknown grader", {**base, "graded_by": "model"}, None, None),
             ("measured agent grade", {**base, "administered": False}, None, None),
             ("bad surface", {**base, "surface": ""}, None, None),
+            ("blank client", {**base, "client": ""}, None, None),
+            ("non-text client", {**base, "client": 7}, None, None),
+            ("overlong client", {**base, "client": "c" * 129}, None, None),
+            ("client without surface", {**base, "surface": None, "client": "X"}, None, None),
         ]
         for label, attempt, prop, state in cases:
             with self.subTest(label=label):
@@ -378,6 +688,34 @@ class AgentGradedWritePathTests(_Fixture):
                     )
                 self.assertEqual(self.workspace.db_path.read_bytes(), before)
         self.assertEqual(stored["graded_by"], "learner")
+        self.assertIsNone(stored["client"])
+
+    def test_server_style_attempt_records_its_client_name(self) -> None:
+        for item_id, graded_by in (("item-a", "agent"), ("item-b", "learner")):
+            result = PracticeService(self.workspace).run_administered(
+                item_id=item_id, response="r", result="partial", confidence=3,
+                graded_by=graded_by, surface="mcp", client="Example Client",
+                now=self.now,
+            )
+            self.assertEqual(result.attempt.client, "Example Client")
+        stored = self.workspace.list_attempts()
+        self.assertEqual(
+            sorted((a["graded_by"], a["surface"], a["client"]) for a in stored),
+            [("agent", "mcp", "Example Client"), ("learner", "mcp", "Example Client")],
+        )
+        with sqlite3.connect(self.workspace.db_path) as db:
+            # The schema refuses a client name without a surface.
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    """INSERT INTO attempts(
+                           event_id, item_id, item_content_hash, occurred_at,
+                           initial_response, initial_latency_ms, result, confidence,
+                           open_notes, agent_help, support_json, administered,
+                           graded_by, surface, client)
+                       VALUES ('attempt-raw', 'item-a', ?, ?, 'r', NULL, 'partial',
+                               3, 0, 'none', '[]', 1, 'agent', NULL, 'X')""",
+                    (self.workspace.load_item("item-a").content_hash, self.now.isoformat()),
+                )
 
     def test_agent_grade_rejects_unknown_grader_value(self) -> None:
         with self.assertRaises(Exception):
@@ -467,8 +805,8 @@ class PracticeAdministerGradedByCliTests(_CliFixture):
         self.assertEqual(self.cli("queries", "workload", "--json").stdout, workload_before)
         attempts = json.loads(self.cli("attempts", "--json").stdout)["attempts"]
         self.assertEqual(
-            sorted((a["graded_by"], a["surface"]) for a in attempts),
-            [("agent", "cli"), ("learner", "cli")],
+            sorted((a["graded_by"], a["surface"], a["client"]) for a in attempts),
+            [("agent", "cli", None), ("learner", "cli", None)],
         )
 
     def test_graded_by_requires_administer_and_a_known_value(self) -> None:
@@ -476,7 +814,19 @@ class PracticeAdministerGradedByCliTests(_CliFixture):
         failed = self.cli(
             "practice", "--item", "item-a", "--graded-by", "agent", expected=2
         )
-        self.assertIn("--graded-by", failed.stderr)
+        self.assertIn(
+            "--graded-by applies only to agent-administered practice; add --administer",
+            failed.stderr,
+        )
+        failed = self.cli(
+            "practice", "--item", "item-a", "--response", "r", "--graded-by", "agent",
+            expected=2,
+        )
+        self.assertIn(
+            "--response, --graded-by apply only to agent-administered practice;"
+            " add --administer",
+            failed.stderr,
+        )
         self._administer("--graded-by", "model", expected=2)
         self.assertEqual(self.workspace.db_path.read_bytes(), before)
 
@@ -580,7 +930,8 @@ class ReviewRecordStaysLearnerGradedTests(_CliFixture):
         })
         attempts = json.loads(self.cli("attempts", "--json").stdout)["attempts"]
         self.assertEqual(
-            [(a["graded_by"], a["surface"]) for a in attempts], [("learner", None)]
+            [(a["graded_by"], a["surface"], a["client"]) for a in attempts],
+            [("learner", None, None)],
         )
         self.assertEqual(len(_scheduler_rows(self.workspace.db_path)), 1)
 
@@ -629,6 +980,26 @@ class QuerySchemaTests(_CliFixture):
         self.assertEqual(by_focus["db"]["attempts"], 0)
         summaries = {s.focus: s for s in focus_performance(self.workspace.db_path)}
         self.assertEqual(summaries["ml"].agent_graded, 2)
+
+    def test_focus_mean_confidence_covers_learner_grades_only(self) -> None:
+        # Learner confidences 4 and 2 average 3.0. The agent grades at
+        # confidence 1 would pull an all-attempt mean down to 2.0.
+        self._learner("item-a", "demonstrated", 4)
+        PracticeService(self.workspace).run_administered(
+            item_id="item-b", response="r", result="partial", confidence=2, now=self.now,
+        )
+        self._agent("item-a", result="not-demonstrated", confidence=1)
+        self._agent("item-b", result="not-demonstrated", confidence=1)
+        summaries = {s.focus: s for s in focus_performance(self.workspace.db_path)}
+        self.assertEqual(summaries["ml"].mean_confidence, 3.0)
+        payload = json.loads(self.cli("queries", "focus", "--json").stdout)
+        by_focus = {entry["focus"]: entry for entry in payload["focuses"]}
+        self.assertEqual(by_focus["ml"]["mean_confidence"], 3.0)
+        # An agent grade alone gives no learner mean at all.
+        self._agent("item-c", result="demonstrated", confidence=5)
+        summaries = {s.focus: s for s in focus_performance(self.workspace.db_path)}
+        self.assertIsNone(summaries["db"].mean_confidence)
+        self.assertEqual(summaries["db"].agent_graded, 1)
 
 
 if __name__ == "__main__":

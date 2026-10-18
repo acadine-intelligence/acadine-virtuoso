@@ -846,9 +846,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if value is not None
             ]
             if supplied:
+                verb = "applies" if len(supplied) == 1 else "apply"
                 raise WorkspaceError(
                     ", ".join(supplied)
-                    + " only apply to agent-administered practice; add --administer"
+                    + f" {verb} only to agent-administered practice; add --administer"
                 )
             context = _practice_display_context(workspace, args.item)
             PracticeService(workspace).run(

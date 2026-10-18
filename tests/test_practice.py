@@ -356,6 +356,7 @@ class PracticeServiceTests(unittest.TestCase):
             "administered": attempt.administered,
             "graded_by": attempt.graded_by,
             "surface": attempt.surface,
+            "client": attempt.client,
         }
         proposal_payload = {
             "proposal_id": proposal.proposal_id,

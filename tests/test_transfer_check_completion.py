@@ -357,6 +357,7 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "administered": False,
                 "graded_by": "learner",
                 "surface": "cli",
+                "client": None,
             },
             proposal={
                 "proposal_id": "proposal-" + "b" * 32,

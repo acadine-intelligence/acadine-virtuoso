@@ -360,6 +360,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             "administered": False,
             "graded_by": "learner",
             "surface": "cli",
+            "client": None,
         }
         proposal = {
             "proposal_id": f"proposal-{event_id}",
@@ -627,9 +628,20 @@ class WorkspaceServiceTests(unittest.TestCase):
                 .replace("'not-demonstrated'", "'NOT-DEMONSTRATED'")
             )
             self.assertNotEqual(changed_sql, original_sql)
+            # Dropping the table drops its own triggers; restore them so the
+            # changed CHECK constraint is the only difference.
+            attempt_triggers = [
+                row[0]
+                for row in db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger'"
+                    " AND tbl_name = 'attempts'"
+                ).fetchall()
+            ]
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE attempts")
             db.execute(changed_sql)
+            for trigger_sql in attempt_triggers:
+                db.execute(trigger_sql)
 
         with self.assertRaisesRegex(
             WorkspaceError, "attempts constraints or definition do not match"
