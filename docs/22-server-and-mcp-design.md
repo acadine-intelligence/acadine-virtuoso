@@ -9,7 +9,7 @@ Virtuoso gets one open-source server, `virtuoso serve`. It exposes a fixed set o
 - **Self-hosted.** A learner runs the server against their own workspace, on their own machine or host.
 - **Hosted.** An operator runs the same server for many learners. Each learner gets an isolated workspace. The operator supplies sign-in and account management in front of the server.
 
-The server is MIT-licensed like the rest of the repository. The CLI stays the reference behavior. The standalone CLI path, its runtime dependencies, and its JSON contracts do not change.
+The server is MIT-licensed like the rest of the repository. The CLI stays the reference behavior. The standalone CLI path and its runtime dependencies do not change. CLI JSON contracts change only where the core changes listed under "Core changes" add fields, and each such schema gets a version bump.
 
 ## Why now
 
@@ -78,7 +78,7 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 
 The current review contract returns the answer in the item snapshot and trusts the interface to hide it. A chat model is not a trustworthy interface for that rule: once the answer is in its context, it can leak it. So the server splits recall into `recall_start`, `recall_respond`, `recall_reveal`, and `recall_record`. The server holds the open attempt and refuses to reveal the answer before a response exists. A blank response cannot be graded `demonstrated`, matching the CLI.
 
-The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new and lands in the same phase 1 migration as `graded_by` and an attempt `surface` column. Attempts have no `surface` column today; only skips, study events and annotations carry one. Apart from that migration and the composition filter, the core services stay as they are. A restarted server can still finish or expire it. An expired attempt records nothing.
+The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new. A restarted server can still finish or expire it. An expired attempt records nothing.
 
 ### Evidence honesty
 
@@ -89,6 +89,17 @@ The open attempt lives in the workspace database as a pending row with an expiry
 - `learner` means the learner chose the grade, even when an agent relayed it. This is what `practice --administer` records today, and it keeps feeding the scheduler on both the CLI and the server.
 - An agent-graded result is stored as evidence only. It does not feed the scheduler, does not change a due date, and is excluded from the attempt rows that composition reads to choose the next target. Phase 1 adds `--graded-by` to `practice --administer` with the same rule, defaulting to `learner`, so the CLI and the server agree. That changes only after a tracer shows agent grades agree with learner grades on the same attempts, and after a maintainer decision recorded here. This follows the README rule against inferring competence from AI-generated output.
 - Every write returns the stored record, so the client can show the learner exactly what was saved.
+
+### Core changes
+
+Phase 1 changes the core in these places, and nowhere else:
+
+- One migration adds the pending-attempt table and two attempt columns: `graded_by` and `surface`. Attempts have no `surface` column today; skips, study events, annotations and composition decisions do.
+- `ReviewService` gains a path that records an agent-graded attempt without a scheduler proposal or state change.
+- Composition ignores agent-graded attempts when it chooses the next target.
+- `practice --administer` gains `--graded-by learner|agent`, default `learner`.
+- The study surface allow list (`hermes-desktop`, `obsidian-plugin`, `cli`) adds `mcp` and `http`.
+- Attempt listings and exports gain the new columns. `queries history` adds `graded_by` to each attempt, which bumps the schema to `virtuoso/item-history@0.2`. `queries workload` counts due items from scheduler state, so agent-graded attempts never change it. `queries focus` reports agent-graded attempts in their own count.
 
 ### Not exposed
 
@@ -141,7 +152,7 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 
 ## Phases
 
-1. **Server core.** Operation registry, both bindings, stdio and token-authenticated HTTP with `Host` and `Origin` checks, single-learner token mode, the migration for pending attempts and `graded_by`, phase 1 operations, the split recall contract, and `export workspace`. Evaluated with real MCP clients over stdio against synthetic workspaces.
+1. **Server core.** Operation registry, both bindings, stdio and token-authenticated HTTP with `Host` and `Origin` checks, single-learner token mode, the core changes listed above, phase 1 operations, the split recall contract, and `export workspace`. Evaluated with real MCP clients over stdio against synthetic workspaces.
 2. **Hosted staging.** Operator mode, signed-assertion verifier, per-principal resolver (acceptance: subjects such as `../x`, `a/b` and Unicode lookalikes map to distinct directories inside `--workspaces-root`, with a test proving no escape and no collision), import, a container image, and a staging deployment for testers. Deployment and hosting spend need maintainer approval.
 3. **Chat and voice clients.** A client package (skills plus the MCP connection) for chat assistants, tested in developer mode first. The first test answers one open question: whether the target assistant's voice mode calls MCP tools at all.
 4. **Public listing.** Store submission and public hosted sign-up. Needs maintainer approval.
@@ -156,6 +167,8 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 - HTTP on any address, loopback included, refuses to start without an authentication mode. A wrong or missing token gets 401 and writes nothing.
 - A request with a foreign `Host` or `Origin`, or a CORS preflight, gets 403 and writes nothing.
 - An agent-graded `recall_record` stores the attempt and leaves the scheduler state and due date unchanged.
+- `practice --administer --graded-by agent` does the same on the CLI. Without the flag, the attempt records `graded_by: learner` and feeds the scheduler as today.
+- `next` and `compose` return the same output before and after an agent-graded attempt is recorded.
 - `history` output for a due item contains no prompt, reference answer or response text.
 - No operation accepts a path, a module id, or `allow_trusted`.
 - Every write's stored evidence shows `surface`, unknown latency, the reported `agent_help`, and `graded_by`.
