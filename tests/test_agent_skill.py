@@ -61,6 +61,8 @@ def _fill(token: str, choices: set[str] | None) -> str:
 def _taught_commands(text: str) -> list[list[str]]:
     taught = []
     for span in re.findall(r"`([^`\n]+)`", text):
+        if not re.match(r"[a-z][a-z-]* ", span):
+            continue
         tokens = shlex.split(re.sub(r"[\[\]]", "", span))
         # Any span that opens with a bare word and carries a flag is a command.
         # An unknown subcommand then fails to parse instead of being skipped.
@@ -179,7 +181,11 @@ class AgentSkillContractTests(unittest.TestCase):
             recorded = _run(workspace, "practice", "--item", "recall-item", "--administer",
                             "--response", "", "--result", "not-demonstrated",
                             "--confidence", "1", "--json")
-            self.assertEqual(recorded["agent_help"], "substantial")
+            stated = re.search(
+                r"Without `--agent-help`, an administered attempt records `([a-z]+)`", self.text
+            )
+            assert stated is not None
+            self.assertEqual(recorded["agent_help"], stated.group(1))
 
 
 if __name__ == "__main__":

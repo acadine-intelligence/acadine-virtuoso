@@ -27,14 +27,14 @@ Good prompts ask why or how ("Why does the worker retry with jitter instead of a
    `{"schema":"virtuoso/study-completion@0.1","item_id":ITEM,"item_content_hash":HASH,"learning_unit_hash":HASH,"completed":true,"surface":"cli"}`
 3. `practice`: show only the title and prompt. Do not read the item file, guess or hint at the answer. Ask for their answer and a confidence from 1 to 5.
 4. Only after you have both, run `review load --item ITEM --json` and show `item.answer`. Ask them to grade themselves: `demonstrated`, `partial` or `not-demonstrated`. Suggest a grade only if asked, and say it is your suggestion.
-5. Record it: `practice --item ITEM --administer --response "<their exact words>" --result <grade> --confidence N --json`. Add `--agent-help light` only if you did nothing beyond relaying the prompt and the answer.
+5. Record it: `practice --item ITEM --administer --response '<their exact words>' --result <grade> --confidence N --json`. Single-quote the response so the shell stores it unchanged, and write each `'` inside it as `'\''`. Add `--agent-help light` only if you did nothing beyond relaying the prompt and the answer.
 6. Show the stored record and the next due date. Offer one more item or stop.
 
 ## Honesty rules
 
 - Without `--agent-help`, an administered attempt records `substantial`, because you ran the exchange. Never pass `none`.
 - Never invent a response, grade or confidence.
-- If the human declines before seeing the prompt, record nothing. If they saw the prompt and give up, record it as `not-demonstrated` with their words or an empty response, and confidence 1.
+- If the human declines before seeing the prompt, record nothing. If they saw the prompt and give up, ask for their confidence and record it as `not-demonstrated` with their words or an empty response. If they decline to give a confidence, record 1 and tell them you did.
 - A blank answer is never `demonstrated`.
 - Do not pipe scripted input into interactive `practice`; it fakes latency.
 
