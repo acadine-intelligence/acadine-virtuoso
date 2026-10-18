@@ -722,7 +722,13 @@ class AwaitingRecordTests(_CoreCase):
         token = self.start()
         self.call("recall_respond", attempt_token=token, response="no idea")
         before = database_digest(self.workspace.db_path)
-        error = self.error("recall_skip", attempt_token=token, submission_id=_submission())
+        # The service refuses before it reaches the workspace write.
+        with mock.patch.object(
+            self.workspace, "record_review_skip", side_effect=AssertionError("write")
+        ):
+            error = self.error(
+                "recall_skip", attempt_token=token, submission_id=_submission()
+            )
         self.assertEqual(error.code, "attempt-awaiting-record")
         self.assertEqual(error.status, 409)
         self.assertEqual(error.recovery, "record-result")
@@ -769,7 +775,11 @@ class AwaitingRecordTests(_CoreCase):
         before = database_digest(self.workspace.db_path)
         for surface in ("mcp", "http"):
             with self.subTest(surface=surface):
-                with self.assertRaises(OperationError) as caught:
+                # The service refuses before it reaches the workspace write.
+                with self.assertRaises(OperationError) as caught, mock.patch.object(
+                    self.workspace, "create_pending_attempt",
+                    side_effect=AssertionError("write"),
+                ):
                     self.core.call(
                         "recall_start", {"item_id": "hash-lookup"}, surface=surface
                     )
