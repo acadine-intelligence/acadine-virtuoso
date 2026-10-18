@@ -38,6 +38,6 @@ Later, in any session:
 Quiz me.
 ```
 
-`queries history --item ITEM --json` shows what was recorded. Every attempt is marked `administered`, with latency stored as unknown and the agent's help level as reported.
+`queries history --item ITEM --json` shows what was recorded. Every attempt is marked `administered`, with latency stored as unknown, the agent's help level as reported, and `graded_by: learner` because the human grades themselves.
 
 `tests/test_agent_skill.py` reads the commands from the skill and parses each one against the current CLI with abbreviated flags turned off. It checks every taught choice value, and runs the taught journey (next, reveal, study record, a give-up attempt) against a temporary workspace.

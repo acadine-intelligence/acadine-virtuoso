@@ -257,7 +257,7 @@ Interactive protocol (stdout prompts, stdin answers, in order):
 6. `Confidence [1-5]:`
 7. If the result was not `demonstrated` and the item has a follow-up: `Follow-up response:`.
 
-On completion the attempt (with full assistance attribution) and a scheduling proposal from the configured algorithm (FSRS 6.3.2 by default; see `scheduler`) are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt. A configured module scheduler runs only when this command includes `--allow-trusted-scheduler`. The flag authorizes this run only.
+On completion the attempt (with full assistance attribution, `graded_by: learner` and `surface: cli`) and a scheduling proposal from the configured algorithm (FSRS 6.3.2 by default; see `scheduler`) are persisted atomically, and the next review time is printed. `--agent-help` must honestly record any agent assistance used during the attempt. A configured module scheduler runs only when this command includes `--allow-trusted-scheduler`. The flag authorizes this run only.
 
 ### `practice --administer`
 
@@ -267,19 +267,21 @@ Record one agent-administered attempt non-interactively. Use this when the learn
 virtuoso --workspace PATH practice --item ID --administer \
   --response TEXT --result demonstrated|partial|not-demonstrated \
   --confidence 1-5 [--agent-help none|light|substantial|unknown] \
-  [--allow-trusted-scheduler] [--json]
+  [--graded-by learner|agent] [--allow-trusted-scheduler] [--json]
 ```
 
 Contract:
 
-- `--response`, `--result` and `--confidence` are required with `--administer`, and rejected without it.
+- `--response`, `--result` and `--confidence` are required with `--administer`, and rejected without it. `--graded-by` is also rejected without `--administer`.
 - `initial_latency_ms` is stored as NULL/unknown. The tool did not measure the answer, so no latency exists; 0 ms is never written and no timing row is created.
 - The attempt row carries `administered = 1`, so administered and direct interactive attempts stay distinguishable in every query.
 - `--agent-help` defaults to `substantial` in this mode (the agent mediated the whole exchange). Pass a different level only when it honestly applies.
 - A blank `--response` cannot be graded `demonstrated`; the command fails closed.
-- The same scheduler proposal flow runs as for interactive attempts; the proposal rationale states that latency was unmeasured.
+- `--graded-by` says who chose the grade. `learner` (the default) means the learner chose it, even when the agent relayed it. The same scheduler proposal flow runs as for interactive attempts; the proposal rationale states that latency was unmeasured.
+- `--graded-by agent` means the agent chose the grade. The attempt is stored as evidence only: no scheduler or module runs, no proposal is written, and scheduler state and the due date stay unchanged. `next`, `compose`, `review due` and `queries workload` return the same output as before the attempt. `queries focus` counts it only in `agent_graded`. A database trigger rejects any scheduler proposal or state whose source attempt is agent-graded.
+- The attempt records `surface: cli`.
 
-JSON output: `{"event_id", "item_id", "result", "confidence", "agent_help", "administered": true, "initial_latency_ms": null, "occurred_at", "proposal_due_at", "proposal_algorithm"}`.
+JSON output: `{"event_id", "item_id", "result", "confidence", "agent_help", "administered": true, "initial_latency_ms": null, "occurred_at", "graded_by", "proposal_due_at", "proposal_algorithm"}`. An agent-graded attempt returns `"graded_by": "agent"` with `proposal_due_at` and `proposal_algorithm` set to `null`.
 
 ### `review` JSON contracts
 
@@ -322,7 +324,7 @@ Request schema: `virtuoso/review-attempt@0.1`. It requires these exact fields:
 - `confidence`: integer 1 through 5.
 - `open_notes`: whether notes were open during recall.
 
-Output schema: `virtuoso/review-attempt-result@0.1`. The `attempt` object contains `event_id`, `item_id`, `item_content_hash`, `result`, `confidence`, `initial_latency_ms`, `administered`, and `occurred_at`. The `proposal` object contains `proposal_id`, `algorithm`, `algorithm_version`, and `due_at`. Core code writes the attempt, proposal, scheduler state, and successful module receipt in one SQLite transaction. A module scheduler requires `--allow-trusted-scheduler`; an optional interface that cannot pass it must direct the learner to this CLI route and must not execute the module silently.
+Output schema: `virtuoso/review-attempt-result@0.1`. The `attempt` object contains `event_id`, `item_id`, `item_content_hash`, `result`, `confidence`, `initial_latency_ms`, `administered`, and `occurred_at`. A review attempt is learner-graded. Its stored `surface` is `null` (unknown) because the `virtuoso/review-attempt@0.1` request does not name its client. The `proposal` object contains `proposal_id`, `algorithm`, `algorithm_version`, and `due_at`. Core code writes the attempt, proposal, scheduler state, and successful module receipt in one SQLite transaction. A module scheduler requires `--allow-trusted-scheduler`; an optional interface that cannot pass it must direct the learner to this CLI route and must not execute the module silently.
 
 Record a skip by sending a JSON object on stdin:
 
@@ -331,7 +333,7 @@ printf '%s' "$SKIP_JSON" | \
   virtuoso --workspace PATH review skip --json
 ```
 
-Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface` (`"obsidian-plugin"` or `"hermes-desktop"`). Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
+Request schema: `virtuoso/review-skip@0.1`. It requires `submission_id`, `item_id`, `item_content_hash`, timezone-aware `occurred_at`, and `surface` (`"obsidian-plugin"`, `"hermes-desktop"`, `"mcp"`, or `"http"`). Any other surface fails with `invalid-request`. Output schema: `virtuoso/review-skip-result@0.1`. Its `skip` object contains `event_id`, `item_id`, `item_content_hash`, `occurred_at`, and `surface`. The CLI appends the skip event and leaves scheduler state unchanged.
 
 Both write commands validate the current item content hash during request handling and again inside the SQLite transaction before commit. They reject a learn-first item that has no matching study event. A changed item fails before the CLI commits an attempt, proposal, scheduler transition, or skip. Malformed input and unknown schemas also fail before a write.
 
@@ -352,7 +354,7 @@ Both write commands validate the current item content hash during request handli
 }
 ```
 
-Hashes must be the full lowercase SHA-256 values from the loaded snapshot. `completed` must be the JSON boolean `true`. Supported surfaces are `hermes-desktop`, `obsidian-plugin`, and `cli`. Unknown fields fail. The core checks current Markdown and database hashes inside the write transaction.
+Hashes must be the full lowercase SHA-256 values from the loaded snapshot. `completed` must be the JSON boolean `true`. Supported surfaces are `hermes-desktop`, `obsidian-plugin`, `cli`, `mcp`, and `http`. Any other surface fails with `invalid-request`. Unknown fields fail. The core checks current Markdown and database hashes inside the write transaction.
 
 The result schema is `virtuoso/study-result@0.1`. Its `study` object contains `event_id`, `item_id`, `item_content_hash`, `learning_unit_hash`, backend `occurred_at`, `surface`, and `claims_mastery: false`. A successful repeated completion of the same current item and learning-unit version returns the original event. Study creates no attempt, scheduler proposal, or capability claim. The interactive `learn --item ID` command is unchanged.
 
@@ -372,7 +374,7 @@ Show recorded evidence and scheduler proposals.
 virtuoso --workspace PATH attempts [--json]
 ```
 
-JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2` for `fsrs`, `sm2-1990/1` for `sm2`), `learning_context`, `configuration`, `due_at` and `rationale`. Proposals made under a previous algorithm stay listed after a `scheduler switch`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
+JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), `graded_by` (`learner` or `agent`; an agent grade is always administered), `surface` (the recording client such as `cli`, or `null` when unknown, including every attempt recorded before migration 19), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2` for `fsrs`, `sm2-1990/1` for `sm2`), `learning_context`, `configuration`, `due_at` and `rationale`. Proposals made under a previous algorithm stay listed after a `scheduler switch`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
 
 ## Read-only analytics
 
@@ -384,7 +386,7 @@ Every `queries` command opens SQLite in read-only mode and leaves workspace stat
 virtuoso --workspace PATH queries focus [--json]
 ```
 
-Output schema: `virtuoso/focus-performance@0.1`. The top-level `focuses` array contains `focus`, `items`, `attempts`, `demonstrated`, `partial`, `not_demonstrated`, `administered`, `mean_confidence`, and `mean_latency_ms`. A mean is `null` when no qualifying value exists.
+Output schema: `virtuoso/focus-performance@0.2`. The top-level `focuses` array contains `focus`, `items`, `attempts`, `demonstrated`, `partial`, `not_demonstrated`, `administered`, `agent_graded`, `mean_confidence`, and `mean_latency_ms`. `attempts`, the three outcome counts, `administered`, and both means cover learner-graded attempts only, so `attempts` always equals `demonstrated + partial + not_demonstrated`. `agent_graded` counts agent-graded attempts, which no other field includes. A mean is `null` when no qualifying value exists. Version 0.2 added `agent_graded` and the learner-only rule.
 
 ### `queries history`
 
@@ -392,7 +394,7 @@ Output schema: `virtuoso/focus-performance@0.1`. The top-level `focuses` array c
 virtuoso --workspace PATH queries history --item ITEM [--json]
 ```
 
-Output schema: `virtuoso/item-history@0.1`. The response contains `item_id`, `attempts`, and `annotations`. Each attempt contains `event_id`, `item_id`, `occurred_at`, `result`, `confidence`, `agent_help`, `administered`, and `latency_ms`. An administered attempt has `latency_ms: null`. `annotations` lists the item's recorded annotator answers in occurrence order with a `stale` flag (see `annotate`); it is empty when no annotator has run.
+Output schema: `virtuoso/item-history@0.2`. The response contains `item_id`, `attempts`, and `annotations`. Each attempt contains `event_id`, `item_id`, `occurred_at`, `result`, `confidence`, `agent_help`, `administered`, `graded_by`, and `latency_ms`. An administered attempt has `latency_ms: null`. Every attempt is listed, learner-graded and agent-graded alike. The history never contains a prompt, reference answer, or response text. Version 0.2 added `graded_by`. `annotations` lists the item's recorded annotator answers in occurrence order with a `stale` flag (see `annotate`); it is empty when no annotator has run.
 
 ### `queries workload`
 

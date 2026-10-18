@@ -1,6 +1,6 @@
 # Server and MCP design
 
-Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. Nothing in this record is built yet. It does not expand the interfaces in `12-cli-reference.md`.
+Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). The server itself is not built yet. Beyond those core changes, this record does not expand the interfaces in `12-cli-reference.md`.
 
 ## Decision
 
@@ -99,7 +99,7 @@ Phase 1 changes the core in at least these places. The phase 1 implementation PR
 - Composition ignores agent-graded attempts when it chooses the next target.
 - `practice --administer` gains `--graded-by learner|agent`, default `learner`.
 - The study surface allow list (`hermes-desktop`, `obsidian-plugin`, `cli`) and the skip surface allow list (`obsidian-plugin`, `hermes-desktop`) add `mcp` and `http`.
-- `attempts --json` (which has no schema id) and the new `export workspace` carry the new columns. `queries history` adds `graded_by` to each attempt, which bumps the schema to `virtuoso/item-history@0.2`. `queries workload` counts due items from scheduler state, so agent-graded attempts never change it. `queries focus` keeps its outcome counts and mean confidence over learner-graded attempts only and adds an `agent_graded` count, which bumps the schema to `virtuoso/focus-performance@0.2`.
+- `attempts --json` (which has no schema id) and the new `export workspace` carry the new columns. `queries history` adds `graded_by` to each attempt, which bumps the schema to `virtuoso/item-history@0.2`. `queries workload` counts due items from scheduler state, so agent-graded attempts never change it. `queries focus` keeps its outcome counts and mean confidence over learner-graded attempts only and adds an `agent_graded` count, which bumps the schema to `virtuoso/focus-performance@0.2`. `attempts`, `administered` and `mean_latency_ms` are learner-only too, so `attempts` stays the sum of the outcome counts.
 
 ### Not exposed
 
