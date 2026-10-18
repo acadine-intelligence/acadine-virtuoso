@@ -13,7 +13,7 @@ The server is MIT-licensed like the rest of the repository. The CLI stays the re
 
 ## Why now
 
-`14-api-consideration.md` deferred an MCP server until a consumer appeared that the CLI cannot serve. Two such consumers now exist:
+`14-api-consideration.md` deferred an HTTP daemon (its option C) until a consumer appeared that the CLI cannot serve, and deferred MCP (option D) with no trigger. Two such consumers now exist, and both need MCP over a network:
 
 1. **Remote chat and voice clients.** A learner practising out loud in a chat assistant, or in an assistant's voice mode, has no terminal and no local process to spawn. The client can only reach a network MCP server.
 2. **Agents on other machines.** An agent harness that runs away from the workspace needs a network contract with authentication, not a subprocess.
@@ -32,7 +32,7 @@ MCP client (chat app, voice mode, agent harness)      HTTP client
         |
         |-> workspace resolver (principal -> one workspace root)
         v
-   ReviewService, PracticeService, WorkspaceService, queries   (unchanged core)
+   ReviewService, PracticeService, WorkspaceService, queries   (existing core services)
         |
         v
    Markdown items + SQLite evidence (one workspace per learner)
@@ -52,10 +52,10 @@ The server calls the Python services in process. It does not spawn the CLI per c
 
 | Transport | Use | Default auth |
 |---|---|---|
-| `--transport stdio` | A local harness spawns the server (Claude Code, Codex, Hermes). | Process boundary. No token. |
+| `--transport stdio` | A local app that speaks MCP but has no shell tool spawns the server, and harness evals use it to test the MCP contract. | Process boundary. No token. |
 | `--transport http` | Remote clients, hosted deployment, voice clients. | Bearer token or operator gateway, on every bind. |
 
-`http` serves MCP streamable HTTP at `/mcp` and the HTTP JSON binding at `/v1/ops/<name>`. It binds `127.0.0.1` by default. Every HTTP bind requires an authentication mode, including loopback: a local endpoint is reachable from any browser tab through DNS rebinding or a cross-origin request. The server also validates `Host` against the configured bind names, rejects any request whose `Origin` is not on a configured allow list, and answers no CORS preflight. A request that fails these checks gets 403 and writes nothing.
+`http` serves MCP streamable HTTP at `/mcp` and the HTTP JSON binding at `/v1/ops/<name>`. It binds `127.0.0.1` by default. Every HTTP bind requires an authentication mode, including loopback: a local endpoint is reachable from any browser tab through DNS rebinding or a cross-origin request. The server also validates `Host` against the configured bind names, rejects any request whose `Origin` header is present and not on a configured allow list (non-browser MCP clients send no `Origin`, and that is allowed), and answers no CORS preflight. A request that fails these checks gets 403 and writes nothing.
 
 ## Operations, phase 1
 
@@ -65,11 +65,11 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 |---|---|---|
 | `next_action` | read | `select_next` plus the learning state: returns `learn` or `practice`, item id, title, and focus. Never the answer. |
 | `study_load` | read | The learning unit for a learn-first item, without prompt or answer. |
-| `study_record` | write | Records study completion only after the learner says they finished. Idempotent on item and learning-unit hashes. |
+| `study_record` | write | Records study completion only after the learner says they finished. A repeat for the same item and learning-unit hashes returns the stored completion instead of the core's "already completed" error, so a client retry is safe. |
 | `recall_start` | write | Opens a recall attempt. Returns the prompt, hint availability, and an attempt token. Never the answer. |
 | `recall_respond` | write | Stores the learner's transcribed response against the attempt token. Required before reveal. |
 | `recall_reveal` | read | Returns the reference answer, and only after `recall_respond` for the same token. |
-| `recall_record` | write | Records result, confidence, `agent_help`, and who graded. Writes the attempt, scheduler proposal, and state in one transaction. Idempotent on `submission_id`. |
+| `recall_record` | write | Records result, confidence, `agent_help`, and who graded. A learner-graded result writes the attempt, scheduler proposal, and state in one transaction. An agent-graded result writes the attempt only. Idempotent on `submission_id`. |
 | `recall_skip` | write | Appends a skip event. The due date stays unchanged. |
 | `workload` | read | Due counts per focus, the same projection as `queries workload`. |
 | `history` | read | Evidence for one item, the same projection as `queries history` (`virtuoso/item-history@0.1`). That projection carries result, confidence, `agent_help`, timing and annotations. It never carries the prompt, the reference answer or a stored response, so it cannot leak the answer for a due item. A test pins this. |
@@ -78,7 +78,7 @@ Phase 1 covers the daily loop only: choose the next action, study, recall, recor
 
 The current review contract returns the answer in the item snapshot and trusts the interface to hide it. A chat model is not a trustworthy interface for that rule: once the answer is in its context, it can leak it. So the server splits recall into `recall_start`, `recall_respond`, `recall_reveal`, and `recall_record`. The server holds the open attempt and refuses to reveal the answer before a response exists. A blank response cannot be graded `demonstrated`, matching the CLI.
 
-The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new and lands in the same phase 1 migration as `graded_by`. A restarted server can still finish or expire it. An expired attempt records nothing.
+The open attempt lives in the workspace database as a pending row with an expiry. The pending-attempt table is new and lands in the same phase 1 migration as `graded_by` and an attempt `surface` column. Attempts have no `surface` column today; only skips, study events and annotations carry one. Apart from that migration and the composition filter, the core services stay as they are. A restarted server can still finish or expire it. An expired attempt records nothing.
 
 ### Evidence honesty
 
@@ -86,7 +86,8 @@ The open attempt lives in the workspace database as a pending row with an expiry
 - Latency is stored as unknown. The server cannot measure when a learner started thinking, and a client clock is a claim, not a measurement. This matches `practice --administer`.
 - `agent_help` is required on `recall_record` and has no default of `none`. It is the existing attempt field with the existing values (`none`, `light`, `substantial`, `unknown`). The tool description tells the model to report its own help honestly.
 - `graded_by` is required: `learner` or `agent`. It is a new attempt column and needs a migration in phase 1.
-- An agent-graded result is stored as evidence only. It does not feed the scheduler and does not change a due date. That changes only after a tracer shows agent grades agree with learner grades on the same attempts, and after a maintainer decision recorded here. This follows the README rule against inferring competence from AI-generated output.
+- `learner` means the learner chose the grade, even when an agent relayed it. This is what `practice --administer` records today, and it keeps feeding the scheduler on both the CLI and the server.
+- An agent-graded result is stored as evidence only. It does not feed the scheduler, does not change a due date, and is excluded from the attempt rows that composition reads to choose the next target. Phase 1 adds `--graded-by` to `practice --administer` with the same rule, defaulting to `learner`, so the CLI and the server agree. That changes only after a tracer shows agent grades agree with learner grades on the same attempts, and after a maintainer decision recorded here. This follows the README rule against inferring competence from AI-generated output.
 - Every write returns the stored record, so the client can show the learner exactly what was saved.
 
 ### Not exposed
@@ -103,7 +104,7 @@ The server has one open interface for identity: a **workspace resolver**. It tur
 |---|---|---|
 | stdio | The local process owner. | The fixed `--workspace` path. |
 | http, single learner | Holder of `VIRTUOSO_SERVER_TOKEN`. | The fixed `--workspace` path. |
-| http, operator | A subject asserted by a trusted gateway. | One directory per subject under `--workspaces-root`, created on first use only when the operator enables provisioning. The directory name is the hex SHA-256 of the verified subject string, never the raw subject. |
+| http, operator | A subject asserted by a trusted gateway. | One directory per subject under `--workspaces-root`, created on first use only when the operator enables provisioning. The directory name is the hex SHA-256 of the NFC-normalized issuer and subject pair, never the raw subject. |
 
 Single-learner mode is the self-hosted default. The token comes from an environment variable or a file, is compared in constant time, and is never logged.
 
@@ -141,7 +142,7 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 ## Phases
 
 1. **Server core.** Operation registry, both bindings, stdio and token-authenticated HTTP with `Host` and `Origin` checks, single-learner token mode, the migration for pending attempts and `graded_by`, phase 1 operations, the split recall contract, and `export workspace`. Evaluated with real MCP clients over stdio against synthetic workspaces.
-2. **Hosted staging.** Operator mode, signed-assertion verifier, per-principal resolver, import, a container image, and a staging deployment for testers. Deployment and hosting spend need maintainer approval.
+2. **Hosted staging.** Operator mode, signed-assertion verifier, per-principal resolver (acceptance: subjects such as `../x`, `a/b` and Unicode lookalikes map to distinct directories inside `--workspaces-root`, with a test proving no escape and no collision), import, a container image, and a staging deployment for testers. Deployment and hosting spend need maintainer approval.
 3. **Chat and voice clients.** A client package (skills plus the MCP connection) for chat assistants, tested in developer mode first. The first test answers one open question: whether the target assistant's voice mode calls MCP tools at all.
 4. **Public listing.** Store submission and public hosted sign-up. Needs maintainer approval.
 
@@ -156,7 +157,6 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 - A request with a foreign `Host` or `Origin`, or a CORS preflight, gets 403 and writes nothing.
 - An agent-graded `recall_record` stores the attempt and leaves the scheduler state and due date unchanged.
 - `history` output for a due item contains no prompt, reference answer or response text.
-- Operator mode (phase 2) maps subjects such as `../x`, `a/b` and mixed-Unicode lookalikes to distinct directories inside `--workspaces-root`; a test proves no escape and no collision.
 - No operation accepts a path, a module id, or `allow_trusted`.
 - Every write's stored evidence shows `surface`, unknown latency, the reported `agent_help`, and `graded_by`.
 - An exported workspace opens and passes `doctor` with the CLI on a clean machine.
@@ -164,7 +164,7 @@ The server reuses the Hermes adapter limits as starting values: JSON bodies up t
 ## Open questions
 
 - Whether a target chat assistant's voice mode calls MCP tools. Phase 3 answers this with a developer-mode test before any client package work.
-- Whether `recall_reveal` should also release the hint as a separate step. The current contract records `hint_used`, so the split contract probably needs a `recall_hint` operation.
+- How the hint is released. A hint comes after `recall_start` and before `recall_reveal`, and the current contract records `hint_used`, so the split contract probably needs a `recall_hint` operation between them.
 
 ## Relationship to earlier decisions
 
