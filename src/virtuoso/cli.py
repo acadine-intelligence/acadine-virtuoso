@@ -200,6 +200,16 @@ def _parser() -> argparse.ArgumentParser:
         help="learner confidence 1-5 (requires --administer)",
     )
     practice.add_argument(
+        "--graded-by",
+        choices=("learner", "agent"),
+        default=None,
+        help=(
+            "who chose the grade (requires --administer; default learner). "
+            "An agent grade is stored as evidence only and leaves the "
+            "schedule unchanged"
+        ),
+    )
+    practice.add_argument(
         "--allow-trusted-scheduler",
         action="store_true",
         help="allow this practice run to execute the configured trusted scheduler module",
@@ -798,6 +808,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     confidence=args.confidence,
                     agent_help=args.agent_help or "substantial",
                     allow_trusted=args.allow_trusted_scheduler,
+                    graded_by=args.graded_by or "learner",
+                    surface="cli",
                 )
                 _emit(
                     {
@@ -809,21 +821,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "administered": result.attempt.administered,
                         "initial_latency_ms": result.attempt.initial_latency_ms,
                         "occurred_at": result.attempt.occurred_at.isoformat(),
-                        "proposal_due_at": result.proposal.due_at.isoformat(),
-                        "proposal_algorithm": result.proposal.algorithm,
+                        "graded_by": result.attempt.graded_by,
+                        # An agent grade proposes no schedule.
+                        "proposal_due_at": (
+                            result.proposal.due_at.isoformat()
+                            if result.proposal is not None
+                            else None
+                        ),
+                        "proposal_algorithm": (
+                            result.proposal.algorithm
+                            if result.proposal is not None
+                            else None
+                        ),
                     },
                     as_json=args.json,
                 )
                 return 0
             supplied = [
                 flag
-                for flag, value in administered_only.items()
+                for flag, value in {
+                    **administered_only,
+                    "--graded-by": args.graded_by,
+                }.items()
                 if value is not None
             ]
             if supplied:
+                verb = "applies" if len(supplied) == 1 else "apply"
                 raise WorkspaceError(
                     ", ".join(supplied)
-                    + " only apply to agent-administered practice; add --administer"
+                    + f" {verb} only to agent-administered practice; add --administer"
                 )
             context = _practice_display_context(workspace, args.item)
             PracticeService(workspace).run(
@@ -911,7 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.query_command == "focus":
                 _emit(
                     {
-                        "schema": "virtuoso/focus-performance@0.1",
+                        "schema": "virtuoso/focus-performance@0.2",
                         "focuses": [
                             asdict(summary)
                             for summary in queries_module.focus_performance(
@@ -925,7 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.query_command == "history":
                 _emit(
                     {
-                        "schema": "virtuoso/item-history@0.1",
+                        "schema": "virtuoso/item-history@0.2",
                         "item_id": args.item,
                         "attempts": [
                             asdict(entry)

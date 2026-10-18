@@ -649,7 +649,7 @@ class WorkspaceSchedulerTests(unittest.TestCase):
         with sqlite3.connect(reopened.db_path) as db:
             self.assertEqual(db.execute("SELECT * FROM scheduler_state").fetchall(), before)
             self.assertEqual(
-                db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 18
+                db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 19
             )
             self.assertEqual(db.execute("SELECT COUNT(*) FROM scheduler_switches").fetchone()[0], 0)
         self.assertEqual(reopened.scheduler_settings().algorithm, "fsrs")
@@ -677,6 +677,9 @@ class WorkspaceSchedulerTests(unittest.TestCase):
             "agent_help": "none",
             "support_actions": [],
             "administered": False,
+            "graded_by": "learner",
+            "surface": "cli",
+            "client": None,
         }
         proposal = {
             "proposal_id": "proposal-" + "b" * 32,

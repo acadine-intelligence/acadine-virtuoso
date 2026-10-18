@@ -355,6 +355,9 @@ class TransferCheckCompletionTests(unittest.TestCase):
                 "agent_help": "none",
                 "support_actions": [],
                 "administered": False,
+                "graded_by": "learner",
+                "surface": "cli",
+                "client": None,
             },
             proposal={
                 "proposal_id": "proposal-" + "b" * 32,

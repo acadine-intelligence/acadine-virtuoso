@@ -20,6 +20,13 @@ Queries answer the questions a learner or agent actually asks:
 
 Honesty rules carried over from the CLI: administered attempts are
 flagged, and means are ``None`` (never zero) when no real value exists.
+
+Grader rule (migration 19): focus performance counts outcomes,
+administered attempts, confidence and latency over learner-graded attempts
+only, so ``attempts`` always equals the sum of the outcome counts.
+Agent-graded attempts appear only in the separate ``agent_graded`` count.
+Item history lists every attempt with its ``graded_by``. Databases from
+before migration 19 report every attempt as learner-graded.
 """
 
 from __future__ import annotations
@@ -48,6 +55,7 @@ class FocusSummary:
     partial: int
     not_demonstrated: int
     administered: int
+    agent_graded: int
     mean_confidence: float | None
     mean_latency_ms: float | None
 
@@ -62,6 +70,7 @@ class ItemAttempt:
     latency_ms: int | None
     agent_help: str
     occurred_at: str
+    graded_by: str
 
 
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
@@ -80,32 +89,43 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     return db
 
 
-def _has_administered(db: sqlite3.Connection) -> bool:
-    columns = {
+def _attempt_columns(db: sqlite3.Connection) -> set[str]:
+    return {
         row["name"] for row in db.execute("PRAGMA table_info(attempts)").fetchall()
     }
-    return "administered" in columns
 
 
 def focus_performance(db_path: Path | str) -> list[FocusSummary]:
-    """Per-focus attempt outcomes. NULL latencies are excluded from the
-    latency mean rather than counted as zero (administered attempts)."""
+    """Per-focus outcomes over learner-graded attempts. NULL latencies are
+    excluded from the latency mean rather than counted as zero
+    (administered attempts). Agent-graded attempts are counted only in
+    ``agent_graded``."""
     db = _connect_read_only(Path(db_path))
     try:
+        columns = _attempt_columns(db)
+        learner = (
+            "a.graded_by = 'learner'"
+            if "graded_by" in columns
+            else "a.event_id IS NOT NULL"
+        )
+        agent = "a.graded_by = 'agent'" if "graded_by" in columns else "0"
         administered_expr = (
-            "SUM(a.administered)" if _has_administered(db) else "0"
+            f"SUM(CASE WHEN {learner} THEN a.administered ELSE 0 END)"
+            if "administered" in columns
+            else "0"
         )
         rows = db.execute(
             f"""
             SELECT i.focus AS focus,
                    COUNT(DISTINCT i.item_id) AS items,
-                   COUNT(a.event_id) AS attempts,
-                   SUM(CASE WHEN a.result = 'demonstrated' THEN 1 ELSE 0 END) AS demonstrated,
-                   SUM(CASE WHEN a.result = 'partial' THEN 1 ELSE 0 END) AS partial,
-                   SUM(CASE WHEN a.result = 'not-demonstrated' THEN 1 ELSE 0 END) AS not_demonstrated,
+                   SUM(CASE WHEN {learner} THEN 1 ELSE 0 END) AS attempts,
+                   SUM(CASE WHEN {learner} AND a.result = 'demonstrated' THEN 1 ELSE 0 END) AS demonstrated,
+                   SUM(CASE WHEN {learner} AND a.result = 'partial' THEN 1 ELSE 0 END) AS partial,
+                   SUM(CASE WHEN {learner} AND a.result = 'not-demonstrated' THEN 1 ELSE 0 END) AS not_demonstrated,
                    {administered_expr} AS administered,
-                   AVG(a.confidence) AS mean_confidence,
-                   AVG(a.initial_latency_ms) AS mean_latency_ms
+                   SUM(CASE WHEN {agent} THEN 1 ELSE 0 END) AS agent_graded,
+                   AVG(CASE WHEN {learner} THEN a.confidence END) AS mean_confidence,
+                   AVG(CASE WHEN {learner} THEN a.initial_latency_ms END) AS mean_latency_ms
             FROM items AS i
             LEFT JOIN attempts AS a ON a.item_id = i.item_id
             GROUP BY i.focus
@@ -120,11 +140,12 @@ def focus_performance(db_path: Path | str) -> list[FocusSummary]:
         FocusSummary(
             focus=row["focus"],
             items=row["items"],
-            attempts=row["attempts"],
+            attempts=row["attempts"] or 0,
             demonstrated=row["demonstrated"] or 0,
             partial=row["partial"] or 0,
             not_demonstrated=row["not_demonstrated"] or 0,
             administered=row["administered"] or 0,
+            agent_graded=row["agent_graded"] or 0,
             mean_confidence=(
                 round(row["mean_confidence"], 2)
                 if row["mean_confidence"] is not None
@@ -141,17 +162,20 @@ def focus_performance(db_path: Path | str) -> list[FocusSummary]:
 
 
 def item_history(db_path: Path | str, item_id: str) -> list[ItemAttempt]:
-    """Every recorded attempt for one item, newest first."""
+    """Every recorded attempt for one item, newest first, with its grader."""
     db = _connect_read_only(Path(db_path))
     try:
-        administered_supported = _has_administered(db)
+        columns = _attempt_columns(db)
         administered_select = (
-            ", administered" if administered_supported else ", 0 AS administered"
+            ", administered" if "administered" in columns else ", 0 AS administered"
+        )
+        graded_by_select = (
+            ", graded_by" if "graded_by" in columns else ", 'learner' AS graded_by"
         )
         rows = db.execute(
             f"""
             SELECT event_id, item_id, result, confidence,
-                   initial_latency_ms, agent_help, occurred_at{administered_select}
+                   initial_latency_ms, agent_help, occurred_at{administered_select}{graded_by_select}
             FROM attempts
             WHERE item_id = ?
             ORDER BY occurred_at DESC, event_id
@@ -172,6 +196,7 @@ def item_history(db_path: Path | str, item_id: str) -> list[ItemAttempt]:
             latency_ms=row["initial_latency_ms"],
             agent_help=row["agent_help"],
             occurred_at=row["occurred_at"],
+            graded_by=row["graded_by"],
         )
         for row in rows
     ]

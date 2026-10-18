@@ -141,7 +141,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             migration = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(migration, (18,))
+            self.assertEqual(migration, (19,))
 
     def test_v11_to_v12_migration_preserves_items_and_adds_skip_ledger(self) -> None:
         service = WorkspaceService.init(self.root)
@@ -187,7 +187,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ).fetchall()
             }
         self.assertEqual(after, before)
-        self.assertEqual(versions, list(range(1, 19)))
+        self.assertEqual(versions, list(range(1, 20)))
         self.assertEqual(review_table, ("table",))
         self.assertEqual(
             review_triggers,
@@ -221,7 +221,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ],
-                list(range(1, 19)),
+                list(range(1, 20)),
             )
 
     def test_init_rejects_symlinked_workspace_root(self) -> None:
@@ -358,6 +358,9 @@ class WorkspaceServiceTests(unittest.TestCase):
             "agent_help": "none",
             "support_actions": [],
             "administered": False,
+            "graded_by": "learner",
+            "surface": "cli",
+            "client": None,
         }
         proposal = {
             "proposal_id": f"proposal-{event_id}",
@@ -555,7 +558,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
 
     def test_v3_to_v4_migration_does_not_fabricate_attempt_timings(self) -> None:
         self._prepare_v3_workspace_with_legacy_evidence()
@@ -625,9 +628,20 @@ class WorkspaceServiceTests(unittest.TestCase):
                 .replace("'not-demonstrated'", "'NOT-DEMONSTRATED'")
             )
             self.assertNotEqual(changed_sql, original_sql)
+            # Dropping the table drops its own triggers; restore them so the
+            # changed CHECK constraint is the only difference.
+            attempt_triggers = [
+                row[0]
+                for row in db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger'"
+                    " AND tbl_name = 'attempts'"
+                ).fetchall()
+            ]
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("DROP TABLE attempts")
             db.execute(changed_sql)
+            for trigger_sql in attempt_triggers:
+                db.execute(trigger_sql)
 
         with self.assertRaisesRegex(
             WorkspaceError, "attempts constraints or definition do not match"
@@ -894,7 +908,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             state = db.execute(
                 "SELECT source_event_id, state_json FROM scheduler_state"
             ).fetchall()
-        self.assertEqual(versions, list(range(1, 19)))
+        self.assertEqual(versions, list(range(1, 20)))
         self.assertEqual(
             attempt,
             [

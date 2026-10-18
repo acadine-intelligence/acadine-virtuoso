@@ -62,7 +62,7 @@ practice --item X --administer --response "<learner's transcribed answer>" \
   --result <graded outcome> --confidence <1-5> [--agent-help <level>] --json
 ```
 
-The attempt is marked `administered`, latency is stored as NULL/unknown (the tool measured nothing), and `--agent-help` defaults to `substantial`. Ask the learner for their answer and confidence BEFORE revealing the reference answer, exactly as the interactive protocol would. Do not pipe scripted stdin into interactive `practice`: that fabricates a near-zero latency measurement and pollutes the evidence.
+The attempt is marked `administered`, latency is stored as NULL/unknown (the tool measured nothing), and `--agent-help` defaults to `substantial`. The attempt records `graded_by: learner` because the learner chose the grade. If you chose the grade yourself, add `--graded-by agent`: the attempt is then stored as evidence only and does not change the schedule. Ask the learner for their answer and confidence BEFORE revealing the reference answer, exactly as the interactive protocol would. Do not pipe scripted stdin into interactive `practice`: that fabricates a near-zero latency measurement and pollutes the evidence.
 
 **Driving the interactive protocol directly (rarely appropriate).** Feed stdin lines in protocol order and read stdout. This is only sensible when a human is typing at a relayed live terminal, because the measured latency must belong to the learner. The sequence is:
 
