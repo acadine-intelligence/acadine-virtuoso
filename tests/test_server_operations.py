@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import secrets
+import sqlite3
 import sys
+import time
 import unittest
 from datetime import timedelta
 from unittest import mock
@@ -26,7 +28,8 @@ from server_support import (
     database_digest,
     rows,
 )
-from virtuoso.workspace import WorkspaceService
+from virtuoso.workspace import WorkspaceError, WorkspaceService
+from virtuoso.server.schema import SchemaError, validate
 from virtuoso.server.operations import (
     MAX_REQUEST_BYTES,
     OPERATIONS,
@@ -701,6 +704,318 @@ class LimitTests(_CoreCase):
         self.assertEqual(
             self.core.ttl, timedelta(minutes=60)
         )
+
+
+class AwaitingRecordTests(_CoreCase):
+    """A stored response is finished only by recall_record (review P1)."""
+
+    def pending_states(self) -> list[tuple[str, str]]:
+        return [
+            (row["attempt_token"], row["state"])
+            for row in rows(
+                self.workspace.db_path,
+                "SELECT attempt_token, state FROM pending_attempts ORDER BY created_at",
+            )
+        ]
+
+    def test_skip_after_response_is_refused_and_writes_nothing(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="no idea")
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_skip", attempt_token=token, submission_id=_submission())
+        self.assertEqual(error.code, "attempt-awaiting-record")
+        self.assertEqual(error.status, 409)
+        self.assertEqual(error.recovery, "record-result")
+        self.assertIn("recall_record", str(error))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(self.pending_states(), [(token, "responded")])
+        recorded = self.record(token, result="not-demonstrated", confidence=1)
+        self.assertEqual(recorded["attempt"]["result"], "not-demonstrated")
+
+    def test_database_refuses_a_skip_after_response_without_the_service_check(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="no idea")
+        before = database_digest(self.workspace.db_path)
+        with mock.patch.object(ServerCore, "_require_skippable", lambda *args: None):
+            error = self.error(
+                "recall_skip", attempt_token=token, submission_id=_submission()
+            )
+        self.assertEqual(error.code, "attempt-awaiting-record")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_database_trigger_refuses_a_skip_linked_to_a_responded_attempt(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="no idea")
+        row = self.workspace.pending_attempt(token)
+        before = database_digest(self.workspace.db_path)
+        with sqlite3.connect(self.workspace.db_path) as db:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "awaits recall_record"):
+                db.execute(
+                    """INSERT INTO review_skips(
+                           event_id, item_id, item_content_hash, occurred_at,
+                           surface, pending_attempt_token
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        "skip-" + _submission(), row["item_id"],
+                        row["item_content_hash"], self.clock().isoformat(),
+                        row["surface"], token,
+                    ),
+                )
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_start_is_refused_while_an_earlier_attempt_awaits_a_record(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        before = database_digest(self.workspace.db_path)
+        for surface in ("mcp", "http"):
+            with self.subTest(surface=surface):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(
+                        "recall_start", {"item_id": "hash-lookup"}, surface=surface
+                    )
+                self.assertEqual(caught.exception.code, "attempt-awaiting-record")
+                self.assertEqual(caught.exception.status, 409)
+                self.assertIn("recall_record", str(caught.exception))
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.record(token)
+        self.clock.advance(days=30)
+        self.assertNotEqual(self.start(), token)
+
+    def test_open_attempt_without_a_response_does_not_block_a_start(self) -> None:
+        first = self.start()
+        second = self.start()
+        self.assertNotEqual(first, second)
+
+    def test_database_refuses_the_start_without_the_service_check(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        before = database_digest(self.workspace.db_path)
+        with mock.patch.object(
+            ServerCore, "_require_no_attempt_awaiting_record", lambda *args: None
+        ):
+            error = self.error("recall_start", item_id="hash-lookup")
+        self.assertEqual(error.code, "attempt-awaiting-record")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_unrecorded_response_expires_without_evidence_then_a_start_is_allowed(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="no idea")
+        state_before = self.scheduler_rows()
+        self.clock.advance(minutes=61)
+        fresh = self.start()
+        self.assertNotEqual(fresh, token)
+        # The expired attempt records nothing: no attempt evidence, no
+        # scheduler change, and its row keeps the response it stored.
+        self.assertEqual(self.call("history", item_id="hash-lookup")["attempts"], [])
+        self.assertEqual(self.scheduler_rows(), state_before)
+        self.assertEqual(self.pending_states(), [(token, "responded"), (fresh, "open")])
+        error = self.error("recall_skip", attempt_token=token, submission_id=_submission())
+        self.assertEqual(error.code, "attempt-expired")
+
+    def test_reviewer_erase_sequence_cannot_hide_a_failed_recall(self) -> None:
+        # Wrong response, reveal, skip, start again, answer, record
+        # demonstrated: the failed attempt must not disappear.
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a linked list")
+        self.assertEqual(
+            self.call("recall_reveal", attempt_token=token)["answer"], RECALL_ANSWER
+        )
+        skip = self.error("recall_skip", attempt_token=token, submission_id=_submission())
+        self.assertEqual(skip.code, "attempt-awaiting-record")
+        start = self.error("recall_start", item_id="hash-lookup")
+        self.assertEqual(start.code, "attempt-awaiting-record")
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM review_skips"), [])
+        self.assertEqual(self.scheduler_rows(), [])
+        self.record(token, result="not-demonstrated", confidence=1)
+        history = self.call("history", item_id="hash-lookup")["attempts"]
+        self.assertEqual([entry["result"] for entry in history], ["not-demonstrated"])
+
+    def test_skip_description_says_open_attempts_only(self) -> None:
+        description = OPERATIONS["recall_skip"].description
+        self.assertIn("before the learner responds", description)
+        self.assertIn("attempt-awaiting-record", description)
+        self.assertIn("recall_record", description)
+        self.assertIn("attempt-awaiting-record", OPERATIONS["recall_start"].description)
+
+
+class SkipReplayOwnershipTests(_CoreCase):
+    def test_upgrade_from_v19_adds_the_skip_link_and_keeps_skips(self) -> None:
+        from conftest import downgrade_skip_links_to_v19
+
+        token = self.start()
+        submission = _submission()
+        self.call("recall_skip", attempt_token=token, submission_id=submission)
+        with sqlite3.connect(self.workspace.db_path) as db:
+            downgrade_skip_links_to_v19(db)
+        legacy = rows(
+            self.workspace.db_path,
+            "SELECT event_id, item_id, item_content_hash, occurred_at, surface"
+            " FROM review_skips",
+        )
+        reopened = WorkspaceService.open(self.workspace.root)
+        reopened.doctor()
+        self.assertEqual(
+            rows(reopened.db_path, "SELECT MAX(version) AS v FROM schema_migrations"),
+            [{"v": 20}],
+        )
+        upgraded = rows(reopened.db_path, "SELECT * FROM review_skips")
+        self.assertEqual(
+            [{key: row[key] for key in legacy[0]} for row in upgraded], legacy
+        )
+        # Skips from before migration 20 name no attempt.
+        self.assertEqual([row["pending_attempt_token"] for row in upgraded], [None])
+
+    def test_skip_replay_with_another_attempts_submission_is_a_conflict(self) -> None:
+        first = self.start()
+        submission = _submission()
+        self.call("recall_skip", attempt_token=first, submission_id=submission)
+        second = self.start()
+        self.call("recall_skip", attempt_token=second, submission_id=_submission())
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_skip", attempt_token=second, submission_id=submission)
+        self.assertEqual(error.code, "submission-conflict")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        replay = self.call("recall_skip", attempt_token=first, submission_id=submission)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_skip_links_its_event_to_the_attempt(self) -> None:
+        token = self.start()
+        submission = _submission()
+        self.call("recall_skip", attempt_token=token, submission_id=submission)
+        self.assertEqual(
+            rows(
+                self.workspace.db_path,
+                "SELECT event_id, pending_attempt_token FROM review_skips",
+            ),
+            [{"event_id": f"skip-{submission}", "pending_attempt_token": token}],
+        )
+
+
+class AnchoredPatternTests(_CoreCase):
+    """Patterns match the whole value; a trailing newline is refused (P2a)."""
+
+    def test_schema_patterns_refuse_a_trailing_newline(self) -> None:
+        for pattern, value in (
+            ("^[0-9a-f]{32}$", "a" * 32 + "\n"),
+            ("^[a-z0-9]+(?:-[a-z0-9]+)*$", "hash-lookup\n"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(SchemaError):
+                    validate(value, {"type": "string", "pattern": pattern})
+
+    def test_trailing_newline_submission_id_is_refused_and_writes_nothing(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        before = database_digest(self.workspace.db_path)
+        for name in ("recall_record", "recall_skip"):
+            with self.subTest(operation=name):
+                arguments = {"attempt_token": token, "submission_id": _submission() + "\n"}
+                if name == "recall_record":
+                    arguments.update(
+                        result="demonstrated", confidence=4,
+                        agent_help="none", graded_by="learner",
+                    )
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "invalid-request")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(
+            rows(self.workspace.db_path, "SELECT event_id FROM attempts"), []
+        )
+
+    def test_trailing_newline_item_id_token_and_client_are_refused(self) -> None:
+        token = self.start()
+        before = database_digest(self.workspace.db_path)
+        for name, arguments in (
+            ("recall_start", {"item_id": "hash-lookup\n"}),
+            ("history", {"item_id": "hash-lookup\n"}),
+            ("recall_start", {"item_id": "hash-lookup", "client": "claude-desktop\n"}),
+            ("recall_respond", {"attempt_token": token + "\n", "response": "x"}),
+            ("recall_hint", {"attempt_token": token + "\n"}),
+        ):
+            with self.subTest(operation=name, arguments=arguments):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "invalid-request")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+
+class ClientNameTests(_CoreCase):
+    def test_client_names_are_limited_to_printable_ascii(self) -> None:
+        before = database_digest(self.workspace.db_path)
+        for client in (
+            "bell\x07", "\x1b[31mred", "abc\u202edef", "zero\u200bwidth",
+            "tab\tname", "caf\u00e9", "", "x" * 129, "semi;colon",
+        ):
+            with self.subTest(client=client):
+                error = self.error("recall_start", item_id="hash-lookup", client=client)
+                self.assertEqual(error.code, "invalid-request")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        for client in ("claude-desktop/1.2.3", "Hermes Agent@host:8765", "a+b_c.d", "x" * 128):
+            with self.subTest(client=client):
+                started = self.call("recall_start", item_id="hash-lookup", client=client)
+                self.assertEqual(started["attempt"]["client"], client)
+
+    def test_workspace_refuses_a_control_character_client(self) -> None:
+        item = self.workspace.load_item("hash-lookup")
+        with self.assertRaises(WorkspaceError):
+            self.workspace.create_pending_attempt(
+                attempt_token=secrets.token_hex(16), item_id=item.item_id,
+                item_content_hash=item.content_hash, prompt_shown=item.prompt,
+                surface="mcp", client="evil\x1b[2J", created_at=self.clock(),
+                expires_at=self.clock() + timedelta(minutes=60),
+            )
+
+
+class DeadlineTests(_CoreCase):
+    """A call past its deadline writes nothing (review P2b)."""
+
+    def test_call_that_reaches_the_lock_after_its_deadline_writes_nothing(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        before = database_digest(self.workspace.db_path)
+        expired = time.monotonic() - 1
+        for name, arguments in (
+            ("recall_start", {"item_id": "hash-lookup"}),
+            ("recall_record", {
+                "attempt_token": token, "submission_id": _submission(),
+                "result": "demonstrated", "confidence": 4,
+                "agent_help": "none", "graded_by": "learner",
+            }),
+            ("workload", {}),
+        ):
+            with self.subTest(operation=name):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp", deadline=expired)
+                self.assertEqual(caught.exception.code, "operation-timeout")
+                self.assertEqual(caught.exception.status, 504)
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_deadline_passing_inside_the_call_stops_before_the_write(self) -> None:
+        before = database_digest(self.workspace.db_path)
+        original = self.workspace.load_item
+
+        def slow_load(item_id):
+            time.sleep(0.2)
+            return original(item_id)
+
+        with mock.patch.object(self.workspace, "load_item", side_effect=slow_load):
+            with self.assertRaises(OperationError) as caught:
+                self.core.call(
+                    "recall_start", {"item_id": "hash-lookup"}, surface="mcp",
+                    deadline=time.monotonic() + 0.05,
+                )
+        self.assertEqual(caught.exception.code, "operation-timeout")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM pending_attempts"), [])
+
+    def test_call_within_its_deadline_runs(self) -> None:
+        started = self.core.call(
+            "recall_start", {"item_id": "hash-lookup"}, surface="mcp",
+            deadline=time.monotonic() + 30,
+        )
+        self.assertEqual(started["attempt"]["state"], "open")
 
 
 if __name__ == "__main__":

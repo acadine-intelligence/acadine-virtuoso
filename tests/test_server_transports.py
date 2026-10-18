@@ -246,6 +246,7 @@ class HttpTransportTests(unittest.TestCase):
         cases = (
             ("POST", {"Host": "rebound.example:%d" % self.port}),
             ("POST", {"Origin": "https://evil.example"}),
+            ("POST", {"Origin": "null"}),
             ("OPTIONS", {"Origin": "https://chat.example",
                          "Access-Control-Request-Method": "POST"}),
         )
@@ -290,6 +291,23 @@ class HttpTransportTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"]["code"], "invalid-request")
+
+    def test_unknown_routes_get_the_404_envelope_behind_auth(self) -> None:
+        before = database_digest(self.workspace.db_path)
+        for path in ("/", "/v1", "/v1/ops", "/v1/ops/recall_start/extra", "/admin"):
+            with self.subTest(path=path):
+                status, headers, payload = _post(
+                    self.port, path, {"item_id": "hash-lookup"}, headers=self.auth
+                )
+                self.assertEqual(status, 404)
+                self.assertEqual(headers["content-type"], "application/json")
+                self.assertEqual(payload["schema"], "virtuoso/review-error@0.1")
+                self.assertEqual(payload["error"]["code"], "not-found")
+                self.assertEqual(payload["error"]["recovery"], "check-contract")
+                unauthorized, _h, denied = _post(self.port, path, {})
+                self.assertEqual(unauthorized, 401)
+                self.assertEqual(denied["error"]["code"], "unauthorized")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
 
     def test_mcp_streamable_http_with_token(self) -> None:
         async def call() -> tuple:
@@ -430,7 +448,7 @@ class BindingParityTests(unittest.TestCase):
 class OperationTimeoutTests(unittest.TestCase):
     def test_slow_operation_returns_operation_timeout(self) -> None:
         class SlowCore:
-            def call(self, name, arguments, *, surface):
+            def call(self, name, arguments, *, surface, deadline=None):
                 time.sleep(0.5)
                 return {}
 
@@ -440,6 +458,62 @@ class OperationTimeoutTests(unittest.TestCase):
             )
         self.assertEqual(status, 504)
         self.assertEqual(payload["error"]["code"], "operation-timeout")
+
+    def test_call_queued_behind_a_slow_operation_times_out_and_never_writes(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        workspace = make_workspace(Path(temporary.name).resolve())
+        returned = {"workload": threading.Event(), "recall_start": threading.Event()}
+
+        class TrackingCore(ServerCore):
+            def call(self, name, arguments, **kwargs):
+                try:
+                    return super().call(name, arguments, **kwargs)
+                finally:
+                    returned[name].set()
+
+        core = TrackingCore(workspace, clock=FixedClock())
+        release = threading.Event()
+        original = core._op_workload
+
+        def slow_workload(arguments, surface):
+            # Holds the core lock well past every caller's deadline.
+            release.wait(5)
+            return original(arguments, surface)
+
+        before = database_digest(workspace.db_path)
+
+        async def both() -> list:
+            results: list = [None, None]
+
+            async def slow() -> None:
+                results[0] = await transports.run_operation(
+                    core, "workload", {}, surface="http"
+                )
+
+            async def queued() -> None:
+                await asyncio.sleep(0.05)
+                results[1] = await transports.run_operation(
+                    core, "recall_start", {"item_id": "hash-lookup"}, surface="http"
+                )
+
+            await asyncio.gather(slow(), queued())
+            return results
+
+        with mock.patch.object(core, "_op_workload", side_effect=slow_workload), \
+                mock.patch.object(transports, "OPERATION_TIMEOUT_SECONDS", 0.3):
+            results = asyncio.run(both())
+            for status, payload in results:
+                self.assertEqual(status, 504)
+                self.assertEqual(payload["error"]["code"], "operation-timeout")
+            # The abandoned worker threads now run: the slow read finishes
+            # and releases the lock, and the queued write finds its
+            # deadline passed and writes nothing.
+            release.set()
+            self.assertTrue(returned["workload"].wait(5))
+            self.assertTrue(returned["recall_start"].wait(5))
+        self.assertEqual(rows(workspace.db_path, "SELECT * FROM pending_attempts"), [])
+        self.assertEqual(database_digest(workspace.db_path), before)
 
 
 @require_server_extra

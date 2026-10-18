@@ -29,6 +29,7 @@ import logging
 import secrets
 import sqlite3
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -82,6 +83,7 @@ def _error(code: str, message: str) -> OperationError:
 _ERRORS: dict[str, tuple[int, str]] = {
     "invalid-request": (400, "check-contract"),
     "unknown-operation": (404, "check-contract"),
+    "not-found": (404, "check-contract"),
     "request-too-large": (413, "shorten-request"),
     "item-not-found": (404, "reload-item"),
     "learning-required": (409, "study-first"),
@@ -91,6 +93,7 @@ _ERRORS: dict[str, tuple[int, str]] = {
     "surface-mismatch": (409, "start-new-attempt"),
     "attempt-expired": (410, "start-new-attempt"),
     "attempt-closed": (409, "start-new-attempt"),
+    "attempt-awaiting-record": (409, "record-result"),
     "response-required": (409, "respond-first"),
     "already-responded": (409, "reveal-answer"),
     "hint-unavailable": (409, "reveal-answer"),
@@ -130,7 +133,11 @@ _RESULT = {"type": "string", "enum": ["demonstrated", "partial", "not-demonstrat
 _AGENT_HELP = {"type": "string", "enum": ["none", "light", "substantial", "unknown"]}
 _GRADED_BY = {"type": "string", "enum": ["learner", "agent"]}
 _SURFACE = {"type": "string", "enum": list(SURFACES)}
-_CLIENT = {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+# Printable ASCII from a fixed set: no control characters, terminal escapes
+# or bidi marks can reach stored evidence or a log line.
+_CLIENT = {"type": ["string", "null"], "pattern": "^[A-Za-z0-9 ._:/@+-]{1,128}$",
+           "minLength": 1, "maxLength": 128,
+           "description": "Your application name: 1 to 128 letters, digits, spaces or . _ : / @ + -"}
 
 
 def _object(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -341,7 +348,9 @@ REGISTRY: tuple[Operation, ...] = (
             "Open a recall attempt and return the prompt and an attempt token. Show the "
             "prompt to the learner and do not answer it for them. The answer stays hidden "
             "until recall_respond stores the learner's own response. `client` names your "
-            "application in the stored evidence."
+            "application in the stored evidence. While an earlier attempt for the same item "
+            "has a stored response that is not recorded yet, this fails with "
+            "attempt-awaiting-record: finish that attempt with recall_record."
         ),
         input_schema=_object({"item_id": _ITEM_ID, "client": _CLIENT}, ("item_id",)),
         output_schema=_closed({
@@ -437,8 +446,10 @@ REGISTRY: tuple[Operation, ...] = (
         kind="write",
         title="Skip this item",
         description=(
-            "Skip the open attempt when the learner chooses not to answer. It appends a "
-            "skip event, closes the attempt and leaves the due date unchanged."
+            "Skip an open attempt before the learner responds, when they choose not to "
+            "answer. It appends a skip event, closes the attempt and leaves the due date "
+            "unchanged. After recall_respond stored a response, skipping fails with "
+            "attempt-awaiting-record: finish the attempt with recall_record instead."
         ),
         input_schema=_object({
             "attempt_token": _TOKEN,
@@ -527,10 +538,31 @@ class ServerCore:
         self.ttl = attempt_ttl
         self.max_response_bytes = MAX_RESPONSE_BYTES
         self._lock = threading.Lock()
+        # The running call's deadline, set only while it holds the lock.
+        self._deadline: float | None = None
 
     # -- dispatch ----------------------------------------------------------
 
-    def call(self, name: str, arguments: object, *, surface: str) -> dict[str, Any]:
+    def call(
+        self,
+        name: str,
+        arguments: object,
+        *,
+        surface: str,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        """Run one operation.
+
+        ``deadline`` is a ``time.monotonic()`` value. A binding that stops
+        waiting at its operation limit passes the same instant here. The
+        call checks it after taking the lock and again just before its
+        write, and refuses with ``operation-timeout`` without writing once
+        it has passed. So a call that waited behind a slow one, or ran out
+        of time while reading, writes nothing after its client was told
+        it timed out. A call already inside its write transaction when the
+        deadline passes still commits; a retry with the same
+        ``submission_id`` then returns the stored record.
+        """
         if surface not in SURFACES:
             raise AssertionError(f"unknown binding surface: {surface!r}")
         operation = OPERATIONS.get(name)
@@ -550,7 +582,9 @@ class ServerCore:
             raise _error("invalid-request", str(exc)) from exc
         assert isinstance(arguments, dict)
         with self._lock:
+            self._deadline = deadline
             try:
+                self._check_deadline()
                 result = getattr(self, f"_op_{name}")(arguments, surface)
             except OperationError:
                 raise
@@ -564,6 +598,8 @@ class ServerCore:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("operation %s failed", name)
                 raise _error("internal-error", "the server failed; nothing was recorded") from exc
+            finally:
+                self._deadline = None
         try:
             validate(result, operation.output_schema, where="response")
         except SchemaError as exc:
@@ -574,9 +610,20 @@ class ServerCore:
             raise _error("response-too-large", "response exceeds the one-megabyte limit")
         return result
 
+    def _check_deadline(self) -> None:
+        """Refuse, writing nothing, once the caller's deadline has passed."""
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise _error(
+                "operation-timeout",
+                "the operation ran past its time limit and wrote nothing; "
+                "retry the same request",
+            )
+
     @staticmethod
     def _domain_error(message: str) -> OperationError:
         lowered = message.lower()
+        if "awaits recall_record" in lowered:
+            return _awaiting_record()
         if "has expired" in lowered:
             return _error("attempt-expired", "this recall attempt has expired")
         if "stale" in lowered or "changed after this attempt started" in lowered:
@@ -655,6 +702,33 @@ class ServerCore:
             )
         return item
 
+    def _require_skippable(self, row: dict[str, Any], now: datetime) -> None:
+        """Only an open attempt, with no stored response, can be skipped.
+
+        Once the learner responded (and may have seen the answer), the
+        attempt is finished by recording it, so a failed recall cannot be
+        erased by skipping it and starting again.
+        """
+        if row["state"] == "responded":
+            self._require_unexpired(row, now)
+            raise _awaiting_record()
+        if row["state"] != "open":
+            raise self._closed_state_error(row)
+        self._require_unexpired(row, now)
+
+    def _require_no_attempt_awaiting_record(
+        self, item_id: str, content_hash: str, now: datetime
+    ) -> None:
+        """Refuse a new attempt while an earlier one awaits its record.
+
+        An attempt that expires unrecorded records nothing (docs/22) and
+        stops blocking a new start once ``expires_at`` passes. An attempt
+        for an earlier item version cannot be recorded, so it does not block.
+        """
+        waiting = self.workspace.attempt_awaiting_record(item_id, content_hash, now=now)
+        if waiting is not None:
+            raise _awaiting_record(waiting["expires_at"])
+
     @staticmethod
     def _closed_state_error(row: dict[str, Any]) -> OperationError:
         if row["state"] == "recorded":
@@ -705,12 +779,14 @@ class ServerCore:
 
     def _op_study_record(self, arguments: dict[str, Any], surface: str) -> dict[str, Any]:
         keys = ("item_id", "item_content_hash", "learning_unit_hash")
+        now = self.now()
+        self._check_deadline()
         try:
             event = self.workspace.record_study_completion(
                 item_id=arguments["item_id"],
                 item_content_hash=arguments["item_content_hash"],
                 learning_unit_hash=arguments["learning_unit_hash"],
-                occurred_at=self.now(),
+                occurred_at=now,
                 surface=surface,
             )
         except WorkspaceError as exc:
@@ -734,6 +810,8 @@ class ServerCore:
         item = self.workspace.load_item(arguments["item_id"])
         self.workspace.require_practice_ready(item.item_id)
         now = self.now()
+        self._require_no_attempt_awaiting_record(item.item_id, item.content_hash, now)
+        self._check_deadline()
         row = self.workspace.create_pending_attempt(
             attempt_token=secrets.token_hex(16),
             item_id=item.item_id,
@@ -779,6 +857,7 @@ class ServerCore:
             item = self._current_item(row)
             if not item.hint:
                 raise _error("no-hint", "this item has no hint")
+            self._check_deadline()
             row = self.workspace.record_pending_hint(
                 attempt_token=token, hint_shown_at=now
             )
@@ -820,6 +899,7 @@ class ServerCore:
         self._require_unexpired(row, now)
         self._require_after(now, row["created_at"], row["hint_shown_at"])
         self._current_item(row)
+        self._check_deadline()
         row = self.workspace.record_pending_response(
             attempt_token=token, response=response, responded_at=now
         )
@@ -929,6 +1009,7 @@ class ServerCore:
                 "record partial or not-demonstrated",
             )
         support = (SupportAction(kind="hint"),) if row["hint_shown_at"] else ()
+        self._check_deadline()
         try:
             PracticeService(self.workspace).run_administered(
                 item_id=row["item_id"],
@@ -966,8 +1047,11 @@ class ServerCore:
         row = self._load_pending(token, surface)
         existing = self.workspace.review_skip(event_id)
         if existing is not None:
+            # A replay must name the attempt this skip closed.
+            owner = existing.pop("pending_attempt_token")
             if (
-                row["state"] == "expired"
+                owner == token
+                and row["state"] == "expired"
                 and existing["item_id"] == row["item_id"]
                 and existing["item_content_hash"] == row["item_content_hash"]
             ):
@@ -982,12 +1066,11 @@ class ServerCore:
                 "submission-conflict",
                 "this submission_id was already used for another skip",
             )
-        if row["state"] not in ("open", "responded"):
-            raise self._closed_state_error(row)
         now = self.now()
-        self._require_unexpired(row, now)
+        self._require_skippable(row, now)
         self._require_after(now, row["created_at"], row["responded_at"], row["hint_shown_at"])
         self._current_item(row)
+        self._check_deadline()
         skip = self.workspace.record_review_skip(
             event_id=event_id,
             item_id=row["item_id"],
@@ -1028,6 +1111,16 @@ class ServerCore:
                 subject_kind="item", subject_id=item_id
             ),
         }
+
+
+def _awaiting_record(expires_at: str | None = None) -> OperationError:
+    message = (
+        "an attempt for this item has a stored response that is not recorded; "
+        "finish it with recall_record"
+    )
+    if expires_at is not None:
+        message += f" (it expires at {expires_at})"
+    return _error("attempt-awaiting-record", message)
 
 
 def _cli_required() -> OperationError:

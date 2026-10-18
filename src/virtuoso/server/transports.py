@@ -12,7 +12,12 @@ tool list and the ``POST /v1/ops/<name>`` routes cannot drift apart:
   the record as a 200 response, or the error envelope with its 4xx or 5xx
   status.
 
-Each call runs in a worker thread with the 30-second operation limit.
+Each call runs in a worker thread with the 30-second operation limit. The
+binding stops waiting at the limit and answers ``operation-timeout``; the
+same deadline goes to ``ServerCore.call``, which refuses without writing if
+it reaches the lock, or its write, after the deadline. A call already inside
+its write transaction at the limit may still commit, so retry a timed-out
+write with the same ``submission_id``.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import contextlib
 import json
 import logging
 import sys
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -56,10 +62,12 @@ async def run_operation(
     core: ServerCore, name: str, arguments: object, *, surface: str
 ) -> tuple[int, dict[str, Any]]:
     """Run one registry operation and return (HTTP status, payload)."""
+    limit = OPERATION_TIMEOUT_SECONDS
+    deadline = time.monotonic() + limit
     try:
-        with anyio.fail_after(OPERATION_TIMEOUT_SECONDS):
+        with anyio.fail_after(limit):
             payload = await anyio.to_thread.run_sync(
-                lambda: core.call(name, arguments, surface=surface),
+                lambda: core.call(name, arguments, surface=surface, deadline=deadline),
                 abandon_on_cancel=True,
             )
         return 200, payload
@@ -165,12 +173,18 @@ def build_http_app(
         async with session_manager.run():
             yield
 
+    async def not_found(request: Request, exc: Exception) -> Response:
+        # Only authenticated requests get here; the guard answers first.
+        error = _error("not-found", "no route at this path; use /mcp or /v1/ops/<name>")
+        return _json_response(error.status, error.to_payload())
+
     app = Starlette(
         routes=[
             Route("/mcp", endpoint=StreamableHTTPASGIApp(session_manager)),
             Route("/v1/ops/{name}", endpoint=operation_route, methods=["POST", "GET", "PUT", "DELETE"]),
         ],
         lifespan=lifespan,
+        exception_handlers={404: not_found},
     )
     return HttpGuard(
         app,

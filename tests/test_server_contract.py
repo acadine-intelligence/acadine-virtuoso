@@ -16,6 +16,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from virtuoso.server.security import (
     HttpGuard,
@@ -116,6 +117,14 @@ class ServerDocumentationTests(unittest.TestCase):
         for name in OPERATIONS:
             with self.subTest(operation=name):
                 self.assertIn(f"| `{name}` |", server)
+        from virtuoso.server.operations import _ERRORS
+
+        errors = server.split("#### Limits and errors", 1)[1]
+        for code in _ERRORS:
+            with self.subTest(code=code):
+                self.assertIn(f"`{code}`", errors)
+        self.assertIn("same `submission_id`", errors)
+        self.assertIn("writes nothing", errors)
         design = (ROOT / "docs" / "22-server-and-mcp-design.md").read_text(encoding="utf-8")
         self.assertIn("Phase 1 server core is built", design)
         self.assertIn("Expiry compares only times the server wrote", design)
@@ -173,6 +182,57 @@ class TokenLoadingTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 with self.assertRaises(ServerConfigError):
                     load_token(environ={}, token_file=path)
+
+    def test_non_ascii_token_refuses_to_start(self) -> None:
+        for token in ("\u00e9" * 40, "a" * 39 + "\u0430", "b" * 40 + "\u200b"):
+            with self.subTest(token=token):
+                with self.assertRaises(ServerConfigError) as caught:
+                    load_token(environ={"VIRTUOSO_SERVER_TOKEN": token}, token_file=None)
+                self.assertIn("ASCII", str(caught.exception))
+                self.assertNotIn(token, str(caught.exception))
+        path = self.directory / "token"
+        path.write_text("\u00e9" * 40, encoding="utf-8")
+        path.chmod(0o600)
+        with self.assertRaises(ServerConfigError):
+            load_token(environ={}, token_file=path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership")
+    def test_token_file_owned_by_another_user_is_refused(self) -> None:
+        path = self.directory / "token"
+        path.write_text("f" * 40)
+        path.chmod(0o600)
+        other = os.geteuid() + 1
+        with mock.patch("virtuoso.server.security.os.geteuid", return_value=other):
+            with self.assertRaises(ServerConfigError) as caught:
+                load_token(environ={}, token_file=path)
+        self.assertIn("owned by the user running the server", str(caught.exception))
+
+    @unittest.skipIf(os.name == "nt", "POSIX file types")
+    def test_token_file_is_checked_and_read_through_one_descriptor(self) -> None:
+        path = self.directory / "token"
+        path.write_text("f" * 40 + "\n")
+        path.chmod(0o600)
+        checked: list[int] = []
+        real_fstat = os.fstat
+
+        def fstat(descriptor: int):
+            checked.append(descriptor)
+            return real_fstat(descriptor)
+
+        # Reading by path again after the checks would let a swapped file
+        # through; the loader must use only the descriptor it checked.
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("path read")), \
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("path read")), \
+                mock.patch.object(Path, "lstat", side_effect=AssertionError("path stat")), \
+                mock.patch("virtuoso.server.security.os.fstat", side_effect=fstat):
+            self.assertEqual(load_token(environ={}, token_file=path), "f" * 40)
+        self.assertEqual(len(checked), 1)
+        fifo = self.directory / "fifo"
+        os.mkfifo(fifo, 0o600)
+        for special in (fifo, self.directory):
+            with self.subTest(path=special.name):
+                with self.assertRaises(ServerConfigError):
+                    load_token(environ={}, token_file=special)
 
 
 def _run_guard(guard: HttpGuard, *, method: str = "POST", path: str = "/v1/ops/workload",
@@ -274,12 +334,61 @@ class HttpGuardTests(unittest.TestCase):
                 self.assertEqual(result["app_calls"], [])
 
     def test_present_unlisted_origin_gets_403_and_absent_origin_is_allowed(self) -> None:
-        foreign = _run_guard(self.guard, headers={**self.good, "Origin": "https://evil.example"})
-        self.assertEqual(foreign["status"], 403)
-        self.assertEqual(foreign["app_calls"], [])
+        for origin in ("https://evil.example", "null", "https://chat.example.evil"):
+            with self.subTest(origin=origin):
+                foreign = _run_guard(self.guard, headers={**self.good, "Origin": origin})
+                self.assertEqual(foreign["status"], 403)
+                self.assertEqual(foreign["app_calls"], [])
         listed = _run_guard(self.guard, headers={**self.good, "Origin": "https://chat.example"})
         self.assertEqual(listed["status"], 200)
         self.assertNotIn("access-control-allow-origin", listed["headers"])
+
+    def test_websocket_and_unknown_scopes_never_reach_the_app(self) -> None:
+        calls: list[str] = []
+
+        async def app(scope, receive, send):
+            calls.append(scope["type"])
+
+        self.guard.app = app
+        for scope_type in ("websocket", "webtransport", "custom"):
+            with self.subTest(scope=scope_type):
+                sent: list[dict] = []
+                inbox = [{"type": "websocket.connect"}]
+
+                async def receive():
+                    return inbox.pop(0) if inbox else {"type": "websocket.disconnect"}
+
+                async def send(message):
+                    sent.append(message)
+
+                scope = {
+                    "type": scope_type, "path": "/mcp",
+                    "headers": [
+                        (b"host", b"127.0.0.1:8765"),
+                        (b"authorization", f"Bearer {TOKEN}".encode()),
+                    ],
+                }
+                asyncio.run(self.guard(scope, receive, send))
+                self.assertEqual(calls, [])
+                if scope_type == "websocket":
+                    self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
+
+    def test_lifespan_scope_still_reaches_the_app(self) -> None:
+        calls: list[str] = []
+
+        async def app(scope, receive, send):
+            calls.append(scope["type"])
+
+        self.guard.app = app
+
+        async def receive():
+            return {"type": "lifespan.shutdown"}
+
+        async def send(message):
+            pass
+
+        asyncio.run(self.guard({"type": "lifespan"}, receive, send))
+        self.assertEqual(calls, ["lifespan"])
 
     def test_cors_preflight_gets_403(self) -> None:
         result = _run_guard(self.guard, method="OPTIONS", headers={

@@ -62,7 +62,9 @@ def validate(value: object, schema: dict[str, Any], *, where: str = "request") -
             raise SchemaError(f"{where} must have at least {schema['minLength']} characters")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             raise SchemaError(f"{where} must have at most {schema['maxLength']} characters")
-        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+        # fullmatch, not search: with search, `$` also matches before a
+        # trailing newline, so "id\n" would pass a `^...$` pattern.
+        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
             raise SchemaError(f"{where} has an invalid format")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
