@@ -1,6 +1,6 @@
 # 21. Calibrated decision annotations
 
-Status: V1 shipped in #67; V6 onward proposed. Tracked by issue #65, with credentials in #68. Each slice ships as its own reviewed PR. `12-cli-reference.md` is the authority for shipped commands and fields; this record explains the design and the slices that remain.
+Status: V1 shipped in #67; V3 to V7 proposed. Tracked by issue #65, with credentials in #68. Each slice ships as its own reviewed PR. `12-cli-reference.md` is the authority for shipped commands and fields; this record explains the design and the slices that remain.
 
 Related: design 19 (prerequisite navigation and diagnostics, issues #58 and #59) is adjacent and stays independent.
 
@@ -12,7 +12,7 @@ Three Virtuoso rules bound the design:
 
 1. **Learning evidence is what the learner did.** The README says Virtuoso "refuses to infer competence from completion counts, streaks, or AI-generated answers." A model answer is never an attempt result, never a scheduler input, and never a mastery claim. It is an annotation beside the evidence.
 2. **Local-first, no telemetry.** A hosted model is a remote API, so item text would leave the machine. The core cannot depend on it. A remote call needs explicit per-workspace consent, and a local backend stays an equal-status alternative.
-3. **No model-generated content in the core** (design 19 non-goals). A decision model generates no learning content. It only judges text that a human or an authored source supplied.
+3. **No model-generated content in the core.** This is the principle behind design 19's non-goal of no model-generated prerequisite maps or probes. A decision model generates no learning content. It only judges text that a human or an authored source supplied.
 
 So the feature is an **annotation layer**: append-only typed judgments about existing records, produced by a swappable backend through the trusted-module boundary, read by digests and review surfaces, and ignored by `next`, `compose` and every scheduler.
 
@@ -97,7 +97,7 @@ Policy in code: rank by a fixed formula over the score with the yes/no answer as
 
 ### V4. Administered-session intent (agent side, no core change)
 
-Free-text replies such as "not sure, need lessons" can be read as a recall answer one time and as a request to learn first another time. One `choice` `intent` over `answer`, `learn_first`, `go_more_fundamental`, `skip`, `stop` and `other`, with a confidence floor of 0.8, removes the guess. Below the floor the agent asks one plain question. This lands in an agent-side session skill and is listed here so the plan is complete.
+Free-text replies such as "hmm, I think I need to see this first" can be read as a recall answer one time and as a request to learn first another time. One `choice` `intent` over `answer`, `learn_first`, `go_more_fundamental`, `skip`, `stop` and `other`, with a confidence floor of 0.8, removes the guess. Below the floor the agent asks one plain question. This lands in an agent-side session skill and is listed here so the plan is complete.
 
 ### Later
 
@@ -123,5 +123,5 @@ Free-text replies such as "not sure, need lessons" can be read as a recall answe
 2. **Remote consent.** A workspace may run a remote module after `annotate allow-remote --yes`. Item text then leaves the machine for that workspace only. `--revoke` withdraws consent. The public default is off.
 3. **First tracer.** T1 item quality, because item data exists before attempt data does.
 4. **Self-grade exposure.** The V3 check runs only after the self-grade is recorded and appears only in a digest. Showing coverage at reveal time would anchor the grade and taint the evidence.
-5. **Order against #58 and #59.** Slices land independently. V1 touched `annotations.py`, `modules.py`, `workspace.py` (migration 17) and `cli.py`; design 19 touches `learning_state.py`, `composition.py` and a new prerequisites module.
+5. **Order against #58 and #59.** Slices land independently. V1 touched `annotations.py`, `modules.py`, `workspace.py` (migration 17) and `cli.py`; design 19 works on the prerequisite map and probe tables.
 6. **Question sets in code.** Shipped sets are frozen. A change ships as a new set id.
