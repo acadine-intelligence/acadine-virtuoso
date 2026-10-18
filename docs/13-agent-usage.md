@@ -1,6 +1,6 @@
 # Agent usage guide
 
-How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Virtuoso. The CLI with `--json` is the canonical integration surface. The optional Hermes plugin wraps four common CLI journeys. The optional Obsidian plugin provides a local review interface. This document can be pasted into an agent's context or linked from an `AGENTS.md`.
+How an AI agent (Hermes, Pi, Claude Code, Codex, or any harness) should drive Virtuoso. The CLI with `--json` is the canonical integration surface. The optional Hermes plugin wraps four common CLI journeys. The optional Obsidian plugin provides a local review interface. This document can be pasted into an agent's context or linked from an `AGENTS.md`. For a ready-made skill that runs the capture and recall journeys below, see `examples/agent-skills/`.
 
 ## The five rules
 
