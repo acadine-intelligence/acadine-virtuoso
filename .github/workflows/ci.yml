@@ -174,11 +174,42 @@ jobs:
           npx playwright install --with-deps chromium
           npm run test:browser
 
+  server:
+    # The optional [server] extra (docs/22). The base jobs above never install it.
+    name: Server extra (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install pinned uv
+        run: 'python -m pip install --only-binary=:all: --require-hashes -r ci/bootstrap.txt'
+
+      - name: Install locked project with the server extra
+        run: uv sync --locked --group build --extra server
+
+      - name: Run Python tests with the server extra
+        env:
+          VIRTUOSO_REQUIRE_SERVER_TESTS: '1'
+        run: uv run --locked --extra server python -m unittest discover -s tests -v
+
   verified:
     # Retain the repository's required status name, with the complete matrix behind it.
     name: Python 3.11
     if: ${{ always() }}
-    needs: [python, install, obsidian-plugin, hermes-plugin]
+    needs: [python, install, obsidian-plugin, hermes-plugin, server]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -192,7 +223,7 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           results = {name: row["result"] for name, row in needs.items()}
           failures = [name for name, result in results.items() if result != "success"]
-          if set(results) != {"python", "install", "obsidian-plugin", "hermes-plugin"} or failures:
+          if set(results) != {"python", "install", "obsidian-plugin", "hermes-plugin", "server"} or failures:
               raise SystemExit(f"Required checks did not pass: {results}")
           print("All required checks passed")
           PY

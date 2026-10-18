@@ -264,6 +264,10 @@ class PracticeService:
         graded_by: str = "learner",
         surface: str = "cli",
         client: str | None = None,
+        event_id: str | None = None,
+        support_actions: tuple[SupportAction, ...] = (),
+        expected_content_hash: str | None = None,
+        pending_attempt: dict[str, str] | None = None,
     ) -> PracticeResult:
         """Record an agent-administered attempt with honest attribution.
 
@@ -283,6 +287,11 @@ class PracticeService:
         `surface` names the recording client and `client` the client name a
         caller supplies beside it. The CLI passes `surface="cli"` and no
         client name.
+
+        The server's split recall contract also passes a stable `event_id`
+        derived from its submission id, the support it observed, the item
+        version the attempt opened (`expected_content_hash`), and the
+        pending row to close in the same transaction (`pending_attempt`).
         """
         if graded_by not in _GRADED_BY:
             raise PracticeError("graded_by must be learner or agent")
@@ -317,9 +326,13 @@ class PracticeService:
             self.workspace.require_practice_ready(item_id)
         except WorkspaceError as exc:
             raise PracticeError(str(exc)) from exc
+        if expected_content_hash is not None and item.content_hash != expected_content_hash:
+            raise PracticeError(
+                "stale item content; the item changed after this attempt started"
+            )
 
         attempt = AttemptRecord(
-            event_id=f"attempt-{uuid.uuid4().hex}",
+            event_id=event_id or f"attempt-{uuid.uuid4().hex}",
             item_id=item.item_id,
             item_content_hash=item.content_hash,
             occurred_at=occurred_at,
@@ -331,19 +344,19 @@ class PracticeService:
             confidence=confidence,
             open_notes=False,
             agent_help=agent_help,
-            support_actions=(),
+            support_actions=tuple(support_actions),
             administered=True,
             graded_by=graded_by,
             surface=surface,
             client=client,
         )
         if graded_by == "agent":
-            self._persist(attempt=attempt, proposal=None)
+            self._persist(attempt=attempt, proposal=None, pending_attempt=pending_attempt)
             return PracticeResult(attempt=attempt, proposal=None)
         proposal = self._schedule(
             item=item, attempt=attempt, allow_trusted=allow_trusted
         )
-        self._persist(attempt=attempt, proposal=proposal)
+        self._persist(attempt=attempt, proposal=proposal, pending_attempt=pending_attempt)
         return PracticeResult(attempt=attempt, proposal=proposal)
 
     def run_direct(
@@ -644,7 +657,11 @@ class PracticeService:
         )
 
     def _persist(
-        self, *, attempt: AttemptRecord, proposal: SchedulerProposal | None
+        self,
+        *,
+        attempt: AttemptRecord,
+        proposal: SchedulerProposal | None,
+        pending_attempt: dict[str, str] | None = None,
     ) -> None:
         try:
             self.workspace.record_attempt(
@@ -693,6 +710,7 @@ class PracticeService:
                 },
                 state_json=None if proposal is None else proposal.proposed_state_json,
                 module_receipt=None if proposal is None else proposal.module_receipt,
+                pending_attempt=pending_attempt,
             )
         except sqlite3.IntegrityError:
             raise
