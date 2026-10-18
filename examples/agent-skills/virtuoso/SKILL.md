@@ -22,18 +22,19 @@ Good prompts ask why or how ("Why does the worker retry with jitter instead of a
 
 ## Recall: "quiz me" or "what next"
 
-1. Run `next --json` (add `--focus F` to stay in one project). Branch on `action`.
-2. `learn`: run `review study-load --item ITEM --json`, show the unit, and wait. Record completion only when the human says they finished, by piping this to `review study-record --json`, with both hashes copied from the study-load output:
-   `{"schema":"virtuoso/study-completion@0.1","item_id":ITEM,"item_content_hash":H1,"learning_unit_hash":H2,"completed":true,"surface":"cli"}`
-3. `practice`: show only the title and prompt. Do not reveal or hint at the answer. Ask for their answer and a confidence from 1 to 5.
-4. After they answer, show the reference answer and ask them to grade: demonstrated, partial or not-demonstrated. Suggest a grade only if asked, and say it is your suggestion.
-5. Record it: `practice --item ITEM --administer --response "<their exact words>" --result <grade> --confidence N --agent-help <level> --json`.
+1. Run `next --json` (add `--focus F` to stay in one project). It returns `action`, `item_id`, `title` and `prompt`, never the answer. Branch on `action`.
+2. `learn`: run `review study-load --item ITEM --json` and show `item.learning_unit`. Wait. Only when the human says they finished, pipe this request to `review study-record --json`, copying `item.content_hash` into `item_content_hash` and `item.learning_unit_hash` into `learning_unit_hash`:
+   `{"schema":"virtuoso/study-completion@0.1","item_id":ITEM,"item_content_hash":HASH,"learning_unit_hash":HASH,"completed":true,"surface":"cli"}`
+3. `practice`: show only the title and prompt. Do not read the item file, guess or hint at the answer. Ask for their answer and a confidence from 1 to 5.
+4. Only after you have both, run `review load --item ITEM --json` and show `item.answer`. Ask them to grade themselves: `demonstrated`, `partial` or `not-demonstrated`. Suggest a grade only if asked, and say it is your suggestion.
+5. Record it: `practice --item ITEM --administer --response "<their exact words>" --result <grade> --confidence N --json`. Add `--agent-help light` only if you did nothing beyond relaying the prompt and the answer.
 6. Show the stored record and the next due date. Offer one more item or stop.
 
 ## Honesty rules
 
-- `--agent-help` is honest: `none` if you only relayed the prompt, `light` for a nudge, `substantial` if you explained or graded. Default `substantial` when unsure.
-- Never invent a response, grade or confidence. If the human skips, record nothing.
+- Without `--agent-help`, an administered attempt records `substantial`, because you ran the exchange. Never pass `none`.
+- Never invent a response, grade or confidence.
+- If the human declines before seeing the prompt, record nothing. If they saw the prompt and give up, record it as `not-demonstrated` with their words or an empty response, and confidence 1.
 - A blank answer is never `demonstrated`.
 - Do not pipe scripted input into interactive `practice`; it fakes latency.
 
