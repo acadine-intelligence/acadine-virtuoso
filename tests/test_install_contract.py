@@ -43,7 +43,7 @@ class InstallContractTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("  verified:", ci)
         summary = ci.split("  verified:", 1)[1]
-        self.assertIn("needs: [python, install, obsidian-plugin, hermes-plugin]", summary)
+        self.assertIn("needs: [python, install, obsidian-plugin, hermes-plugin, server]", summary)
         self.assertIn("always()", summary)
         self.assertIn("NEEDS_JSON", summary)
         self.assertIn("name: Python 3.11", summary)
@@ -54,7 +54,7 @@ class InstallContractTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         block = ci.split("  verified:", 1)[1]
         source = textwrap.dedent(block.split("python - <<'PY'\n", 1)[1].rsplit("          PY", 1)[0])
-        required = ("python", "install", "obsidian-plugin", "hermes-plugin")
+        required = ("python", "install", "obsidian-plugin", "hermes-plugin", "server")
         for job in required:
             for status in ("success", "failure", "skipped", "cancelled", None):
                 with self.subTest(job=job, status=status):
@@ -66,6 +66,17 @@ class InstallContractTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, "-c", source], capture_output=True,
                                             text=True, env={**os.environ, "NEEDS_JSON": json.dumps(needs)})
                     self.assertEqual(result.returncode == 0, status == "success", result.stderr)
+
+    def test_server_extra_has_its_own_job_and_base_jobs_never_install_it(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        base = ci.split("  server:", 1)[0]
+        self.assertNotIn("--extra server", base)
+        server = ci.split("  server:", 1)[1].split("  verified:", 1)[0]
+        self.assertIn("uv sync --locked --group build --extra server", server)
+        self.assertIn("VIRTUOSO_REQUIRE_SERVER_TESTS: '1'", server)
+        self.assertIn(
+            "uv run --locked --extra server python -m unittest discover -s tests -v", server
+        )
 
     def test_matrix_uses_uv_for_the_requested_interpreter(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text()

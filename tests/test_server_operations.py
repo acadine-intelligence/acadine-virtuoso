@@ -1,0 +1,707 @@
+"""Phase 1 server operations over the in-process core (issue #69, docs/22).
+
+These tests need no optional dependency: the operation registry and the
+split recall contract are plain Python over the workspace services. The
+transport tests in test_server_transports.py drive the same registry
+through real MCP and HTTP clients.
+"""
+
+from __future__ import annotations
+
+import json
+import secrets
+import sys
+import unittest
+from datetime import timedelta
+from unittest import mock
+
+from server_support import (
+    LEARN_ANSWER,
+    LEARN_PROMPT,
+    LEARN_UNIT,
+    RECALL_ANSWER,
+    RECALL_HINT,
+    RECALL_PROMPT,
+    TemporaryWorkspaceCase,
+    database_digest,
+    rows,
+)
+from virtuoso.workspace import WorkspaceService
+from virtuoso.server.operations import (
+    MAX_REQUEST_BYTES,
+    OPERATIONS,
+    OperationError,
+    ServerCore,
+)
+
+
+def _submission() -> str:
+    return secrets.token_hex(16)
+
+
+class _CoreCase(TemporaryWorkspaceCase):
+    surface = "mcp"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.core = ServerCore(self.workspace, clock=self.clock)
+
+    def call(self, name: str, surface: str | None = None, **arguments):
+        return self.core.call(name, arguments, surface=surface or self.surface)
+
+    def error(self, name: str, **arguments) -> OperationError:
+        with self.assertRaises(OperationError) as caught:
+            self.call(name, **arguments)
+        return caught.exception
+
+    def start(self, item_id: str = "hash-lookup", **extra) -> str:
+        started = self.call("recall_start", item_id=item_id, **extra)
+        return started["attempt"]["attempt_token"]
+
+    def record(self, token: str, **overrides):
+        arguments = {
+            "attempt_token": token,
+            "submission_id": _submission(),
+            "result": "demonstrated",
+            "confidence": 4,
+            "agent_help": "none",
+            "graded_by": "learner",
+        }
+        arguments.update(overrides)
+        return self.call("recall_record", **arguments)
+
+    def scheduler_rows(self) -> list[dict]:
+        return rows(
+            self.workspace.db_path,
+            "SELECT item_id, state_json, source_event_id FROM scheduler_state ORDER BY item_id",
+        )
+
+
+class RegistryContractTests(unittest.TestCase):
+    def test_registry_lists_exactly_the_phase_one_operations(self) -> None:
+        self.assertEqual(
+            sorted(OPERATIONS),
+            sorted([
+                "next_action", "study_load", "study_record", "recall_start",
+                "recall_respond", "recall_hint", "recall_reveal", "recall_record",
+                "recall_skip", "workload", "history",
+            ]),
+        )
+        kinds = {name: operation.kind for name, operation in OPERATIONS.items()}
+        self.assertEqual(
+            {name for name, kind in kinds.items() if kind == "read"},
+            {"next_action", "study_load", "recall_reveal", "workload", "history"},
+        )
+
+    def test_no_operation_accepts_a_path_module_or_trusted_flag(self) -> None:
+        forbidden = ("path", "workspace", "module", "trusted", "root", "file", "dir")
+        for name, operation in OPERATIONS.items():
+            schema = operation.input_schema
+            with self.subTest(operation=name):
+                self.assertEqual(schema["type"], "object")
+                self.assertIs(schema["additionalProperties"], False)
+                for field in schema["properties"]:
+                    self.assertFalse(
+                        any(marker in field for marker in forbidden), field
+                    )
+                self.assertIs(operation.output_schema["additionalProperties"], False)
+
+    def test_item_id_inputs_cannot_carry_a_path(self) -> None:
+        for name, operation in OPERATIONS.items():
+            item = operation.input_schema["properties"].get("item_id")
+            if item is None:
+                continue
+            with self.subTest(operation=name):
+                self.assertEqual(item["pattern"], "^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+class InputContractTests(_CoreCase):
+    def test_unknown_fields_and_trusted_flags_are_rejected(self) -> None:
+        for arguments in (
+            {"allow_trusted": True},
+            {"workspace": "/tmp/other"},
+            {"module_id": "scheduler"},
+        ):
+            with self.subTest(arguments=arguments):
+                before = database_digest(self.workspace.db_path)
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(
+                        "recall_start",
+                        {"item_id": "hash-lookup", **arguments},
+                        surface="mcp",
+                    )
+                self.assertEqual(caught.exception.code, "invalid-request")
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_path_shaped_item_id_is_rejected(self) -> None:
+        error = self.error("history", item_id="../hash-lookup")
+        self.assertEqual(error.code, "invalid-request")
+
+    def test_unknown_operation_has_its_own_code(self) -> None:
+        with self.assertRaises(OperationError) as caught:
+            self.core.call("retire_item", {}, surface="http")
+        self.assertEqual(caught.exception.code, "unknown-operation")
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_oversized_request_is_rejected_before_any_write(self) -> None:
+        before = database_digest(self.workspace.db_path)
+        token = self.start()
+        after_start = database_digest(self.workspace.db_path)
+        self.assertNotEqual(before, after_start)
+        error = self.error(
+            "recall_respond",
+            attempt_token=token,
+            response="x" * (MAX_REQUEST_BYTES + 1),
+        )
+        self.assertEqual(error.code, "request-too-large")
+        self.assertEqual(error.status, 413)
+        self.assertEqual(database_digest(self.workspace.db_path), after_start)
+
+    def test_error_envelope_uses_the_review_error_schema(self) -> None:
+        error = self.error("history", item_id="BAD")
+        payload = error.to_payload()
+        self.assertEqual(payload["schema"], "virtuoso/review-error@0.1")
+        self.assertEqual(set(payload["error"]), {"code", "message", "recovery"})
+
+
+class AnswerHidingTests(_CoreCase):
+    def test_next_action_and_recall_start_never_return_the_answer(self) -> None:
+        selected = self.call("next_action")
+        self.assertEqual(selected["item_id"], "hash-lookup")
+        self.assertEqual(selected["action"], "practice")
+        text = json.dumps(selected)
+        self.assertNotIn(RECALL_ANSWER, text)
+        self.assertNotIn(RECALL_PROMPT, text)
+        started = self.call("recall_start", item_id="hash-lookup")
+        text = json.dumps(started)
+        self.assertIn(RECALL_PROMPT, text)
+        self.assertNotIn(RECALL_ANSWER, text)
+        self.assertNotIn(RECALL_HINT, text)
+        self.assertTrue(started["attempt"]["hint_available"])
+
+    def test_study_load_returns_the_unit_without_prompt_or_answer(self) -> None:
+        loaded = self.call("study_load", item_id="stack-order")
+        text = json.dumps(loaded)
+        self.assertIn(LEARN_UNIT, text)
+        self.assertNotIn(LEARN_PROMPT, text)
+        self.assertNotIn(LEARN_ANSWER, text)
+
+    def test_reveal_before_response_fails_and_writes_nothing(self) -> None:
+        token = self.start()
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_reveal", attempt_token=token)
+        self.assertEqual(error.code, "response-required")
+        self.assertNotIn(RECALL_ANSWER, json.dumps(error.to_payload()))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_reveal_after_response_returns_the_answer(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        revealed = self.call("recall_reveal", attempt_token=token)
+        self.assertEqual(revealed["answer"], RECALL_ANSWER)
+
+    def test_history_for_a_due_item_has_no_prompt_answer_or_response(self) -> None:
+        token = self.start()
+        response = "my distinctive synthetic response text"
+        self.call("recall_respond", attempt_token=token, response=response)
+        self.record(token, result="not-demonstrated", confidence=2)
+        self.clock.advance(days=30)
+        self.assertEqual(self.call("next_action")["item_id"], "hash-lookup")
+        history = self.call("history", item_id="hash-lookup")
+        self.assertEqual(history["schema"], "virtuoso/item-history@0.2")
+        self.assertEqual(len(history["attempts"]), 1)
+        text = json.dumps(history)
+        for secret in (RECALL_PROMPT, RECALL_ANSWER, RECALL_HINT, response):
+            self.assertNotIn(secret, text)
+
+
+class SplitRecallTests(_CoreCase):
+    def test_hint_between_start_and_response_sets_hint_shown_at_once(self) -> None:
+        token = self.start()
+        first = self.call("recall_hint", attempt_token=token)
+        self.assertEqual(first["hint"], RECALL_HINT)
+        self.clock.advance(seconds=5)
+        again = self.call("recall_hint", attempt_token=token)
+        self.assertEqual(again["hint_shown_at"], first["hint_shown_at"])
+        stored = rows(
+            self.workspace.db_path,
+            "SELECT hint_shown_at FROM pending_attempts WHERE attempt_token = ?",
+            (token,),
+        )
+        self.assertEqual(stored[0]["hint_shown_at"], first["hint_shown_at"])
+        self.call("recall_respond", attempt_token=token, response="buckets")
+        recorded = self.record(token, result="partial", confidence=3)
+        self.assertTrue(recorded["attempt"]["hint_used"])
+        self.assertEqual(recorded["attempt"]["support"], ["hint"])
+        stored = rows(
+            self.workspace.db_path,
+            "SELECT support_json FROM attempts WHERE event_id = ?",
+            (recorded["attempt"]["event_id"],),
+        )[0]
+        self.assertEqual(
+            [action["kind"] for action in json.loads(stored["support_json"])], ["hint"]
+        )
+
+    def test_hint_after_response_is_refused(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a guess")
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_hint", attempt_token=token)
+        self.assertEqual(error.code, "hint-unavailable")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_item_without_a_hint_reports_no_hint(self) -> None:
+        self.workspace.add_item(
+            item_id="plain-item", title="Plain", focus="misc",
+            prompt="Plain prompt?", answer="Plain answer.",
+        )
+        token = self.start("plain-item")
+        error = self.error("recall_hint", attempt_token=token)
+        self.assertEqual(error.code, "no-hint")
+
+    def test_response_is_stored_once_and_a_retry_returns_it(self) -> None:
+        token = self.start()
+        first = self.call("recall_respond", attempt_token=token, response="answer one")
+        again = self.call("recall_respond", attempt_token=token, response="answer one")
+        self.assertEqual(first, again)
+        error = self.error("recall_respond", attempt_token=token, response="answer two")
+        self.assertEqual(error.code, "already-responded")
+
+    def test_record_before_response_is_refused(self) -> None:
+        token = self.start()
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token)
+        self.assertEqual(caught.exception.code, "response-required")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_blank_response_cannot_be_demonstrated(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="   ")
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token, result="demonstrated")
+        self.assertEqual(caught.exception.code, "blank-demonstrated")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        recorded = self.record(token, result="not-demonstrated", confidence=1)
+        self.assertEqual(recorded["attempt"]["result"], "not-demonstrated")
+
+    def test_unknown_token_has_its_own_code(self) -> None:
+        error = self.error("recall_reveal", attempt_token="0" * 32)
+        self.assertEqual(error.code, "attempt-not-found")
+
+    def test_learn_first_item_must_be_studied_before_recall(self) -> None:
+        error = self.error("recall_start", item_id="stack-order")
+        self.assertEqual(error.code, "learning-required")
+
+    def test_changed_item_returns_stale_content(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        path = self.workspace.root / "items" / "hash-lookup.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\nEdited.\n", encoding="utf-8")
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token)
+        self.assertEqual(caught.exception.code, "stale-content")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+
+class IdempotencyTests(_CoreCase):
+    def test_replayed_record_returns_the_original_and_writes_nothing(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        submission = _submission()
+        first = self.record(token, submission_id=submission)
+        self.assertFalse(first["replayed"])
+        before = database_digest(self.workspace.db_path)
+        self.clock.advance(minutes=1)
+        again = self.record(token, submission_id=submission)
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["attempt"], first["attempt"])
+        self.assertEqual(again["proposal"], first["proposal"])
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_replay_with_different_grade_is_a_conflict(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        submission = _submission()
+        self.record(token, submission_id=submission)
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token, submission_id=submission, result="partial")
+        self.assertEqual(caught.exception.code, "submission-conflict")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_second_submission_for_a_recorded_attempt_is_refused(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.record(token)
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token)
+        self.assertEqual(caught.exception.code, "already-recorded")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_study_record_retry_returns_the_stored_completion(self) -> None:
+        loaded = self.call("study_load", item_id="stack-order")["item"]
+        arguments = {
+            "item_id": "stack-order",
+            "item_content_hash": loaded["content_hash"],
+            "learning_unit_hash": loaded["learning_unit_hash"],
+            "completed": True,
+        }
+        first = self.call("study_record", **arguments)
+        self.assertEqual(first["study"]["surface"], "mcp")
+        before = database_digest(self.workspace.db_path)
+        again = self.call("study_record", **arguments)
+        self.assertEqual(again["study"], first["study"])
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(self.call("next_action")["action"], "practice")
+
+
+class SkipTests(_CoreCase):
+    def test_skip_keeps_the_due_date_and_closes_the_attempt(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.record(token)
+        before_state = self.scheduler_rows()
+        self.clock.advance(days=30)
+        skipped_token = self.start()
+        submission = _submission()
+        skipped = self.call(
+            "recall_skip", attempt_token=skipped_token, submission_id=submission
+        )
+        self.assertEqual(skipped["skip"]["surface"], "mcp")
+        self.assertEqual(self.scheduler_rows(), before_state)
+        before = database_digest(self.workspace.db_path)
+        again = self.call(
+            "recall_skip", attempt_token=skipped_token, submission_id=submission
+        )
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["skip"], skipped["skip"])
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        error = self.error("recall_respond", attempt_token=skipped_token, response="late")
+        self.assertEqual(error.code, "attempt-closed")
+
+
+class GraderIsolationTests(_CoreCase):
+    def test_agent_graded_record_leaves_scheduler_and_next_unchanged(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.record(token)
+        self.clock.advance(days=30)
+        before_next = self.call("next_action")
+        before_state = self.scheduler_rows()
+        before_proposals = rows(self.workspace.db_path, "SELECT * FROM scheduler_proposals")
+        before_workload = self.call("workload")
+
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="no idea")
+        recorded = self.record(
+            token, result="not-demonstrated", confidence=1,
+            graded_by="agent", agent_help="light",
+        )
+        self.assertIsNone(recorded["proposal"])
+        self.assertEqual(recorded["attempt"]["graded_by"], "agent")
+        self.assertEqual(self.scheduler_rows(), before_state)
+        self.assertEqual(
+            rows(self.workspace.db_path, "SELECT * FROM scheduler_proposals"),
+            before_proposals,
+        )
+        self.assertEqual(self.call("next_action"), before_next)
+        self.assertEqual(self.call("workload"), before_workload)
+
+    def test_learner_graded_record_feeds_the_scheduler(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        recorded = self.record(token)
+        self.assertIsNotNone(recorded["proposal"])
+        self.assertEqual(recorded["proposal"]["algorithm"], "fsrs")
+        self.assertEqual(
+            self.scheduler_rows()[0]["source_event_id"],
+            recorded["attempt"]["event_id"],
+        )
+
+    def test_graded_by_and_agent_help_are_required_without_defaults(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        for missing in ("graded_by", "agent_help"):
+            arguments = {
+                "attempt_token": token,
+                "submission_id": _submission(),
+                "result": "demonstrated",
+                "confidence": 4,
+                "agent_help": "none",
+                "graded_by": "learner",
+            }
+            del arguments[missing]
+            with self.subTest(missing=missing):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call("recall_record", arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "invalid-request")
+                self.assertIn(missing, str(caught.exception))
+        required = OPERATIONS["recall_record"].input_schema["required"]
+        self.assertIn("graded_by", required)
+        self.assertIn("agent_help", required)
+        properties = OPERATIONS["recall_record"].input_schema["properties"]
+        self.assertNotIn("default", properties["agent_help"])
+        self.assertNotIn("default", properties["graded_by"])
+
+
+class EvidenceTests(_CoreCase):
+    def test_stored_evidence_shows_surface_client_latency_help_and_grader(self) -> None:
+        for surface, client, graded_by, help_level in (
+            ("mcp", "Synthetic Chat Client", "learner", "light"),
+            ("http", "synthetic-voice", "agent", "substantial"),
+        ):
+            with self.subTest(surface=surface):
+                started = self.call(
+                    "recall_start", surface=surface, item_id="hash-lookup", client=client
+                )
+                token = started["attempt"]["attempt_token"]
+                self.assertEqual(started["attempt"]["client"], client)
+                self.call("recall_respond", surface=surface, attempt_token=token,
+                          response="a hash table")
+                recorded = self.core.call(
+                    "recall_record",
+                    {
+                        "attempt_token": token,
+                        "submission_id": _submission(),
+                        "result": "partial",
+                        "confidence": 3,
+                        "agent_help": help_level,
+                        "graded_by": graded_by,
+                    },
+                    surface=surface,
+                )
+                stored = rows(
+                    self.workspace.db_path,
+                    "SELECT surface, client, initial_latency_ms, agent_help, graded_by,"
+                    " administered FROM attempts WHERE event_id = ?",
+                    (recorded["attempt"]["event_id"],),
+                )[0]
+                self.assertEqual(stored, {
+                    "surface": surface,
+                    "client": client,
+                    "initial_latency_ms": None,
+                    "agent_help": help_level,
+                    "graded_by": graded_by,
+                    "administered": 1,
+                })
+                self.assertEqual(recorded["attempt"]["surface"], surface)
+                self.assertEqual(recorded["attempt"]["client"], client)
+                self.assertIsNone(recorded["attempt"]["latency_ms"])
+                self.clock.advance(days=30)
+
+    def test_pending_row_with_null_client_records(self) -> None:
+        token = self.start()
+        pending = rows(
+            self.workspace.db_path,
+            "SELECT client FROM pending_attempts WHERE attempt_token = ?",
+            (token,),
+        )[0]
+        self.assertIsNone(pending["client"])
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        recorded = self.record(token)
+        self.assertIsNone(recorded["attempt"]["client"])
+        closed = rows(
+            self.workspace.db_path,
+            "SELECT state, attempt_event_id, client FROM pending_attempts"
+            " WHERE attempt_token = ?",
+            (token,),
+        )[0]
+        self.assertEqual(closed, {
+            "state": "recorded",
+            "attempt_event_id": recorded["attempt"]["event_id"],
+            "client": None,
+        })
+
+    def test_study_and_skip_writes_carry_the_binding_surface(self) -> None:
+        loaded = self.call("study_load", surface="http", item_id="stack-order")["item"]
+        studied = self.call(
+            "study_record", surface="http", item_id="stack-order",
+            item_content_hash=loaded["content_hash"],
+            learning_unit_hash=loaded["learning_unit_hash"], completed=True,
+        )
+        self.assertEqual(studied["study"]["surface"], "http")
+
+
+class OrderingAndExpiryTests(_CoreCase):
+    def test_server_clock_before_creation_is_refused(self) -> None:
+        token = self.start()
+        self.clock.advance(seconds=-1)
+        before = database_digest(self.workspace.db_path)
+        for name, arguments in (
+            ("recall_respond", {"attempt_token": token, "response": "x"}),
+            ("recall_hint", {"attempt_token": token}),
+        ):
+            with self.subTest(operation=name):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "clock-order")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_record_before_response_time_is_refused(self) -> None:
+        token = self.start()
+        self.clock.advance(seconds=10)
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.clock.advance(seconds=-5)
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.record(token)
+        self.assertEqual(caught.exception.code, "clock-order")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_response_before_hint_time_is_refused(self) -> None:
+        token = self.start()
+        self.clock.advance(seconds=10)
+        self.call("recall_hint", attempt_token=token)
+        self.clock.advance(seconds=-5)
+        with self.assertRaises(OperationError) as caught:
+            self.call("recall_respond", attempt_token=token, response="x")
+        self.assertEqual(caught.exception.code, "clock-order")
+
+    def test_no_operation_accepts_a_caller_time(self) -> None:
+        for name, operation in OPERATIONS.items():
+            with self.subTest(operation=name):
+                for field in operation.input_schema["properties"]:
+                    self.assertFalse(field.endswith("_at"), field)
+
+    def test_expired_attempt_records_nothing(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.clock.advance(minutes=61)
+        before = database_digest(self.workspace.db_path)
+        for name, arguments in (
+            ("recall_reveal", {"attempt_token": token}),
+            ("recall_record", {
+                "attempt_token": token, "submission_id": _submission(),
+                "result": "demonstrated", "confidence": 4,
+                "agent_help": "none", "graded_by": "learner",
+            }),
+        ):
+            with self.subTest(operation=name):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "attempt-expired")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_database_rejects_an_expired_record_even_if_the_server_misses_it(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self.clock.advance(minutes=61)
+        before = database_digest(self.workspace.db_path)
+        # Disable the server's own expiry check so the database trigger is
+        # the only guard left.
+        with mock.patch.object(ServerCore, "_require_unexpired", lambda *args: None):
+            with self.assertRaises(OperationError) as caught:
+                self.record(token)
+        self.assertEqual(caught.exception.code, "attempt-expired")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+
+class BindingIdentityTests(_CoreCase):
+    def test_attempt_must_finish_on_the_binding_that_started_it(self) -> None:
+        token = self.start()
+        before = database_digest(self.workspace.db_path)
+        with self.assertRaises(OperationError) as caught:
+            self.core.call(
+                "recall_respond", {"attempt_token": token, "response": "x"}, surface="http"
+            )
+        self.assertEqual(caught.exception.code, "surface-mismatch")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_nothing_due_is_a_typed_none_action(self) -> None:
+        empty = WorkspaceService.init(self.parent / "empty")
+        selected = ServerCore(empty, clock=self.clock).call("next_action", {}, surface="mcp")
+        self.assertEqual(selected["action"], "none")
+        self.assertIsNone(selected["item_id"])
+
+
+class ExternalSchedulerTests(_CoreCase):
+    def _configure_external_scheduler(self) -> None:
+        module_dir = self.workspace.root / "modules" / "fixed-ladder"
+        module_dir.mkdir(parents=True, mode=0o700)
+        module_dir.parent.chmod(0o700)
+        script = module_dir / "scheduler.py"
+        script.write_text("raise SystemExit('the server must not run the module')\n")
+        script.chmod(0o700)
+        manifest = module_dir / "virtuoso.module.json"
+        manifest.write_text(json.dumps({
+            "schema": "virtuoso/module@0.1",
+            "id": "fixed-ladder",
+            "version": "1.0.0",
+            "category": "scheduler",
+            "command": {"argv": [sys.executable, str(script)], "timeout_seconds": 2},
+            "capabilities": {"reads": ["scheduler.request"], "returns": "scheduler-proposal"},
+            "trust": "local-executable",
+        }, indent=2, sort_keys=True) + "\n")
+        manifest.chmod(0o600)
+        config = self.workspace.configuration()
+        config["scheduler"] = {
+            "algorithm": "module:fixed-ladder",
+            "context": "atomic-recall",
+            "configuration": {"intervals": [1, 3, 7, 14, 30]},
+        }
+        self.workspace.config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+        self.workspace.config_path.chmod(0o600)
+
+    def test_external_scheduler_workspace_rejects_remote_recall_writes(self) -> None:
+        token = self.start()
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        self._configure_external_scheduler()
+        before = database_digest(self.workspace.db_path)
+        for name, arguments in (
+            ("recall_start", {"item_id": "hash-lookup"}),
+            ("recall_record", {
+                "attempt_token": token, "submission_id": _submission(),
+                "result": "demonstrated", "confidence": 4,
+                "agent_help": "none", "graded_by": "learner",
+            }),
+            ("recall_record", {
+                "attempt_token": token, "submission_id": _submission(),
+                "result": "demonstrated", "confidence": 4,
+                "agent_help": "none", "graded_by": "agent",
+            }),
+        ):
+            with self.subTest(operation=name, graded_by=arguments.get("graded_by")):
+                with self.assertRaises(OperationError) as caught:
+                    self.core.call(name, arguments, surface="mcp")
+                self.assertEqual(caught.exception.code, "cli-required")
+                self.assertIn("--allow-trusted-scheduler", str(caught.exception))
+                self.assertIn("virtuoso", str(caught.exception))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+
+class LimitTests(_CoreCase):
+    def test_response_over_the_limit_is_refused(self) -> None:
+        self.core.max_response_bytes = 64
+        with self.assertRaises(OperationError) as caught:
+            self.call("workload")
+        self.assertEqual(caught.exception.code, "response-too-large")
+        self.assertGreaterEqual(caught.exception.status, 500)
+
+    def test_outputs_match_their_declared_schemas(self) -> None:
+        # The core validates every output against the registry before
+        # returning it; a full hero flow exercises each schema once.
+        selected = self.call("next_action")
+        self.assertEqual(selected["schema"], "virtuoso/server-next-action@0.1")
+        loaded = self.call("study_load", item_id="stack-order")
+        self.call(
+            "study_record", item_id="stack-order",
+            item_content_hash=loaded["item"]["content_hash"],
+            learning_unit_hash=loaded["item"]["learning_unit_hash"], completed=True,
+        )
+        token = self.start("stack-order")
+        self.call("recall_respond", attempt_token=token, response="last in first out")
+        self.call("recall_reveal", attempt_token=token)
+        self.record(token)
+        self.call("workload")
+        self.call("history", item_id="stack-order")
+        self.assertEqual(
+            self.core.ttl, timedelta(minutes=60)
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
