@@ -179,7 +179,11 @@ class AgentSkillContractTests(unittest.TestCase):
             recorded = _run(workspace, "practice", "--item", "recall-item", "--administer",
                             "--response", "", "--result", "not-demonstrated",
                             "--confidence", "1", "--json")
-            self.assertEqual(recorded["agent_help"], "substantial")
+            stated = re.search(
+                r"Without `--agent-help`, an administered attempt records `([a-z]+)`", self.text
+            )
+            assert stated is not None
+            self.assertEqual(recorded["agent_help"], stated.group(1))
 
 
 if __name__ == "__main__":
