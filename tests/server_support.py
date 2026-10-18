@@ -25,7 +25,10 @@ LEARN_UNIT = "A stack is last in, first out. Push adds to the top; pop removes i
 LEARN_PROMPT = "What order does a stack remove items in?"
 LEARN_ANSWER = "Last in, first out."
 
-START = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+# The fixed clock starts well before the real date, so a test that moves it
+# forward by weeks still writes no pending attempt that the database sees as
+# created in the future (migration 20 compares created_at with its own clock).
+START = datetime(2025, 10, 1, 9, 0, tzinfo=timezone.utc)
 
 
 def server_extra_available() -> bool:

@@ -2045,21 +2045,61 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'pending attempt is not open');
                 END""",
-            # A new attempt for an item version waits while an earlier one
-            # has a response that is not recorded yet and has not expired.
-            # Both times are server-written; julianday() compares them as
-            # instants. An attempt that expires unrecorded records nothing
-            # and no longer blocks a start. After the item changes, the old
-            # attempt can no longer be recorded, so it does not block.
+            # At most one live pending attempt (open or responded) per item,
+            # whatever its item version. Two live attempts would let a
+            # client store a wrong response on one, reveal, record the other
+            # as demonstrated and let the first expire. A database from
+            # version 19 could hold several, so before the index is built
+            # each item keeps one: its newest responded row if it has one
+            # (closing it would drop a stored response), otherwise its
+            # newest open row. The others become expired and record nothing.
+            """UPDATE pending_attempts SET state = 'expired'
+                WHERE state IN ('open', 'responded')
+                  AND attempt_token IS NOT (
+                      SELECT keep.attempt_token FROM pending_attempts AS keep
+                      WHERE keep.item_id = pending_attempts.item_id
+                        AND keep.state IN ('open', 'responded')
+                      ORDER BY keep.state = 'responded' DESC,
+                               julianday(keep.created_at) DESC,
+                               keep.rowid DESC
+                      LIMIT 1
+                  )""",
+            """CREATE UNIQUE INDEX pending_attempts_one_live_per_item
+                ON pending_attempts(item_id)
+                WHERE state IN ('open', 'responded')""",
+            # A new attempt for an item waits while an earlier one, of any
+            # item version, still has a response that is not recorded. The
+            # row stays responded until it is recorded or, after expires_at
+            # by the database clock, closed as expired (next trigger), so
+            # this check needs no caller-written time.
             """CREATE TRIGGER pending_attempts_reject_start_while_awaiting_record
                 BEFORE INSERT ON pending_attempts
                 WHEN EXISTS (
                     SELECT 1 FROM pending_attempts
                     WHERE item_id = NEW.item_id
-                      AND item_content_hash = NEW.item_content_hash
                       AND state = 'responded'
-                      AND julianday(expires_at) >= julianday(NEW.created_at)
                 )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
+                END""",
+            # created_at may not run ahead of the database clock by more than
+            # five minutes, so a forged future creation time cannot stretch
+            # an attempt's window or sort it ahead of the real one.
+            """CREATE TRIGGER pending_attempts_reject_future_creation
+                BEFORE INSERT ON pending_attempts
+                WHEN NOT ifnull(
+                    julianday(NEW.created_at) <= julianday('now', '+5 minutes'), 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'pending attempt creation time is in the future');
+                END""",
+            # A stored response is closed unrecorded only once its expiry has
+            # passed by the database clock. An open row, with no response,
+            # may still move to expired at any time (a skip or a supersede).
+            """CREATE TRIGGER pending_attempts_expire_response_only_after_expiry
+                BEFORE UPDATE ON pending_attempts
+                WHEN OLD.state = 'responded' AND NEW.state = 'expired'
+                    AND NOT ifnull(julianday('now') > julianday(OLD.expires_at), 0)
                 BEGIN
                     SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
                 END""",
@@ -2150,7 +2190,7 @@ class WorkspaceService:
                 17: statements[82:86],
                 18: statements[86:92],
                 19: statements[92:106],
-                20: statements[106:111],
+                20: statements[106:115],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -3507,6 +3547,29 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "incompatible database schema: "
                         f"trigger {trigger_name} definition does not match"
+                    )
+
+            # PRAGMA index_list reports only that an index is partial, not
+            # its WHERE clause, so a named index is compared by its SQL too.
+            for index_name, object_type in sorted(expected_objects):
+                if object_type != "index":
+                    continue
+                expected_sql = expected_db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()[0]
+                actual_sql = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).fetchone()[0]
+                if (expected_sql is None) != (actual_sql is None) or (
+                    expected_sql is not None
+                    and cls._normalized_schema_sql(actual_sql)
+                    != cls._normalized_schema_sql(expected_sql)
+                ):
+                    raise WorkspaceError(
+                        "incompatible database schema: "
+                        f"index {index_name} definition does not match"
                     )
 
             for table_name, object_type in sorted(expected_objects):
@@ -5507,6 +5570,34 @@ class WorkspaceService:
                     action="starting recall",
                 )
                 self._require_practice_ready_row(db, row, item_id=item_id)
+                created = created_at.astimezone(timezone.utc).isoformat()
+                # One live attempt per item (migration 20 index). A stored
+                # response that has not expired by this start's clock waits
+                # for its record, whatever item version it belongs to.
+                waiting = db.execute(
+                    """SELECT 1 FROM pending_attempts
+                       WHERE item_id = ? AND state = 'responded'
+                         AND NOT ifnull(julianday(?) > julianday(expires_at), 0)""",
+                    (item_id, created),
+                ).fetchone()
+                if waiting is not None:
+                    raise WorkspaceError(
+                        "pending attempt has a response and awaits recall_record"
+                    )
+                # In the same transaction as the insert: an expired response
+                # closes as expired and records nothing (docs/22), and an
+                # open attempt without a response is superseded, losing
+                # nothing. The database refuses the first before expires_at.
+                db.execute(
+                    """UPDATE pending_attempts SET state = 'expired'
+                       WHERE item_id = ? AND state = 'responded'""",
+                    (item_id,),
+                )
+                db.execute(
+                    """UPDATE pending_attempts SET state = 'expired'
+                       WHERE item_id = ? AND state = 'open'""",
+                    (item_id,),
+                )
                 db.execute(
                     """INSERT INTO pending_attempts(
                            attempt_token, item_id, item_content_hash, prompt_shown,
@@ -5519,7 +5610,7 @@ class WorkspaceService:
                         prompt_shown,
                         surface,
                         client,
-                        created_at.astimezone(timezone.utc).isoformat(),
+                        created,
                         expires_at.astimezone(timezone.utc).isoformat(),
                     ),
                 )
@@ -5530,20 +5621,35 @@ class WorkspaceService:
         return stored
 
     def attempt_awaiting_record(
-        self, item_id: str, item_content_hash: str, *, now: datetime
+        self, item_id: str, *, now: datetime
     ) -> dict[str, Any] | None:
-        """The item version's unexpired pending attempt that has a response
-        but no record, if any. Migration 20 enforces the same rule on
-        insert."""
+        """The item's unexpired pending attempt that has a response but no
+        record, if any, for any item version. `create_pending_attempt` and
+        migration 20 enforce the same rule on insert."""
         if now.tzinfo is None or now.utcoffset() is None:
             raise WorkspaceError("pending attempt times must be timezone-aware")
         with self._connect() as db:
             row = db.execute(
                 f"SELECT {self._PENDING_ATTEMPT_COLUMNS} FROM pending_attempts "
-                "WHERE item_id = ? AND item_content_hash = ? AND state = 'responded' "
+                "WHERE item_id = ? AND state = 'responded' "
                 "AND julianday(expires_at) >= julianday(?) "
                 "ORDER BY expires_at DESC LIMIT 1",
-                (item_id, item_content_hash, now.astimezone(timezone.utc).isoformat()),
+                (item_id, now.astimezone(timezone.utc).isoformat()),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def live_pending_attempt(self, item_id: str) -> dict[str, Any] | None:
+        """The item's live (open or responded) pending attempt, if any.
+
+        The migration 20 index allows one; should a damaged database hold
+        more, the newest is the live one and the others are refused.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {self._PENDING_ATTEMPT_COLUMNS} FROM pending_attempts "
+                "WHERE item_id = ? AND state IN ('open', 'responded') "
+                "ORDER BY julianday(created_at) DESC, rowid DESC LIMIT 1",
+                (item_id,),
             ).fetchone()
         return dict(row) if row is not None else None
 

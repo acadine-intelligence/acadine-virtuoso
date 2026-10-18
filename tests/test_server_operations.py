@@ -12,9 +12,10 @@ import json
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from server_support import (
@@ -26,6 +27,7 @@ from server_support import (
     RECALL_PROMPT,
     TemporaryWorkspaceCase,
     database_digest,
+    make_workspace,
     rows,
 )
 from virtuoso.workspace import WorkspaceError, WorkspaceService
@@ -714,7 +716,7 @@ class AwaitingRecordTests(_CoreCase):
             (row["attempt_token"], row["state"])
             for row in rows(
                 self.workspace.db_path,
-                "SELECT attempt_token, state FROM pending_attempts ORDER BY created_at",
+                "SELECT attempt_token, state FROM pending_attempts ORDER BY rowid",
             )
         ]
 
@@ -791,10 +793,12 @@ class AwaitingRecordTests(_CoreCase):
         self.clock.advance(days=30)
         self.assertNotEqual(self.start(), token)
 
-    def test_open_attempt_without_a_response_does_not_block_a_start(self) -> None:
+    def test_open_attempt_without_a_response_is_superseded_by_a_start(self) -> None:
         first = self.start()
         second = self.start()
         self.assertNotEqual(first, second)
+        # The unanswered attempt closes; it had no response, so nothing is lost.
+        self.assertEqual(self.pending_states(), [(first, "expired"), (second, "open")])
 
     def test_database_refuses_the_start_without_the_service_check(self) -> None:
         token = self.start()
@@ -815,12 +819,23 @@ class AwaitingRecordTests(_CoreCase):
         fresh = self.start()
         self.assertNotEqual(fresh, token)
         # The expired attempt records nothing: no attempt evidence, no
-        # scheduler change, and its row keeps the response it stored.
+        # scheduler change. The start closed it (state expired) in the same
+        # transaction, and its row keeps the response it stored.
         self.assertEqual(self.call("history", item_id="hash-lookup")["attempts"], [])
         self.assertEqual(self.scheduler_rows(), state_before)
-        self.assertEqual(self.pending_states(), [(token, "responded"), (fresh, "open")])
+        self.assertEqual(self.pending_states(), [(token, "expired"), (fresh, "open")])
+        old = self.workspace.pending_attempt(token)
+        assert old is not None
+        self.assertEqual(old["response"], "no idea")
+        self.assertIsNone(old["attempt_event_id"])
+        self.assertIsNone(old["recorded_at"])
+        self.assertEqual(rows(self.workspace.db_path, "SELECT event_id FROM attempts"), [])
         error = self.error("recall_skip", attempt_token=token, submission_id=_submission())
-        self.assertEqual(error.code, "attempt-expired")
+        self.assertEqual(error.code, "attempt-closed")
+        error = self.error("recall_record", attempt_token=token, submission_id=_submission(),
+                           result="demonstrated", confidence=4, agent_help="none",
+                           graded_by="learner")
+        self.assertEqual(error.code, "attempt-closed")
 
     def test_reviewer_erase_sequence_cannot_hide_a_failed_recall(self) -> None:
         # Wrong response, reveal, skip, start again, answer, record
@@ -846,6 +861,448 @@ class AwaitingRecordTests(_CoreCase):
         self.assertIn("attempt-awaiting-record", description)
         self.assertIn("recall_record", description)
         self.assertIn("attempt-awaiting-record", OPERATIONS["recall_start"].description)
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _real_now() -> datetime:
+    """The wall clock the database reads through julianday('now')."""
+    return datetime.now(timezone.utc)
+
+
+class OneLiveAttemptTests(_CoreCase):
+    """At most one live (open or responded) pending attempt per item.
+
+    The service closes an unanswered open attempt when a new one starts, and
+    refuses the start while an unexpired response awaits its record. The
+    database holds the same line with a partial unique index, so raw SQL
+    cannot open a second live row either (independent review of #69).
+    """
+
+    def live(self, item_id: str = "hash-lookup") -> list[str]:
+        return [
+            row["attempt_token"]
+            for row in rows(
+                self.workspace.db_path,
+                "SELECT attempt_token FROM pending_attempts WHERE item_id = ?"
+                " AND state IN ('open', 'responded') ORDER BY created_at",
+                (item_id,),
+            )
+        ]
+
+    def states(self) -> list[tuple[str, str, str | None]]:
+        return [
+            (row["attempt_token"], row["state"], row["response"])
+            for row in rows(
+                self.workspace.db_path,
+                "SELECT attempt_token, state, response FROM pending_attempts"
+                " ORDER BY rowid",
+            )
+        ]
+
+    def raw_open(
+        self,
+        db: sqlite3.Connection,
+        token: str,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+        surface: str = "mcp",
+        item_id: str = "hash-lookup",
+        content_hash: str | None = None,
+    ) -> None:
+        item_hash = content_hash or self.workspace.load_item(item_id).content_hash
+        db.execute(
+            """INSERT INTO pending_attempts(
+                   attempt_token, item_id, item_content_hash, prompt_shown,
+                   surface, created_at, expires_at)
+               VALUES (?, ?, ?, 'prompt', ?, ?, ?)""",
+            (token, item_id, item_hash, surface, _iso(created_at), _iso(expires_at)),
+        )
+
+    @staticmethod
+    def raw_respond(db: sqlite3.Connection, token: str, at: datetime, text: str) -> None:
+        db.execute(
+            "UPDATE pending_attempts SET state = 'responded', response = ?,"
+            " responded_at = ? WHERE attempt_token = ?",
+            (text, _iso(at), token),
+        )
+
+    # -- the reviewer's parallel sequence ------------------------------------
+
+    def test_reviewer_parallel_sequence_cannot_hide_a_failed_recall(self) -> None:
+        # Start A (mcp) and B (http) while both are open, respond A wrong,
+        # reveal, respond B with the answer, record B, let A expire.
+        a = self.start()
+        b = self.core.call(
+            "recall_start", {"item_id": "hash-lookup"}, surface="http"
+        )["attempt"]["attempt_token"]
+        self.assertEqual(self.live(), [b])
+        error = self.error("recall_respond", attempt_token=a, response="a linked list")
+        self.assertEqual(error.code, "attempt-closed")
+        error = self.error("recall_reveal", attempt_token=a)
+        self.assertEqual(error.code, "attempt-closed")
+        self.core.call(
+            "recall_respond", {"attempt_token": b, "response": RECALL_ANSWER},
+            surface="http",
+        )
+        self.core.call("recall_reveal", {"attempt_token": b}, surface="http")
+        self.core.call("recall_record", {
+            "attempt_token": b, "submission_id": _submission(),
+            "result": "demonstrated", "confidence": 4,
+            "agent_help": "none", "graded_by": "learner",
+        }, surface="http")
+        self.clock.advance(minutes=61)
+        # A never stored a response, so no failed response was dropped.
+        self.assertEqual(
+            sorted(self.states()),
+            sorted([(a, "expired", None), (b, "recorded", RECALL_ANSWER)]),
+        )
+
+    def test_reviewer_sequence_with_a_stored_wrong_response_keeps_it(self) -> None:
+        a = self.start()
+        self.call("recall_respond", attempt_token=a, response="a linked list")
+        self.call("recall_reveal", attempt_token=a)
+        error = self.core_error("recall_start", {"item_id": "hash-lookup"}, "http")
+        self.assertEqual(error.code, "attempt-awaiting-record")
+        self.assertEqual(self.live(), [a])
+        self.record(a, result="not-demonstrated", confidence=1)
+        history = self.call("history", item_id="hash-lookup")["attempts"]
+        self.assertEqual([entry["result"] for entry in history], ["not-demonstrated"])
+
+    def core_error(self, name: str, arguments: dict, surface: str) -> OperationError:
+        with self.assertRaises(OperationError) as caught:
+            self.core.call(name, arguments, surface=surface)
+        return caught.exception
+
+    def test_reviewer_parallel_sequence_is_refused_by_raw_sql(self) -> None:
+        now = _real_now()
+        a, b = "a" * 32, "b" * 32
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self.raw_open(db, a, created_at=now, expires_at=now + timedelta(hours=1))
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "UNIQUE constraint failed: pending_attempts.item_id"
+            ):
+                self.raw_open(
+                    db, b, created_at=now, expires_at=now + timedelta(hours=1),
+                    surface="http",
+                )
+            self.raw_respond(db, a, now, "a linked list")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "awaits recall_record"):
+                self.raw_open(
+                    db, b, created_at=now, expires_at=now + timedelta(hours=1),
+                    surface="http",
+                )
+            # Closing A's response early to make room is refused too.
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "awaits recall_record"):
+                db.execute(
+                    "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                    (a,),
+                )
+        self.assertEqual(self.states(), [(a, "responded", "a linked list")])
+
+    # -- concurrency -----------------------------------------------------------
+
+    def test_concurrent_starts_on_both_bindings_leave_one_live_attempt(self) -> None:
+        for round_number in range(6):
+            with self.subTest(round=round_number):
+                # Separate workspace handles and cores, so no shared server
+                # lock orders the starts: only the database does.
+                cores = {
+                    surface: ServerCore(
+                        WorkspaceService.open(self.workspace.root), clock=self.clock
+                    )
+                    for surface in ("mcp", "http")
+                }
+                barrier = threading.Barrier(len(cores))
+                results: dict[str, str] = {}
+
+                def run(surface: str) -> None:
+                    barrier.wait()
+                    try:
+                        results[surface] = cores[surface].call(
+                            "recall_start", {"item_id": "hash-lookup"}, surface=surface
+                        )["attempt"]["attempt_token"]
+                    except OperationError as exc:
+                        results[surface] = exc.code
+
+                threads = [threading.Thread(target=run, args=(s,)) for s in cores]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                live = self.live()
+                self.assertEqual(len(live), 1, results)
+                started = [value for value in results.values() if len(value) == 32]
+                self.assertIn(live[0], started)
+                for value in results.values():
+                    if value not in started:
+                        self.assertEqual(value, "workspace-busy")
+
+    def test_starts_through_one_core_on_both_bindings_leave_one_live_attempt(self) -> None:
+        results: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def run(surface: str) -> None:
+            barrier.wait()
+            results.append(self.core.call(
+                "recall_start", {"item_id": "hash-lookup"}, surface=surface
+            )["attempt"]["attempt_token"])
+
+        threads = [threading.Thread(target=run, args=(s,)) for s in ("mcp", "http")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.live(), [results[-1]])
+
+    # -- supersede ---------------------------------------------------------------
+
+    def test_start_supersedes_an_unanswered_open_attempt(self) -> None:
+        a = self.start()
+        self.call("recall_hint", attempt_token=a)
+        b = self.core.call(
+            "recall_start", {"item_id": "hash-lookup"}, surface="http"
+        )["attempt"]["attempt_token"]
+        self.assertEqual(self.states(), [(a, "expired", None), (b, "open", None)])
+        # The superseded attempt records nothing and accepts nothing more.
+        for name, arguments in (
+            ("recall_respond", {"attempt_token": a, "response": "late"}),
+            ("recall_skip", {"attempt_token": a, "submission_id": _submission()}),
+        ):
+            with self.subTest(operation=name):
+                before = database_digest(self.workspace.db_path)
+                error = self.core_error(name, arguments, "mcp")
+                self.assertEqual(error.code, "attempt-closed")
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM attempts"), [])
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM review_skips"), [])
+
+    def test_supersede_and_start_share_one_transaction(self) -> None:
+        a = self.start()
+        before = database_digest(self.workspace.db_path)
+        # Reusing A's token makes the insert fail after the supersede ran.
+        with mock.patch(
+            "virtuoso.server.operations.secrets.token_hex", return_value=a
+        ):
+            with self.assertRaises(OperationError):
+                self.call("recall_start", item_id="hash-lookup")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(self.states(), [(a, "open", None)])
+
+    def test_responded_attempt_for_an_earlier_item_version_blocks_a_start(self) -> None:
+        # The rule is per item, not per item version: an earlier version's
+        # response still waits for its record or its expiry.
+        old = "c" * 32
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self.raw_open(
+                db, old, created_at=self.clock(),
+                expires_at=self.clock() + timedelta(minutes=60), content_hash="f" * 64,
+            )
+            self.raw_respond(db, old, self.clock(), "a linked list")
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_start", item_id="hash-lookup")
+        self.assertEqual(error.code, "attempt-awaiting-record")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.clock.advance(minutes=61)
+        fresh = self.start()
+        self.assertEqual(
+            self.states(), [(old, "expired", "a linked list"), (fresh, "open", None)]
+        )
+
+    # -- respond must target the live attempt ------------------------------------
+
+    def test_respond_refuses_an_attempt_that_is_not_the_live_one(self) -> None:
+        a = self.start()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            # A damaged database without the index holds two live rows.
+            db.execute("DROP INDEX IF EXISTS pending_attempts_one_live_per_item")
+            self.raw_open(
+                db, "d" * 32, created_at=self.clock() + timedelta(seconds=1),
+                expires_at=self.clock() + timedelta(minutes=60),
+            )
+        self.clock.advance(seconds=2)
+        before = database_digest(self.workspace.db_path)
+        error = self.error("recall_respond", attempt_token=a, response="a linked list")
+        self.assertEqual(error.code, "attempt-closed")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    # -- raw SQL hardening (migration 20) ----------------------------------------
+
+    def test_raw_sql_cannot_expire_a_response_before_its_expiry(self) -> None:
+        now = _real_now()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self.raw_open(
+                db, "a" * 32, created_at=now - timedelta(minutes=1),
+                expires_at=now + timedelta(hours=1),
+            )
+            self.raw_respond(db, "a" * 32, now, "a linked list")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "awaits recall_record"):
+                db.execute(
+                    "UPDATE pending_attempts SET state = 'expired'"
+                    " WHERE attempt_token = ?", ("a" * 32,),
+                )
+            # Control: an open row may close before its expiry; it holds no
+            # response, so a supersede loses nothing.
+            self.raw_open(
+                db, "b" * 32, item_id="stack-order", created_at=now - timedelta(minutes=1),
+                expires_at=now + timedelta(hours=1),
+            )
+            db.execute(
+                "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                ("b" * 32,),
+            )
+            # Control: a response past its expiry by the database clock closes.
+            self.raw_open(
+                db, "c" * 32, item_id="stack-order", created_at=now - timedelta(hours=2),
+                expires_at=now - timedelta(hours=1),
+            )
+            self.raw_respond(db, "c" * 32, now - timedelta(minutes=90), "no idea")
+            db.execute(
+                "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                ("c" * 32,),
+            )
+        self.assertEqual(
+            {token[0]: state for token, state, _ in self.states()},
+            {"a": "responded", "b": "expired", "c": "expired"},
+        )
+
+    def test_raw_sql_refuses_a_forged_future_creation_time(self) -> None:
+        now = _real_now()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            for label, created in (
+                ("a day ahead", now + timedelta(days=1)),
+                ("ten minutes ahead", now + timedelta(minutes=10)),
+            ):
+                with self.subTest(label=label):
+                    with self.assertRaisesRegex(
+                        sqlite3.IntegrityError, "creation time is in the future"
+                    ):
+                        self.raw_open(
+                            db, "a" * 32, created_at=created,
+                            expires_at=created + timedelta(hours=1),
+                        )
+            # Control: a creation time at the database clock is accepted.
+            self.raw_open(db, "a" * 32, created_at=now, expires_at=now + timedelta(hours=1))
+            self.raw_respond(db, "a" * 32, now, "a linked list")
+            # A future creation time after A's expiry no longer slips past A.
+            late = now + timedelta(hours=2)
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.raw_open(
+                    db, "b" * 32, created_at=late, expires_at=late + timedelta(hours=1)
+                )
+        self.assertEqual(self.live(), ["a" * 32])
+
+    def test_unique_index_refuses_a_second_live_row_for_any_version(self) -> None:
+        now = _real_now()
+        hour = timedelta(hours=1)
+        with sqlite3.connect(self.workspace.db_path) as db:
+            self.raw_open(db, "a" * 32, created_at=now, expires_at=now + hour)
+            for label, content_hash in (("same version", None), ("other version", "f" * 64)):
+                with self.subTest(label=label):
+                    with self.assertRaisesRegex(
+                        sqlite3.IntegrityError,
+                        "UNIQUE constraint failed: pending_attempts.item_id",
+                    ):
+                        self.raw_open(
+                            db, "b" * 32, created_at=now, expires_at=now + hour,
+                            content_hash=content_hash,
+                        )
+            # Controls: another item, and the same item once A closed.
+            self.raw_open(
+                db, "c" * 32, item_id="stack-order", created_at=now, expires_at=now + hour
+            )
+            db.execute(
+                "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                ("a" * 32,),
+            )
+            self.raw_open(db, "b" * 32, created_at=now, expires_at=now + hour)
+        self.assertEqual(self.live(), ["b" * 32])
+
+    def test_schema_validation_compares_the_index_and_trigger_sql(self) -> None:
+        tampered = {
+            "narrower index": (
+                "DROP INDEX pending_attempts_one_live_per_item",
+                "CREATE UNIQUE INDEX pending_attempts_one_live_per_item"
+                " ON pending_attempts(item_id) WHERE state = 'open'",
+            ),
+            "missing index": ("DROP INDEX pending_attempts_one_live_per_item",),
+            "expiry trigger without the database clock": (
+                "DROP TRIGGER pending_attempts_expire_response_only_after_expiry",
+                """CREATE TRIGGER pending_attempts_expire_response_only_after_expiry
+                    BEFORE UPDATE ON pending_attempts
+                    WHEN 0
+                    BEGIN
+                        SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
+                    END""",
+            ),
+            "creation trigger without the database clock": (
+                "DROP TRIGGER pending_attempts_reject_future_creation",
+                """CREATE TRIGGER pending_attempts_reject_future_creation
+                    BEFORE INSERT ON pending_attempts
+                    WHEN 0
+                    BEGIN
+                        SELECT RAISE(ABORT, 'pending attempt creation time is in the future');
+                    END""",
+            ),
+        }
+        for index, (label, statements) in enumerate(tampered.items()):
+            with self.subTest(label=label):
+                workspace = make_workspace(self.parent, f"tampered-{index}")
+                with sqlite3.connect(workspace.db_path) as db:
+                    for statement in statements:
+                        db.execute(statement)
+                with self.assertRaisesRegex(WorkspaceError, "incompatible database schema"):
+                    WorkspaceService.open(workspace.root)
+        # Control: an untouched workspace opens.
+        WorkspaceService.open(make_workspace(self.parent, "untouched").root).doctor()
+
+    def test_upgrade_from_v19_keeps_one_live_attempt_per_item(self) -> None:
+        from conftest import downgrade_skip_links_to_v19
+
+        base = self.clock()
+        hour = timedelta(hours=1)
+        with sqlite3.connect(self.workspace.db_path) as db:
+            downgrade_skip_links_to_v19(db)
+            # Two open attempts for one item: the newer one stays live.
+            self.raw_open(db, "a" * 32, created_at=base, expires_at=base + hour)
+            self.raw_open(
+                db, "b" * 32, created_at=base + timedelta(minutes=1),
+                expires_at=base + hour, surface="http",
+            )
+            # A response and a newer open attempt: the response stays live,
+            # because closing it would drop a stored recall.
+            self.raw_open(
+                db, "c" * 32, item_id="stack-order", created_at=base, expires_at=base + hour
+            )
+            self.raw_respond(db, "c" * 32, base + timedelta(minutes=1), "no idea")
+            self.raw_open(
+                db, "d" * 32, item_id="stack-order",
+                created_at=base + timedelta(minutes=2), expires_at=base + hour,
+            )
+        reopened = WorkspaceService.open(self.workspace.root)
+        reopened.doctor()
+        self.assertEqual(
+            rows(reopened.db_path, "SELECT MAX(version) AS v FROM schema_migrations"),
+            [{"v": 20}],
+        )
+        self.assertEqual(
+            {token[0]: state for token, state, _ in self.states()},
+            {"a": "expired", "b": "open", "c": "responded", "d": "expired"},
+        )
+        self.assertEqual(self.live(), ["b" * 32])
+        self.assertEqual(self.live("stack-order"), ["c" * 32])
+        self.assertEqual(
+            rows(
+                reopened.db_path,
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+                " AND name = 'pending_attempts_one_live_per_item'",
+            ),
+            [{"name": "pending_attempts_one_live_per_item"}],
+        )
 
 
 class SkipReplayOwnershipTests(_CoreCase):
@@ -874,6 +1331,17 @@ class SkipReplayOwnershipTests(_CoreCase):
         )
         # Skips from before migration 20 name no attempt.
         self.assertEqual([row["pending_attempt_token"] for row in upgraded], [None])
+        # So a replay of such a skip cannot prove which attempt it closed and
+        # is refused as a conflict, writing nothing (docs/12).
+        core = ServerCore(reopened, clock=self.clock)
+        before = database_digest(reopened.db_path)
+        with self.assertRaises(OperationError) as caught:
+            core.call(
+                "recall_skip", {"attempt_token": token, "submission_id": submission},
+                surface="mcp",
+            )
+        self.assertEqual(caught.exception.code, "submission-conflict")
+        self.assertEqual(database_digest(reopened.db_path), before)
 
     def test_skip_replay_with_another_attempts_submission_is_a_conflict(self) -> None:
         first = self.start()
@@ -1019,6 +1487,63 @@ class DeadlineTests(_CoreCase):
         self.assertEqual(caught.exception.code, "operation-timeout")
         self.assertEqual(database_digest(self.workspace.db_path), before)
         self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM pending_attempts"), [])
+
+    def _expire_deadline_on_clock_read(self):
+        """Pass the call's deadline when it reads the server clock.
+
+        The lock-entry check has already passed by then, so only the check
+        just before the write can stop the call.
+        """
+        core = self.core
+        clock_read = ServerCore.now
+
+        def now():
+            core._deadline = time.monotonic() - 1
+            return clock_read(core)
+
+        return mock.patch.object(core, "now", side_effect=now)
+
+    def _assert_times_out_without_writing(self, name: str, arguments: dict) -> None:
+        before = database_digest(self.workspace.db_path)
+        with self._expire_deadline_on_clock_read():
+            with self.assertRaises(OperationError) as caught:
+                self.core.call(
+                    name, arguments, surface="mcp", deadline=time.monotonic() + 30
+                )
+        self.assertEqual(caught.exception.code, "operation-timeout")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_each_write_checks_its_deadline_just_before_writing(self) -> None:
+        loaded = self.call("study_load", item_id="stack-order")["item"]
+        with self.subTest(operation="study_record"):
+            self._assert_times_out_without_writing("study_record", {
+                "item_id": "stack-order",
+                "item_content_hash": loaded["content_hash"],
+                "learning_unit_hash": loaded["learning_unit_hash"],
+                "completed": True,
+            })
+        with self.subTest(operation="recall_start"):
+            self._assert_times_out_without_writing(
+                "recall_start", {"item_id": "hash-lookup"}
+            )
+        token = self.start()
+        for name, arguments in (
+            ("recall_hint", {"attempt_token": token}),
+            ("recall_respond", {"attempt_token": token, "response": "a hash table"}),
+            ("recall_skip", {"attempt_token": token, "submission_id": _submission()}),
+        ):
+            with self.subTest(operation=name):
+                self._assert_times_out_without_writing(name, arguments)
+        self.call("recall_respond", attempt_token=token, response="a hash table")
+        with self.subTest(operation="recall_record"):
+            self._assert_times_out_without_writing("recall_record", {
+                "attempt_token": token, "submission_id": _submission(),
+                "result": "demonstrated", "confidence": 4,
+                "agent_help": "none", "graded_by": "learner",
+            })
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM attempts"), [])
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM study_events"), [])
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM review_skips"), [])
 
     def test_call_within_its_deadline_runs(self) -> None:
         started = self.core.call(

@@ -471,6 +471,12 @@ class PendingAttemptTableTests(_Fixture):
             )
             with self.assertRaises(sqlite3.IntegrityError):
                 self._record(db, matching)
+            # One live attempt per item (migration 20): the other version's
+            # row closes, past its expiry by the database clock, first.
+            db.execute(
+                "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
+                ("v" * 32,),
+            )
             self._open(db)
             db.execute(
                 "UPDATE pending_attempts SET state = 'responded', response = ?,"
@@ -500,7 +506,7 @@ class PendingAttemptTableTests(_Fixture):
                 "SELECT attempt_token, state, attempt_event_id FROM pending_attempts"
                 " ORDER BY attempt_token",
             ),
-            [(self.TOKEN, "recorded", matching), ("v" * 32, "responded", None)],
+            [(self.TOKEN, "recorded", matching), ("v" * 32, "expired", None)],
         )
 
     def test_hint_state_is_set_once_and_survives_a_restart(self) -> None:
@@ -528,7 +534,6 @@ class PendingAttemptTableTests(_Fixture):
         with sqlite3.connect(self.workspace.db_path) as db:
             db.execute("PRAGMA foreign_keys = ON")
             self._open(db, expires_at=(self.now + timedelta(minutes=10)).isoformat())
-            self._open(db, "u" * 32)
             # A hint time after expiry is rejected.
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute(
@@ -546,6 +551,9 @@ class PendingAttemptTableTests(_Fixture):
                 " recorded_at = ? WHERE attempt_token = ?",
                 (recorded, (self.now + timedelta(minutes=3)).isoformat(), self.TOKEN),
             )
+            # One live attempt per item (migration 20), so the second row
+            # opens once the first is recorded.
+            self._open(db, "u" * 32)
             db.execute(
                 "UPDATE pending_attempts SET state = 'expired' WHERE attempt_token = ?",
                 ("u" * 32,),

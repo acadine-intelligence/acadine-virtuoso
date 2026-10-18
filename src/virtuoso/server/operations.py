@@ -348,8 +348,10 @@ REGISTRY: tuple[Operation, ...] = (
             "Open a recall attempt and return the prompt and an attempt token. Show the "
             "prompt to the learner and do not answer it for them. The answer stays hidden "
             "until recall_respond stores the learner's own response. `client` names your "
-            "application in the stored evidence. While an earlier attempt for the same item "
-            "has a stored response that is not recorded yet, this fails with "
+            "application in the stored evidence. An item has one live attempt at a time: "
+            "starting again closes an earlier attempt for the item that has no response "
+            "yet, and that attempt's token stops working. While an earlier attempt for the "
+            "same item has a stored response that is not recorded yet, this fails with "
             "attempt-awaiting-record: finish that attempt with recall_record."
         ),
         input_schema=_object({"item_id": _ITEM_ID, "client": _CLIENT}, ("item_id",)),
@@ -716,18 +718,27 @@ class ServerCore:
             raise self._closed_state_error(row)
         self._require_unexpired(row, now)
 
-    def _require_no_attempt_awaiting_record(
-        self, item_id: str, content_hash: str, now: datetime
-    ) -> None:
+    def _require_no_attempt_awaiting_record(self, item_id: str, now: datetime) -> None:
         """Refuse a new attempt while an earlier one awaits its record.
 
-        An attempt that expires unrecorded records nothing (docs/22) and
-        stops blocking a new start once ``expires_at`` passes. An attempt
-        for an earlier item version cannot be recorded, so it does not block.
+        The rule is per item, for any item version: an item has at most one
+        live attempt (docs/12). An attempt that expires unrecorded records
+        nothing (docs/22); once ``expires_at`` passes, the next start closes
+        it as expired. An unanswered open attempt does not block: the start
+        supersedes it, since it holds no response.
         """
-        waiting = self.workspace.attempt_awaiting_record(item_id, content_hash, now=now)
+        waiting = self.workspace.attempt_awaiting_record(item_id, now=now)
         if waiting is not None:
             raise _awaiting_record(waiting["expires_at"])
+
+    def _require_live(self, row: dict[str, Any]) -> None:
+        """Refuse an attempt that is not its item's one live attempt."""
+        live = self.workspace.live_pending_attempt(row["item_id"])
+        if live is None or live["attempt_token"] != row["attempt_token"]:
+            raise _error(
+                "attempt-closed",
+                "a newer attempt for this item replaced this one; use that attempt",
+            )
 
     @staticmethod
     def _closed_state_error(row: dict[str, Any]) -> OperationError:
@@ -810,7 +821,7 @@ class ServerCore:
         item = self.workspace.load_item(arguments["item_id"])
         self.workspace.require_practice_ready(item.item_id)
         now = self.now()
-        self._require_no_attempt_awaiting_record(item.item_id, item.content_hash, now)
+        self._require_no_attempt_awaiting_record(item.item_id, now)
         self._check_deadline()
         row = self.workspace.create_pending_attempt(
             attempt_token=secrets.token_hex(16),
@@ -898,6 +909,7 @@ class ServerCore:
         now = self.now()
         self._require_unexpired(row, now)
         self._require_after(now, row["created_at"], row["hint_shown_at"])
+        self._require_live(row)
         self._current_item(row)
         self._check_deadline()
         row = self.workspace.record_pending_response(
