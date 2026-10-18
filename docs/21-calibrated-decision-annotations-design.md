@@ -115,7 +115,7 @@ Free-text replies such as "hmm, I think I need to see this first" can be read as
 - No model-written items, hints or learning units through this path.
 - No remote call without workspace consent. The public default is off.
 - No telemetry. Annotations stay in the local SQLite like every other record.
-- Credential handling for remote annotators is issue #68 and is not designed here.
+- Credential handling for remote annotators is issue #68. `12-cli-reference.md` documents the shipped manifest field, resolution order, and `annotate doctor`.
 
 ## 6. Decisions
 

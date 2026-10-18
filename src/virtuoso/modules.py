@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .credentials import CredentialError, CredentialSpec, parse_credentials
 from .errors import VirtuosoError
 
 try:
@@ -301,6 +302,7 @@ class ModuleManifest:
     trust: str
     manifest_sha256: str
     network: str = "none"
+    credentials: tuple[CredentialSpec, ...] = ()
 
     @classmethod
     def load(cls, path: Path | str) -> "ModuleManifest":
@@ -318,11 +320,8 @@ class ModuleManifest:
             )
         required_keys = {"schema", "id", "version", "category", "command", "capabilities", "trust"}
         has_network = "network" in value
-        _require_exact_keys(
-            value,
-            required_keys | {"network"} if has_network else required_keys,
-            "manifest",
-        )
+        optional_keys = {key for key in ("network", "credentials") if key in value}
+        _require_exact_keys(value, required_keys | optional_keys, "manifest")
 
         module_id = value["id"]
         version = value["version"]
@@ -344,6 +343,18 @@ class ModuleManifest:
             raise ModuleError("only annotator modules may declare network: remote")
         if category == "annotator" and not has_network:
             raise ModuleError("annotator modules must declare network: none or remote")
+        credentials: tuple[CredentialSpec, ...] = ()
+        if "credentials" in value:
+            # A credential only makes sense for a call that leaves the machine,
+            # and only remote annotators sit behind the allow-remote consent gate.
+            if category != "annotator" or network != "remote":
+                raise ModuleError(
+                    "only annotator modules with network: remote may declare credentials"
+                )
+            try:
+                credentials = parse_credentials(value["credentials"])
+            except CredentialError as exc:
+                raise ModuleError(str(exc)) from exc
 
         command = value["command"]
         if not isinstance(command, dict):
@@ -402,6 +413,7 @@ class ModuleManifest:
             trust=str(trust),
             manifest_sha256=hashlib.sha256(raw).hexdigest(),
             network=str(network),
+            credentials=credentials,
         )
 
 
@@ -431,6 +443,7 @@ class ModuleRunner:
         request: dict[str, Any],
         *,
         allow_trusted: bool = False,
+        credential_environment: dict[str, str] | None = None,
     ) -> ModuleRunResult:
         if not allow_trusted:
             raise ModuleError(
@@ -465,6 +478,17 @@ class ModuleRunner:
             "LC_ALL": "C.UTF-8",
             "PYTHONIOENCODING": "utf-8",
         }
+        if credential_environment:
+            # Values come only from a resolved credential the manifest declared.
+            declared = {spec.name for spec in manifest.credentials}
+            for name, secret in credential_environment.items():
+                if name not in declared or name in environment:
+                    raise ModuleError(
+                        f"credential {name} is not declared by module {manifest.module_id}"
+                    )
+                if not isinstance(secret, str) or not secret:
+                    raise ModuleError(f"credential {name} has no usable value")
+                environment[name] = secret
         if resource is None or not hasattr(resource, "RLIMIT_NPROC"):
             raise ModuleError(
                 "module execution requires an OS process limit that prevents descendants"

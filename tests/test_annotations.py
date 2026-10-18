@@ -265,7 +265,7 @@ class AnnotationContractTests(unittest.TestCase):
             for question in ITEM_QUALITY_QUESTION_SET["questions"]
         }
         self._install(script=_BAD_ANSWER_ANNOTATOR % json.dumps(good))
-        with self.assertRaisesRegex(AnnotationError, "allowed: easy, moderate, hard"):
+        with self.assertRaisesRegex(AnnotationError, "allowed options: easy, moderate, hard"):
             AnnotationService(self.workspace).annotate_item(
                 item_id="testing-effect", module_id="recorder"
             )
@@ -448,7 +448,7 @@ class AnnotationContractTests(unittest.TestCase):
 
     # --- schema ---
 
-    def test_migration_reaches_seventeen_with_annotations_table(self) -> None:
+    def test_migration_reaches_eighteen_with_annotations_table(self) -> None:
         with self._db() as db:
             version = db.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
@@ -459,7 +459,7 @@ class AnnotationContractTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-        self.assertEqual(version, 17)
+        self.assertEqual(version, 18)
         self.assertIn("annotations", tables)
 
     def test_question_set_hash_is_stable_and_changes_with_wording(self) -> None:

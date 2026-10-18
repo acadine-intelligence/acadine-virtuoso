@@ -552,6 +552,14 @@ def _parser() -> argparse.ArgumentParser:
         default="item_quality_v1",
         help="bundled question set id (see `annotate questions`)",
     )
+    annotate_item.add_argument(
+        "--host-credential-stdin",
+        action="store_true",
+        help=(
+            "read the module's declared credential for this run from stdin "
+            "(one line, piped by a host agent; never stored)"
+        ),
+    )
     annotate_item.add_argument("--json", action="store_true")
     annotate_list = annotate_commands.add_parser(
         "list", help="list recorded annotations, newest last, with stale flags"
@@ -573,7 +581,47 @@ def _parser() -> argparse.ArgumentParser:
         "--revoke", action="store_true", help="withdraw consent for remote annotators"
     )
     annotate_allow_remote.add_argument("--json", action="store_true")
+    annotate_doctor = annotate_commands.add_parser(
+        "doctor",
+        help="report which credential sources resolve per remote annotator, without values",
+    )
+    annotate_doctor.add_argument("--json", action="store_true")
     return parser
+
+
+def _remote_annotator_lines(disclosure: dict[str, Any]) -> str:
+    """Plain text naming each remote annotator and its declared credentials."""
+    annotators = disclosure["remote_annotators"]
+    if not annotators:
+        lines = ["No remote annotator is installed in this workspace."]
+    else:
+        lines = ["Installed remote annotators and the credentials they declare:"]
+        for annotator in annotators:
+            lines.append(f"- {annotator['module_id']} {annotator['module_version']}")
+            if not annotator["credentials"]:
+                lines.append("    no credentials declared")
+            for credential in annotator["credentials"]:
+                lines.append(
+                    f"    {credential['name']} for provider {credential['provider']} "
+                    f"(sources: {', '.join(credential['sources'])})"
+                )
+    for error in disclosure["errors"]:
+        lines.append(f"- {error['module_id']}: manifest not loaded: {error['error']}")
+    return "\n".join(lines)
+
+
+def _host_credential_reader() -> str:
+    """Read one host-supplied credential line from stdin, once.
+
+    A terminal is refused so a typed key is never echoed to the screen.
+    """
+    from .credentials import MAX_VALUE_BYTES, CredentialError, parse_host_value
+
+    if sys.stdin is None or sys.stdin.isatty():
+        raise CredentialError(
+            "--host-credential-stdin needs the value piped on stdin, not typed at a terminal"
+        )
+    return parse_host_value(sys.stdin.buffer.read(MAX_VALUE_BYTES + 3))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -938,12 +986,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         module_id=args.module,
                         question_set_id=args.question_set,
                         surface="cli",
+                        host_credential=(
+                            _host_credential_reader
+                            if args.host_credential_stdin
+                            else None
+                        ),
                     ),
                     as_json=args.json,
                 )
                 return 0
             if args.annotate_command == "list":
                 _emit(service.list(item_id=args.item), as_json=args.json)
+                return 0
+            if args.annotate_command == "doctor":
+                _emit(service.doctor(), as_json=args.json)
                 return 0
             if args.annotate_command == "questions":
                 _emit(
@@ -958,6 +1014,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.revoke:
                     _emit(workspace.configure_annotator(allow_remote=False), as_json=args.json)
                     return 0
+                # Consent must be informed: list each installed remote
+                # annotator and the credential names and providers it declares.
+                disclosure = service.remote_annotators()
                 if not args.yes:
                     print(
                         "Remote annotators receive the item title, focus, prompt, answer, "
@@ -968,8 +1027,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "for this workspace.",
                         file=sys.stderr,
                     )
+                    print(file=sys.stderr)
+                    print(_remote_annotator_lines(disclosure), file=sys.stderr)
                     return 2
-                _emit(workspace.configure_annotator(allow_remote=True), as_json=args.json)
+                payload = workspace.configure_annotator(allow_remote=True)
+                payload.update(disclosure)
+                if args.json:
+                    _emit(payload, as_json=True)
+                else:
+                    print(f"schema: {payload['schema']}")
+                    print(f"allow_remote: {payload['allow_remote']}")
+                    print(_remote_annotator_lines(disclosure))
                 return 0
         if args.command == "scheduler":
             if args.scheduler_command == "show":

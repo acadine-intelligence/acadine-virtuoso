@@ -52,7 +52,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 17
+_CURRENT_MIGRATION_VERSION = 18
 
 
 class WorkspaceError(VirtuosoError):
@@ -627,6 +627,44 @@ class WorkspaceService:
                 "annotator module must read exactly the annotation.request projection"
             )
         return manifest
+
+    def installed_annotators(self) -> tuple[list[ModuleManifest], list[dict[str, str]]]:
+        """Annotator manifests under modules/, loaded without executing them.
+
+        Returns the valid annotator manifests and, for module directories whose
+        manifest cannot be loaded, the module id and the refusal message.
+        Manifests of other categories are skipped.
+        """
+        modules_dir = self.root / "modules"
+        if modules_dir.is_symlink():
+            raise WorkspaceError(
+                f"Virtuoso-owned path must not be a symlink: {modules_dir}"
+            )
+        if not modules_dir.is_dir():
+            return [], []
+        manifests: list[ModuleManifest] = []
+        errors: list[dict[str, str]] = []
+        for module_dir in sorted(modules_dir.iterdir(), key=lambda path: path.name):
+            module_id = module_dir.name
+            if not (module_dir / "virtuoso.module.json").exists():
+                continue
+            if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", module_id):
+                errors.append(
+                    {"module_id": module_id, "error": "module id must be lowercase dash-separated words"}
+                )
+                continue
+            try:
+                manifest = self._module_manifest(module_id, label="installed")
+            except WorkspaceError as exc:
+                errors.append({"module_id": module_id, "error": str(exc)})
+                continue
+            if manifest.category != "annotator":
+                continue
+            try:
+                manifests.append(self.annotator_module_manifest(module_id))
+            except WorkspaceError as exc:
+                errors.append({"module_id": module_id, "error": str(exc)})
+        return manifests, errors
 
     def _module_manifest(self, module_id: str, *, label: str) -> ModuleManifest:
         modules_dir = self.root / "modules"
@@ -1721,6 +1759,48 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'annotations is append-only');
                 END""",
+            # Migration 18: which credential source and provider a remote
+            # annotator run used (issue #68). Never the credential value.
+            # Nullable columns appended to existing rows; no evidence is invented.
+            """ALTER TABLE module_run_receipts ADD COLUMN credential_provider TEXT
+                CHECK(
+                    credential_provider IS NULL
+                    OR length(credential_provider) BETWEEN 1 AND 64
+                )""",
+            """ALTER TABLE module_run_receipts ADD COLUMN credential_source TEXT
+                CHECK(
+                    (credential_source IS NULL) = (credential_provider IS NULL)
+                    AND (
+                        credential_source IS NULL
+                        OR credential_source IN ('host','env','keychain')
+                    )
+                )""",
+            """ALTER TABLE annotations ADD COLUMN credential_provider TEXT
+                CHECK(
+                    credential_provider IS NULL
+                    OR length(credential_provider) BETWEEN 1 AND 64
+                )""",
+            """ALTER TABLE annotations ADD COLUMN credential_source TEXT
+                CHECK(
+                    (credential_source IS NULL) = (credential_provider IS NULL)
+                    AND (
+                        credential_source IS NULL
+                        OR credential_source IN ('host','env','keychain')
+                    )
+                    AND (credential_source IS NULL OR module_network = 'remote')
+                )""",
+            # Receipts are evidence of what ran and which credential source it
+            # used. Nothing in Virtuoso updates or deletes them, so reject both.
+            """CREATE TRIGGER module_run_receipts_reject_update
+                BEFORE UPDATE ON module_run_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'module_run_receipts is append-only');
+                END""",
+            """CREATE TRIGGER module_run_receipts_reject_delete
+                BEFORE DELETE ON module_run_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'module_run_receipts is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1806,6 +1886,7 @@ class WorkspaceService:
                 15: statements[69:79],
                 16: statements[79:82],
                 17: statements[82:86],
+                18: statements[86:92],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -5023,8 +5104,13 @@ class WorkspaceService:
         module_started_at: datetime,
         module_completed_at: datetime,
         surface: str,
+        credential_source: str | None = None,
+        credential_provider: str | None = None,
     ) -> dict[str, Any]:
         """Append one annotation and its module receipt in one transaction.
+
+        A remote run that used a credential records which source resolved it
+        and the provider. The credential value is never passed here.
 
         The subject hash is re-checked inside the transaction so an item that
         changed while the module ran produces no annotation.
@@ -5080,8 +5166,9 @@ class WorkspaceService:
                 INSERT INTO module_run_receipts(
                     receipt_id, module_id, module_version, category, kind,
                     manifest_sha256, stdout_sha256, status, error,
-                    duration_ms, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', NULL, ?, ?, ?)
+                    duration_ms, started_at, completed_at,
+                    credential_provider, credential_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', NULL, ?, ?, ?, ?, ?)
                 """,
                 (
                     receipt_id,
@@ -5094,6 +5181,8 @@ class WorkspaceService:
                     duration_ms,
                     module_started_at.isoformat(),
                     module_completed_at.isoformat(),
+                    credential_provider,
+                    credential_source,
                 ),
             )
             db.execute(
@@ -5101,8 +5190,9 @@ class WorkspaceService:
                 INSERT INTO annotations(
                     annotation_id, subject_kind, subject_id, subject_hash,
                     question_set_id, question_set_hash, module_id, module_version,
-                    module_network, module_receipt_id, answers_json, occurred_at, surface
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    module_network, module_receipt_id, answers_json, occurred_at, surface,
+                    credential_provider, credential_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     annotation_id,
@@ -5118,6 +5208,8 @@ class WorkspaceService:
                     answers_json,
                     occurred_at.isoformat(),
                     surface,
+                    credential_provider,
+                    credential_source,
                 ),
             )
         return {
@@ -5134,6 +5226,8 @@ class WorkspaceService:
             "answers": result.payload["answers"],
             "occurred_at": occurred_at.isoformat(),
             "surface": surface,
+            "credential_source": credential_source,
+            "credential_provider": credential_provider,
         }
 
     def list_annotations(

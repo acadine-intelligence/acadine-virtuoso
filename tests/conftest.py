@@ -81,8 +81,22 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_credentials_to_v17(db: sqlite3.Connection) -> None:
+    """Remove migration 18 credential columns and receipt triggers."""
+    db.execute("DROP TRIGGER IF EXISTS module_run_receipts_reject_update")
+    db.execute("DROP TRIGGER IF EXISTS module_run_receipts_reject_delete")
+    for table in ("annotations", "module_run_receipts"):
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        # credential_source's CHECK names credential_provider, so drop it first.
+        for column in ("credential_source", "credential_provider"):
+            if column in columns:
+                db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 18")
+
+
 def downgrade_annotations_to_v16(db: sqlite3.Connection) -> None:
     """Remove migration 17 annotation state from a fresh test database."""
+    downgrade_credentials_to_v17(db)
     db.execute("DROP TRIGGER IF EXISTS annotations_reject_update")
     db.execute("DROP TRIGGER IF EXISTS annotations_reject_delete")
     db.execute("DROP INDEX IF EXISTS annotations_by_subject")
