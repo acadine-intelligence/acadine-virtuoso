@@ -589,6 +589,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _remote_annotator_lines(disclosure: dict[str, Any]) -> str:
+    """Plain text naming each remote annotator and its declared credentials."""
+    annotators = disclosure["remote_annotators"]
+    if not annotators:
+        lines = ["No remote annotator is installed in this workspace."]
+    else:
+        lines = ["Installed remote annotators and the credentials they declare:"]
+        for annotator in annotators:
+            lines.append(f"- {annotator['module_id']} {annotator['module_version']}")
+            if not annotator["credentials"]:
+                lines.append("    no credentials declared")
+            for credential in annotator["credentials"]:
+                lines.append(
+                    f"    {credential['name']} for provider {credential['provider']} "
+                    f"(sources: {', '.join(credential['sources'])})"
+                )
+    for error in disclosure["errors"]:
+        lines.append(f"- {error['module_id']}: manifest not loaded: {error['error']}")
+    return "\n".join(lines)
+
+
 def _host_credential_reader() -> str:
     """Read one host-supplied credential line from stdin, once.
 
@@ -993,6 +1014,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.revoke:
                     _emit(workspace.configure_annotator(allow_remote=False), as_json=args.json)
                     return 0
+                # Consent must be informed: list each installed remote
+                # annotator and the credential names and providers it declares.
+                disclosure = service.remote_annotators()
                 if not args.yes:
                     print(
                         "Remote annotators receive the item title, focus, prompt, answer, "
@@ -1003,8 +1027,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "for this workspace.",
                         file=sys.stderr,
                     )
+                    print(file=sys.stderr)
+                    print(_remote_annotator_lines(disclosure), file=sys.stderr)
                     return 2
-                _emit(workspace.configure_annotator(allow_remote=True), as_json=args.json)
+                payload = workspace.configure_annotator(allow_remote=True)
+                payload.update(disclosure)
+                if args.json:
+                    _emit(payload, as_json=True)
+                else:
+                    print(f"schema: {payload['schema']}")
+                    print(f"allow_remote: {payload['allow_remote']}")
+                    print(_remote_annotator_lines(disclosure))
                 return 0
         if args.command == "scheduler":
             if args.scheduler_command == "show":

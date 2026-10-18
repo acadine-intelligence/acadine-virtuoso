@@ -27,6 +27,11 @@ QUESTION_SET_SCHEMA = "virtuoso/annotation-question-set@0.1"
 ANNOTATION_SCHEMA = "virtuoso/annotation@0.1"
 ANNOTATION_LIST_SCHEMA = "virtuoso/annotation-list@0.1"
 ANNOTATOR_DOCTOR_SCHEMA = "virtuoso/annotator-doctor@0.1"
+CONSENT_COMMAND = "virtuoso annotate allow-remote --yes"
+NOT_CHECKED_REASON = (
+    "this workspace has not allowed remote annotators, so doctor read no "
+    f"credential source; run `{CONSENT_COMMAND}` to let doctor check env and keychain"
+)
 
 # The bundled question set. The hash of its canonical JSON travels with every
 # annotation, so a later wording change never masquerades as the same question.
@@ -276,14 +281,46 @@ class AnnotationService:
         record["claims_mastery"] = False
         return record
 
+    def remote_annotators(self) -> dict[str, Any]:
+        """Installed remote annotators and the credentials each declares.
+
+        Names and providers only. Reads manifests, never a credential source,
+        so consent can be informed before it is given.
+        """
+        try:
+            manifests, errors = self.workspace.installed_annotators()
+        except WorkspaceError as exc:
+            raise AnnotationError(str(exc)) from exc
+        return {
+            "remote_annotators": [
+                {
+                    "module_id": manifest.module_id,
+                    "module_version": manifest.version,
+                    "credentials": [
+                        {
+                            "name": spec.name,
+                            "provider": spec.provider,
+                            "sources": list(spec.sources),
+                        }
+                        for spec in manifest.credentials
+                    ],
+                }
+                for manifest in manifests
+                if manifest.network == "remote"
+            ],
+            "errors": errors,
+        }
+
     def doctor(self, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         """Per installed remote annotator, which credential sources resolve.
 
-        Reads env and keychain values to test them and discards them. Never
+        Without the allow-remote consent it reads no source at all: env and
+        keychain are reported ``not_checked`` with a reason naming the consent
+        command, because a keychain read can prompt the learner. With consent
+        it reads env and keychain values to test them and discards them. Never
         runs a module and never writes. The host source is offered per run,
         so it reports ``per-run``.
         """
-        environment = os.environ if environ is None else environ
         allow_remote = bool(self.workspace.annotator_settings()["allow_remote"])
         try:
             manifests, errors = self.workspace.installed_annotators()
@@ -293,10 +330,17 @@ class AnnotationService:
         for manifest in manifests:
             if manifest.network != "remote":
                 continue
-            reports = [
-                credential_resolution.probe(spec, environ=environment)
-                for spec in manifest.credentials
-            ]
+            if allow_remote:
+                environment = os.environ if environ is None else environ
+                reports = [
+                    credential_resolution.probe(spec, environ=environment)
+                    for spec in manifest.credentials
+                ]
+            else:
+                reports = [
+                    credential_resolution.not_checked(spec, reason=NOT_CHECKED_REASON)
+                    for spec in manifest.credentials
+                ]
             annotators.append(
                 {
                     "module_id": manifest.module_id,
@@ -335,26 +379,30 @@ class AnnotationService:
     @staticmethod
     def _check_answers(question_set: QuestionSet, answers: dict[str, Any]) -> None:
         """Answers must cover the question set exactly and match each primitive."""
+        # Messages name only question ids and options from the bundled set.
+        # A module-supplied value may hold the credential in an escaped form
+        # that exact-match redaction cannot see, so it is never echoed.
         expected = question_set.question_ids()
         received = set(answers)
         if received != expected:
             missing = ", ".join(sorted(expected - received)) or "none"
-            extra = ", ".join(sorted(received - expected)) or "none"
+            extra = len(received - expected)
             raise AnnotationError(
                 "annotator answers do not match the question set; "
-                f"missing: {missing}; unexpected: {extra}"
+                f"missing: {missing}; unexpected answers: {extra}"
             )
-        for question_id, answer in answers.items():
+        for question_id in sorted(expected):
+            answer = answers[question_id]
             primitive = question_set.primitive_for(question_id)
             if answer["primitive"] != primitive:
                 raise AnnotationError(
-                    f"answer {question_id} used primitive {answer['primitive']}; "
+                    f"answer {question_id} used the wrong primitive; "
                     f"the question asks for {primitive}"
                 )
             if primitive == "choice":
                 options = question_set.options_for(question_id)
                 if answer["value"] not in options:
                     raise AnnotationError(
-                        f"answer {question_id} chose {answer['value']!r}; "
-                        f"allowed: {', '.join(options)}"
+                        f"answer {question_id} chose a value outside the allowed "
+                        f"options: {', '.join(options)}"
                     )

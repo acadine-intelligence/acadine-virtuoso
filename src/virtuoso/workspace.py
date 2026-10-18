@@ -1789,6 +1789,18 @@ class WorkspaceService:
                     )
                     AND (credential_source IS NULL OR module_network = 'remote')
                 )""",
+            # Receipts are evidence of what ran and which credential source it
+            # used. Nothing in Virtuoso updates or deletes them, so reject both.
+            """CREATE TRIGGER module_run_receipts_reject_update
+                BEFORE UPDATE ON module_run_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'module_run_receipts is append-only');
+                END""",
+            """CREATE TRIGGER module_run_receipts_reject_delete
+                BEFORE DELETE ON module_run_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'module_run_receipts is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -1874,7 +1886,7 @@ class WorkspaceService:
                 15: statements[69:79],
                 16: statements[79:82],
                 17: statements[82:86],
-                18: statements[86:90],
+                18: statements[86:92],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:

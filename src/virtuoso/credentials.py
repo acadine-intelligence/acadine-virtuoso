@@ -10,17 +10,20 @@ annotation rows record only the source that resolved and the provider.
 The keychain source shells out to the operating system tool with shell
 disabled, so the core gains no runtime dependency:
 
-- macOS: ``security find-generic-password -s virtuoso -a NAME -w``
-- Linux: ``secret-tool lookup service virtuoso account NAME``
+- macOS: ``/usr/bin/security find-generic-password -s virtuoso -a NAME -w``
+- Linux: ``secret-tool lookup service virtuoso account NAME``, with
+  ``secret-tool`` taken only from ``/usr/bin`` or ``/bin``
 
-A missing tool, a non-zero exit, a timeout, or an empty entry means the
-keychain source does not resolve.
+The tool is never looked up on PATH, so a directory earlier on PATH cannot
+substitute its own program. A missing tool, a non-zero exit, a timeout, or an
+empty entry means the keychain source does not resolve.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -35,11 +38,20 @@ MAX_VALUE_BYTES = 4096
 KEYCHAIN_TIMEOUT_SECONDS = 10.0
 REDACTED = "[redacted]"
 
+# Absolute keychain tool paths, tried in order. Never resolved from PATH.
+# This mapping is the only test seam: tests replace it to point at fakes.
+KEYCHAIN_TOOL_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "security": ("/usr/bin/security",),
+    "secret-tool": ("/usr/bin/secret-tool", "/bin/secret-tool"),
+}
+
 CREDENTIAL_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+# Allowlist: a credential name must look like a credential. Names such as
+# NODE_OPTIONS, HTTPS_PROXY or SSL_CERT_FILE configure the process instead.
+CREDENTIAL_NAME_SUFFIXES: tuple[str, ...] = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 CREDENTIAL_PROVIDER = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _CREDENTIAL_FIELDS = {"name", "provider", "sources"}
-# Names that would change how the module process starts or which code it
-# loads. A credential must never be able to override them.
+# Refused even when a name has a credential suffix, as a second layer.
 _RESERVED_NAMES = {
     "PATH",
     "LANG",
@@ -102,9 +114,15 @@ def parse_credentials(value: object) -> tuple[CredentialSpec, ...]:
         if missing:
             raise CredentialError(f"missing {label} fields: " + ", ".join(missing))
         name = entry["name"]
-        if not isinstance(name, str) or not CREDENTIAL_NAME.fullmatch(name):
+        if (
+            not isinstance(name, str)
+            or not CREDENTIAL_NAME.fullmatch(name)
+            or not name.endswith(CREDENTIAL_NAME_SUFFIXES)
+        ):
             raise CredentialError(
-                f"{label}.name must match ^[A-Z][A-Z0-9_]{{0,63}}$"
+                f"{label}.name must match ^[A-Z][A-Z0-9_]{{0,63}}$ and end with "
+                + ", ".join(CREDENTIAL_NAME_SUFFIXES[:-1])
+                + f", or {CREDENTIAL_NAME_SUFFIXES[-1]}"
             )
         if name in _RESERVED_NAMES or name.startswith(_RESERVED_PREFIXES):
             raise CredentialError(
@@ -163,6 +181,24 @@ def keychain_tool() -> str | None:
     return None
 
 
+def keychain_executable() -> str | None:
+    """The absolute path of this platform's keychain tool, or None.
+
+    Only the fixed absolute candidates are considered. PATH is never read.
+    """
+    tool = keychain_tool()
+    if tool is None:
+        return None
+    for candidate in KEYCHAIN_TOOL_CANDIDATES.get(tool, ()):
+        if (
+            os.path.isabs(candidate)
+            and os.path.isfile(candidate)
+            and os.access(candidate, os.X_OK)
+        ):
+            return candidate
+    return None
+
+
 def _keychain_argv(tool: str, executable: str, name: str) -> list[str]:
     if tool == "security":
         return [executable, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"]
@@ -172,10 +208,8 @@ def _keychain_argv(tool: str, executable: str, name: str) -> list[str]:
 def keychain_lookup(name: str, *, environ: Mapping[str, str]) -> str | None:
     """Read one keychain entry. Any failure means the source does not resolve."""
     tool = keychain_tool()
-    if tool is None:
-        return None
-    executable = shutil.which(tool, path=environ.get("PATH", ""))
-    if executable is None:
+    executable = keychain_executable()
+    if tool is None or executable is None:
         return None
     try:
         completed = subprocess.run(
@@ -279,14 +313,28 @@ def resolve(
     )
 
 
+def not_checked(spec: CredentialSpec, *, reason: str) -> dict[str, object]:
+    """A doctor report that reads no source, for when consent is missing."""
+    return {
+        "name": spec.name,
+        "provider": spec.provider,
+        "sources": {
+            source: "not_checked" if source in spec.sources else "not-declared"
+            for source in CREDENTIAL_SOURCES
+        },
+        "local_source": None,
+        "reason": reason,
+    }
+
+
 def probe(spec: CredentialSpec, *, environ: Mapping[str, str]) -> dict[str, object]:
-    """Which sources resolve for doctor. Reads values and discards them."""
+    """Which sources resolve for doctor. Reads values and discards them.
+
+    Call only after the workspace allows remote annotators.
+    """
     statuses: dict[str, str] = {}
     local_source: str | None = None
-    tool = keychain_tool()
-    tool_available = (
-        tool is not None and shutil.which(tool, path=environ.get("PATH", "")) is not None
-    )
+    tool_available = keychain_executable() is not None
     for source in CREDENTIAL_SOURCES:
         if source not in spec.sources:
             statuses[source] = "not-declared"
@@ -311,12 +359,44 @@ def probe(spec: CredentialSpec, *, environ: Mapping[str, str]) -> dict[str, obje
         "provider": spec.provider,
         "sources": statuses,
         "local_source": local_source,
+        "reason": None,
     }
 
 
+def _escaped_forms(value: str) -> set[str]:
+    """The value as raw text and as repr(), ascii() and json.dumps() render it.
+
+    Quotes are stripped so a form also matches inside a larger repr or JSON
+    document, where the surrounding quote style may differ.
+    """
+    forms = {value}
+    for rendered in (
+        repr(value),
+        ascii(value),
+        json.dumps(value),
+        json.dumps(value, ensure_ascii=False),
+    ):
+        forms.add(rendered[1:-1])
+    # repr() picks its quote by content, and the value may sit inside a longer
+    # string whose repr chose the other style. Cover both styles: a trailing
+    # quote pair forces single quotes (suffix \'" is 3 characters), and a
+    # trailing single quote alone forces double quotes (suffix ' is 1).
+    forms.add(repr(value + "'\"")[1:-1][:-3])
+    if '"' not in value:
+        forms.add(repr(value + "'")[1:-1][:-1])
+    return {form for form in forms if form}
+
+
 def redact(message: str, values: tuple[str, ...]) -> str:
-    """Remove any resolved value from text that may reach the learner."""
+    """Remove any resolved value from text that may reach the learner.
+
+    Covers the raw value and its repr(), ascii() and json.dumps() escapes.
+    Longer forms are replaced first so a raw match never splits an escape.
+    """
+    forms: set[str] = set()
     for value in values:
         if value:
-            message = message.replace(value, REDACTED)
+            forms |= _escaped_forms(value)
+    for form in sorted(forms, key=len, reverse=True):
+        message = message.replace(form, REDACTED)
     return message

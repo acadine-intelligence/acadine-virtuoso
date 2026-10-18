@@ -265,7 +265,7 @@ class AnnotationContractTests(unittest.TestCase):
             for question in ITEM_QUALITY_QUESTION_SET["questions"]
         }
         self._install(script=_BAD_ANSWER_ANNOTATOR % json.dumps(good))
-        with self.assertRaisesRegex(AnnotationError, "allowed: easy, moderate, hard"):
+        with self.assertRaisesRegex(AnnotationError, "allowed options: easy, moderate, hard"):
             AnnotationService(self.workspace).annotate_item(
                 item_id="testing-effect", module_id="recorder"
             )

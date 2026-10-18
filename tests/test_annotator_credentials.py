@@ -1,13 +1,16 @@
 """Issue #68: annotator credentials resolved by name, never stored.
 
-Every value here is synthetic. Keychain tools are replaced by fake scripts on
-PATH, so no test can read a real keychain entry. Credential names are
+Every value here is synthetic. Keychain tools are replaced by fake scripts
+through the ``KEYCHAIN_TOOL_CANDIDATES`` seam, so no test can read a real
+keychain entry. The fakes also sit on PATH so a test can prove that
+production code never resolves a tool from PATH. Credential names are
 synthetic too, so a real `security` or `secret-tool` would find nothing.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -18,13 +21,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from collections.abc import Iterator, Mapping
 from typing import Any
 from unittest import mock
 
 from conftest import downgrade_credentials_to_v17
 from virtuoso import credentials as credentials_module
 from virtuoso.annotations import AnnotationError, AnnotationService
-from virtuoso.modules import ModuleError, ModuleManifest
+from virtuoso.credentials import CredentialSpec
+from virtuoso.modules import ModuleError, ModuleManifest, ModuleRunner
 from virtuoso.workspace import WorkspaceService
 
 KEY_NAME = "VIRTUOSO_TEST_KEY"
@@ -35,6 +40,48 @@ ALL_VALUES = (HOST_VALUE, ENV_VALUE, KEYCHAIN_VALUE, "test-key-not-real-7f3a")
 BASE_MODULE_ENV = {"PATH", "LANG", "LC_ALL", "PYTHONIOENCODING"}
 # macOS may add this to every new process; it carries no workspace data.
 PLATFORM_ENV = {"__CF_USER_TEXT_ENCODING"}
+# A key a repr() or json.dumps() would escape: a backslash and both quotes.
+ESCAPING_VALUE = 'test-key-not-real-7f3a\\x"q\''
+CONSENT_COMMAND = "annotate allow-remote --yes"
+
+# Runs the CLI with the keychain test seam pointed at the fake tools. The
+# seam is a module constant, so production code reads no environment for it.
+_CLI_BOOTSTRAP = """
+import sys
+from pathlib import Path
+from virtuoso import credentials
+bin_dir = Path(sys.argv[1])
+credentials.KEYCHAIN_TOOL_CANDIDATES = {
+    "security": (str(bin_dir / "security"),),
+    "secret-tool": (str(bin_dir / "secret-tool"),),
+}
+from virtuoso.cli import main
+raise SystemExit(main(sys.argv[2:]))
+"""
+
+
+class RecordingEnviron(Mapping[str, str]):
+    """An environment that records every read, to prove nothing was read."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+        self.reads: list[str] = []
+
+    def __getitem__(self, key: str) -> str:
+        self.reads.append(key)
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        self.reads.append("<iter>")
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        self.reads.append("<len>")
+        return len(self._values)
+
+    def __contains__(self, key: object) -> bool:
+        self.reads.append(f"<contains {key}>")
+        return key in self._values
 
 # Records which environment it received (names, plus a hash of the declared
 # credential) and answers every question. It never prints the value.
@@ -196,6 +243,12 @@ class CredentialFixture(unittest.TestCase):
         path.chmod(0o600)
         return path
 
+    def _fake_candidates(self) -> dict[str, tuple[str, ...]]:
+        return {
+            "security": (str(self.bin / "security"),),
+            "secret-tool": (str(self.bin / "secret-tool"),),
+        }
+
     def _store_keychain(self, value: str) -> None:
         self.keychain_store.write_text(json.dumps({KEY_NAME: value}))
 
@@ -213,7 +266,10 @@ class CredentialFixture(unittest.TestCase):
         self, *args: str, env: dict[str, str] | None = None, stdin: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-m", "virtuoso.cli", "--workspace", str(self.root), *args],
+            [
+                sys.executable, "-c", _CLI_BOOTSTRAP, str(self.bin),
+                "--workspace", str(self.root), *args,
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -294,6 +350,50 @@ class ManifestCredentialValidationTests(CredentialFixture):
             with self.subTest(label):
                 path = self._install(module_id=f"bad-{index}", credentials=credentials)
                 with self.assertRaises(ModuleError):
+                    ModuleManifest.load(path)
+
+    def test_names_must_be_credential_shaped(self) -> None:
+        good = {"provider": "typesafe", "sources": ["env"]}
+        rejected = (
+            "NODE_OPTIONS",
+            "SSH_AUTH_SOCK",
+            "HTTPS_PROXY",
+            "SSL_CERT_FILE",
+            "PATH",
+            "LD_PRELOAD",
+            "GIT_SSH_COMMAND",
+            "TYPESAFE_KEYS",
+            "KEY",
+        )
+        for index, name in enumerate(rejected):
+            with self.subTest(name=name):
+                path = self._install(
+                    module_id=f"rejected-{index}", credentials=[{**good, "name": name}]
+                )
+                with self.assertRaisesRegex(ModuleError, "_API_KEY, _TOKEN, _SECRET, or _KEY"):
+                    ModuleManifest.load(path)
+        accepted = (
+            "TYPESAFE_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "CLIENT_SECRET",
+            KEY_NAME,
+        )
+        for index, name in enumerate(accepted):
+            with self.subTest(name=name):
+                path = self._install(
+                    module_id=f"accepted-{index}", credentials=[{**good, "name": name}]
+                )
+                self.assertEqual(ModuleManifest.load(path).credentials[0].name, name)
+
+    def test_reserved_prefixes_stay_refused_even_with_a_credential_suffix(self) -> None:
+        good = {"provider": "typesafe", "sources": ["env"]}
+        for index, name in enumerate(("LD_KEY", "DYLD_TOKEN", "PYTHON_SECRET", "LC_API_KEY")):
+            with self.subTest(name=name):
+                path = self._install(
+                    module_id=f"reserved-{index}", credentials=[{**good, "name": name}]
+                )
+                with self.assertRaisesRegex(ModuleError, "reserved"):
                     ModuleManifest.load(path)
 
     def test_only_remote_annotators_may_declare_credentials(self) -> None:
@@ -503,7 +603,22 @@ class CredentialResolutionTests(CredentialFixture):
         )
         self.assertEqual(result.returncode, 2)
         self._assert_no_value(result.stdout + result.stderr, "error output")
-        self.assertIn("[redacted]", result.stderr)
+        # The error names the question; the module-supplied value is never echoed.
+        self.assertIn("answer difficulty chose a value outside the allowed options", result.stderr)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_escaped_key_in_an_invalid_answer_never_reaches_the_error(self) -> None:
+        self._install(script=_ECHOING_ANNOTATOR)
+        before = self._snapshot()
+        result = self._cli(
+            "annotate", "item", "--item", "testing-effect", "--module", "remote-judge",
+            env=self._env(**{KEY_NAME: ESCAPING_VALUE}),
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        output = result.stdout + result.stderr
+        # No form of the key: raw, repr-escaped, or JSON-escaped.
+        self.assertNotIn("test-key-not-real", output)
+        self.assertIn("difficulty", result.stderr)
         self.assertEqual(self._snapshot(), before)
 
     def test_no_value_reaches_workspace_files_or_read_surfaces(self) -> None:
@@ -600,9 +715,95 @@ class CredentialResolutionTests(CredentialFixture):
 class KeychainLookupTests(unittest.TestCase):
     def test_missing_tool_does_not_resolve(self) -> None:
         with tempfile.TemporaryDirectory() as empty:
-            self.assertIsNone(
-                credentials_module.keychain_lookup(KEY_NAME, environ={"PATH": empty})
-            )
+            missing = str(Path(empty).resolve() / "no-such-tool")
+            candidates = {"security": (missing,), "secret-tool": (missing,)}
+            with mock.patch.object(
+                credentials_module, "KEYCHAIN_TOOL_CANDIDATES", candidates, create=True
+            ):
+                self.assertIsNone(
+                    credentials_module.keychain_lookup(KEY_NAME, environ={"PATH": empty})
+                )
+
+    def test_default_tools_are_absolute_system_paths(self) -> None:
+        candidates = credentials_module.KEYCHAIN_TOOL_CANDIDATES
+        self.assertEqual(candidates["security"], ("/usr/bin/security",))
+        self.assertEqual(
+            candidates["secret-tool"], ("/usr/bin/secret-tool", "/bin/secret-tool")
+        )
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "keychain lookup is implemented for macOS and Linux",
+    )
+    def test_path_shadowed_tool_is_never_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            shadow = base / "shadow"
+            shadow.mkdir()
+            log = base / "shadow.log"
+            store = base / "store.json"
+            store.write_text(json.dumps({KEY_NAME: KEYCHAIN_VALUE}))
+            for tool in ("security", "secret-tool"):
+                path = shadow / tool
+                path.write_text(
+                    _FAKE_KEYCHAIN.format(
+                        python=sys.executable, log=str(log), store=str(store), tool=tool
+                    )
+                )
+                path.chmod(0o700)
+            missing = str(base / "absent" / "tool")
+            candidates = {"security": (missing,), "secret-tool": (missing,)}
+            shadowed_path = f"{shadow}{os.pathsep}{os.environ.get('PATH', '')}"
+            with mock.patch.object(
+                credentials_module, "KEYCHAIN_TOOL_CANDIDATES", candidates, create=True
+            ), mock.patch.dict(os.environ, {"PATH": shadowed_path}):
+                value = credentials_module.keychain_lookup(
+                    KEY_NAME, environ={"PATH": shadowed_path}
+                )
+                report = credentials_module.probe(
+                    CredentialSpec(name=KEY_NAME, provider="typesafe", sources=("keychain",)),
+                    environ={"PATH": shadowed_path},
+                )
+            self.assertIsNone(value)
+            self.assertEqual(report["sources"]["keychain"], "unavailable")
+            self.assertFalse(log.exists(), "a tool found on PATH must never run")
+
+    def test_redact_covers_repr_and_json_forms(self) -> None:
+        secrets = (ESCAPING_VALUE,)
+        for text in (
+            ESCAPING_VALUE,
+            repr(ESCAPING_VALUE),
+            f"chose {ESCAPING_VALUE!r}; allowed: easy",
+            json.dumps(ESCAPING_VALUE),
+            json.dumps({"value": ESCAPING_VALUE}),
+            json.dumps(ESCAPING_VALUE, ensure_ascii=False),
+            ascii(ESCAPING_VALUE),
+        ):
+            with self.subTest(text=text):
+                redacted = credentials_module.redact(text, secrets)
+                self.assertNotIn("test-key-not-real", redacted)
+                self.assertIn("[redacted]", redacted)
+        self.assertEqual(credentials_module.redact("no secret here", secrets), "no secret here")
+        self.assertEqual(credentials_module.redact("text", ("",)), "text")
+
+    def test_invalid_choice_error_names_the_question_not_the_value(self) -> None:
+        from virtuoso.annotations import QuestionSet
+
+        question_set = QuestionSet.bundled("item_quality_v1")
+        answers = {
+            question["id"]: {
+                "primitive": question["primitive"],
+                "value": ESCAPING_VALUE if question["primitive"] == "choice" else 0.5,
+                "confidence": 0.5,
+            }
+            for question in question_set.questions
+        }
+        with self.assertRaises(AnnotationError) as caught:
+            AnnotationService._check_answers(question_set, answers)
+        message = str(caught.exception)
+        self.assertIn("difficulty", message)
+        self.assertNotIn("test-key-not-real", message)
+        self.assertNotIn("x\\", message)
 
     def test_unsupported_platform_does_not_resolve(self) -> None:
         with mock.patch.object(credentials_module.sys, "platform", "win32"):
@@ -632,8 +833,11 @@ class AnnotatorDoctorTests(CredentialFixture):
         credential = judge["credentials"][0]
         self.assertEqual(credential["name"], KEY_NAME)
         self.assertEqual(credential["provider"], "typesafe")
-        self.assertEqual(credential["sources"]["host"], "per-run")
-        self.assertEqual(credential["sources"]["env"], "unresolved")
+        self.assertEqual(
+            credential["sources"],
+            {"host": "not_checked", "env": "not_checked", "keychain": "not_checked"},
+        )
+        self.assertIn(CONSENT_COMMAND, credential["reason"])
         self.assertIsNone(credential["local_source"])
 
         self._store_keychain(KEYCHAIN_VALUE)
@@ -649,9 +853,57 @@ class AnnotatorDoctorTests(CredentialFixture):
         self.assertEqual(credential["sources"]["env"], "resolves")
         if sys.platform == "darwin" or sys.platform.startswith("linux"):
             self.assertEqual(credential["sources"]["keychain"], "resolves")
+        self.assertEqual(credential["sources"]["host"], "per-run")
         self.assertEqual(credential["local_source"], "env")
+        self.assertIsNone(credential["reason"])
         self.assertTrue(report["annotators"][0]["ready"])
         self.assertEqual(self._snapshot(), before, "doctor must not write")
+
+    def test_doctor_without_consent_reads_no_source(self) -> None:
+        self._install()
+        self._store_keychain(KEYCHAIN_VALUE)
+        env = self._env(**{KEY_NAME: ENV_VALUE})
+        for args in (("annotate", "doctor", "--json"), ("annotate", "doctor")):
+            with self.subTest(args=args):
+                result = self._cli(*args, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(CONSENT_COMMAND, result.stdout)
+                self.assertIn(KEY_NAME, result.stdout)
+                self.assertNotIn("resolves", result.stdout)
+                self._assert_no_value(result.stdout + result.stderr, "doctor output")
+        self.assertFalse(
+            self.keychain_log.exists(), "doctor without consent must not run a keychain tool"
+        )
+
+        environ = RecordingEnviron({"PATH": env["PATH"], KEY_NAME: ENV_VALUE})
+        with mock.patch.object(
+            credentials_module, "KEYCHAIN_TOOL_CANDIDATES", self._fake_candidates(),
+            create=True,
+        ):
+            report = AnnotationService(WorkspaceService.open(self.root)).doctor(
+                environ=environ
+            )
+        self.assertEqual(environ.reads, [], "doctor without consent must not read env")
+        self.assertFalse(self.keychain_log.exists())
+        credential = report["annotators"][0]["credentials"][0]
+        self.assertEqual(
+            set(credential["sources"].values()), {"not_checked"}
+        )
+        self.assertIsNone(credential["local_source"])
+        self.assertIn(CONSENT_COMMAND, credential["reason"])
+        self.assertFalse(report["annotators"][0]["ready"])
+
+    def test_doctor_with_consent_probes_only_through_the_seam(self) -> None:
+        self._install()
+        self._store_keychain(KEYCHAIN_VALUE)
+        self.workspace.configure_annotator(allow_remote=True)
+        result = self._cli("annotate", "doctor", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        credential = json.loads(result.stdout)["annotators"][0]["credentials"][0]
+        if sys.platform == "darwin" or sys.platform.startswith("linux"):
+            self.assertEqual(credential["sources"]["keychain"], "resolves")
+            self.assertEqual(len(self._keychain_calls()), 1)
+        self._assert_no_value(result.stdout + result.stderr, "doctor output")
 
     def test_doctor_reports_unreadable_manifests_without_running_them(self) -> None:
         bad = self._install(module_id="broken-judge")
@@ -665,6 +917,106 @@ class AnnotatorDoctorTests(CredentialFixture):
         self.assertFalse(self.capture.exists())
 
 
+class AllowRemoteDisclosureTests(CredentialFixture):
+    def test_preview_and_consent_list_declared_credentials(self) -> None:
+        self._install()
+        self._install(module_id="local-judge", network="none", credentials=None)
+        preview = self._cli("annotate", "allow-remote")
+        self.assertEqual(preview.returncode, 2)
+        self.assertIn("remote-judge", preview.stderr)
+        self.assertIn(KEY_NAME, preview.stderr)
+        self.assertIn("typesafe", preview.stderr)
+        self.assertNotIn("local-judge", preview.stderr)
+        self.assertFalse(self.workspace.annotator_settings()["allow_remote"])
+
+        granted = self._cli("annotate", "allow-remote", "--yes", "--json")
+        self.assertEqual(granted.returncode, 0, granted.stderr)
+        payload = json.loads(granted.stdout)
+        self.assertTrue(payload["allow_remote"])
+        self.assertEqual(
+            payload["remote_annotators"],
+            [
+                {
+                    "module_id": "remote-judge",
+                    "module_version": "1.0.0",
+                    "credentials": [
+                        {
+                            "name": KEY_NAME,
+                            "provider": "typesafe",
+                            "sources": ["host", "env", "keychain"],
+                        }
+                    ],
+                }
+            ],
+        )
+        text = self._cli("annotate", "allow-remote", "--yes")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn(KEY_NAME, text.stdout)
+        self.assertIn("typesafe", text.stdout)
+        self.assertEqual(self._keychain_calls(), [], "consent reads no credential")
+
+    def test_preview_says_when_no_remote_annotator_is_installed(self) -> None:
+        preview = self._cli("annotate", "allow-remote")
+        self.assertEqual(preview.returncode, 2)
+        self.assertIn("No remote annotator is installed", preview.stderr)
+
+
+class ModuleRunnerCredentialGuardTests(CredentialFixture):
+    def _request(self) -> dict[str, Any]:
+        item = self.workspace.load_item("testing-effect")
+        from virtuoso.annotations import QuestionSet, item_subject
+
+        question_set = QuestionSet.bundled("item_quality_v1")
+        return {
+            "schema": "virtuoso/module-request@0.1",
+            "projections": {
+                "annotation.request": {
+                    "subject_kind": "item",
+                    "subject_id": item.item_id,
+                    "subject_hash": item.content_hash,
+                    "question_set_id": question_set.question_set_id,
+                    "question_set_hash": question_set.question_set_hash,
+                    "questions": list(question_set.questions),
+                    "subject": item_subject(item),
+                }
+            },
+        }
+
+    def test_declared_credential_runs(self) -> None:
+        manifest = ModuleManifest.load(self._install())
+        result = ModuleRunner().run(
+            manifest, self._request(), allow_trusted=True,
+            credential_environment={KEY_NAME: ENV_VALUE},
+        )
+        self.assertEqual(result.kind, "annotation-answers")
+        self.assertEqual(self._captured()["value_sha256"], self._sha(ENV_VALUE))
+
+    def test_undeclared_name_is_refused_before_the_module_starts(self) -> None:
+        manifest = ModuleManifest.load(self._install())
+        with self.assertRaisesRegex(ModuleError, "not declared"):
+            ModuleRunner().run(
+                manifest, self._request(), allow_trusted=True,
+                credential_environment={"OTHER_API_KEY": ENV_VALUE},
+            )
+        self.assertFalse(self.capture.exists())
+
+    def test_base_environment_names_are_refused_even_when_declared(self) -> None:
+        manifest = ModuleManifest.load(self._install())
+        for name in sorted(BASE_MODULE_ENV):
+            with self.subTest(name=name):
+                # Bypass manifest validation to prove the runner guard alone holds.
+                forged = dataclasses.replace(
+                    manifest,
+                    credentials=(CredentialSpec(name=name, provider="typesafe", sources=("env",)),),
+                )
+                with self.assertRaises(ModuleError):
+                    ModuleRunner().run(
+                        forged, self._request(), allow_trusted=True,
+                        credential_environment={name: str(self.bin)},
+                    )
+                self.assertFalse(self.capture.exists())
+
+
 class CredentialMigrationTests(unittest.TestCase):
     def test_v17_workspace_upgrades_and_keeps_annotations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -675,6 +1027,28 @@ class CredentialMigrationTests(unittest.TestCase):
                 downgrade_credentials_to_v17(db)
                 columns = {row[1] for row in db.execute("PRAGMA table_info(annotations)")}
                 self.assertNotIn("credential_source", columns)
+                # A real v17 annotation and its receipt, with v17 columns only.
+                db.execute("PRAGMA foreign_keys = ON")
+                db.execute(
+                    """INSERT INTO module_run_receipts(
+                        receipt_id, module_id, module_version, category, kind,
+                        manifest_sha256, stdout_sha256, status, error,
+                        duration_ms, started_at, completed_at
+                    ) VALUES ('receipt-v17', 'rule-annotator', '1.0.0', 'annotator',
+                        'annotation-answers', ?, ?, 'succeeded', NULL, 12,
+                        '2026-10-01T10:00:00+00:00', '2026-10-01T10:00:01+00:00')""",
+                    ("a" * 64, "b" * 64),
+                )
+                db.execute(
+                    """INSERT INTO annotations(
+                        annotation_id, subject_kind, subject_id, subject_hash,
+                        question_set_id, question_set_hash, module_id, module_version,
+                        module_network, module_receipt_id, answers_json, occurred_at, surface
+                    ) VALUES ('annotation-v17', 'item', 'testing-effect', ?,
+                        'item_quality_v1', ?, 'rule-annotator', '1.0.0', 'none',
+                        'receipt-v17', '{}', '2026-10-01T10:00:01+00:00', 'cli')""",
+                    ("c" * 64, "d" * 64),
+                )
             reopened = WorkspaceService.open(root)
             with sqlite3.connect(reopened.db_path) as db:
                 versions = [r[0] for r in db.execute("SELECT version FROM schema_migrations")]
@@ -684,10 +1058,57 @@ class CredentialMigrationTests(unittest.TestCase):
                 receipt_columns = {
                     row[1] for row in db.execute("PRAGMA table_info(module_run_receipts)")
                 }
+                annotation = db.execute(
+                    "SELECT annotation_id, module_receipt_id, credential_source, "
+                    "credential_provider FROM annotations"
+                ).fetchall()
+                receipt = db.execute(
+                    "SELECT receipt_id, credential_source, credential_provider "
+                    "FROM module_run_receipts"
+                ).fetchall()
+                for statement in (
+                    "UPDATE annotations SET surface = 'agent'",
+                    "DELETE FROM annotations",
+                    "UPDATE module_run_receipts SET duration_ms = 0",
+                    "DELETE FROM module_run_receipts",
+                ):
+                    with self.subTest(statement=statement):
+                        with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
+                            db.execute(statement)
+                still_there = db.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
             self.assertEqual(versions[-1], 18)
             for columns in (annotation_columns, receipt_columns):
                 self.assertTrue({"credential_source", "credential_provider"} <= columns)
+            self.assertEqual(annotation, [("annotation-v17", "receipt-v17", None, None)])
+            self.assertEqual(receipt, [("receipt-v17", None, None)])
+            self.assertEqual(still_there, 1)
 
+    def test_module_receipts_are_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "learner"
+            workspace = WorkspaceService.init(root)
+            with sqlite3.connect(workspace.db_path) as db:
+                db.execute(
+                    """INSERT INTO module_run_receipts(
+                        receipt_id, module_id, module_version, category, kind,
+                        manifest_sha256, stdout_sha256, status, error,
+                        duration_ms, started_at, completed_at
+                    ) VALUES ('receipt-1', 'rule-annotator', '1.0.0', 'annotator',
+                        'annotation-answers', ?, ?, 'succeeded', NULL, 12,
+                        '2026-10-01T10:00:00+00:00', '2026-10-01T10:00:01+00:00')""",
+                    ("a" * 64, "b" * 64),
+                )
+                for statement in (
+                    "UPDATE module_run_receipts SET credential_source = 'env', "
+                    "credential_provider = 'typesafe'",
+                    "UPDATE module_run_receipts SET status = 'failed', error = 'x'",
+                    "DELETE FROM module_run_receipts",
+                ):
+                    with self.subTest(statement=statement):
+                        with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
+                            db.execute(statement)
+                count = db.execute("SELECT COUNT(*) FROM module_run_receipts").fetchone()[0]
+            self.assertEqual(count, 1)
 
 if __name__ == "__main__":
     unittest.main()
