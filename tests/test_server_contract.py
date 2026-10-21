@@ -106,6 +106,24 @@ class BaseInstallContractTests(unittest.TestCase):
 
 
 class ServerDocumentationTests(unittest.TestCase):
+    def test_hint_protection_contract_and_recovery_are_documented(self) -> None:
+        from virtuoso.server.operations import OPERATIONS, _ERRORS
+
+        self.assertEqual(
+            _ERRORS.get("attempt-hinted"),
+            (409, "respond-and-record-or-wait-for-expiry"),
+        )
+        for name in ("recall_start", "recall_hint", "recall_skip"):
+            with self.subTest(operation=name):
+                self.assertIn("attempt-hinted", OPERATIONS[name].description)
+        for name in ("12-cli-reference.md", "22-server-and-mcp-design.md"):
+            with self.subTest(document=name):
+                document = (ROOT / "docs" / name).read_text(encoding="utf-8")
+                self.assertIn("attempt-hinted", document)
+                self.assertIn("pending_attempt_warnings", document)
+                self.assertNotIn("holds nothing to lose", document)
+                self.assertNotIn("Nothing is lost, because the closed attempt holds no response", document)
+
     def test_reference_documents_the_command_and_every_operation(self) -> None:
         from virtuoso.server.operations import OPERATIONS
 

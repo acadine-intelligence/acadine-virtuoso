@@ -202,6 +202,84 @@ class StdioHeroWorkflowTests(unittest.TestCase):
         self.assertEqual(stored, [{"surface": "mcp", "client": "synthetic-test-client",
                                    "graded_by": "learner"}])
 
+    def _assert_hinted_attempt_is_preserved(self, operation: str) -> None:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "virtuoso.cli", "--workspace", str(self.workspace.root),
+                  "serve", "--transport", "stdio"],
+            env={"PYTHONNOUSERSITE": "1"},
+        )
+
+        async def journey() -> dict:
+            async with Client(params) as client:
+                started = await client.call_tool("recall_start", {"item_id": "hash-lookup"})
+                self.assertFalse(started.is_error, started.content)
+                token = _tool_payload(started)["attempt"]["attempt_token"]
+                hinted = await client.call_tool("recall_hint", {"attempt_token": token})
+                self.assertFalse(hinted.is_error, hinted.content)
+                arguments = ({"item_id": "hash-lookup"} if operation == "recall_start" else {
+                    "attempt_token": token, "submission_id": secrets.token_hex(16),
+                })
+                before = database_digest(self.workspace.db_path)
+                refused = await client.call_tool(operation, arguments)
+                self.assertTrue(refused.is_error, refused.content)
+                error = _tool_payload(refused)["error"]
+                self.assertEqual(error["code"], "attempt-hinted")
+                self.assertEqual(error["recovery"], "respond-and-record-or-wait-for-expiry")
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+                responded = await client.call_tool("recall_respond", {
+                    "attempt_token": token, "response": "buckets",
+                })
+                self.assertFalse(responded.is_error, responded.content)
+                recorded = await client.call_tool("recall_record", {
+                    "attempt_token": token, "submission_id": secrets.token_hex(16),
+                    "result": "partial", "confidence": 3,
+                    "agent_help": "none", "graded_by": "learner",
+                })
+                self.assertFalse(recorded.is_error, recorded.content)
+                return _tool_payload(recorded)
+
+        recorded = asyncio.run(asyncio.wait_for(journey(), timeout=60))
+        self.assertTrue(recorded["attempt"]["hint_used"])
+        self.assertEqual(recorded["attempt"]["support"], ["hint"])
+        stored = rows(self.workspace.db_path, "SELECT support_json FROM attempts")
+        self.assertEqual(len(stored), 1)
+        self.assertEqual([action["kind"] for action in json.loads(stored[0]["support_json"])],
+                         ["hint"])
+
+    def test_stdio_refuses_to_supersede_a_hinted_attempt_without_writes(self) -> None:
+        self._assert_hinted_attempt_is_preserved("recall_start")
+
+    def test_stdio_refuses_to_skip_a_hinted_attempt_without_writes(self) -> None:
+        self._assert_hinted_attempt_is_preserved("recall_skip")
+
+    def test_stdio_refuses_response_after_item_retirement_without_writes(self) -> None:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "virtuoso.cli", "--workspace", str(self.workspace.root),
+                  "serve", "--transport", "stdio"],
+            env={"PYTHONNOUSERSITE": "1"},
+        )
+
+        async def journey() -> None:
+            async with Client(params) as client:
+                started = await client.call_tool("recall_start", {"item_id": "hash-lookup"})
+                self.assertFalse(started.is_error, started.content)
+                token = _tool_payload(started)["attempt"]["attempt_token"]
+                self.workspace.retire_item("hash-lookup")
+                before = database_digest(self.workspace.db_path)
+                refused = await client.call_tool("recall_respond", {
+                    "attempt_token": token, "response": "a hash table",
+                })
+                self.assertTrue(refused.is_error, refused.content)
+                self.assertEqual(_tool_payload(refused)["error"]["code"], "item-not-found")
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+                self.assertEqual(rows(self.workspace.db_path,
+                                      "SELECT state, response, responded_at FROM pending_attempts"),
+                                 [{"state": "open", "response": None, "responded_at": None}])
+
+        asyncio.run(asyncio.wait_for(journey(), timeout=60))
+
 
 @require_server_extra
 class HttpTransportTests(unittest.TestCase):
@@ -227,6 +305,70 @@ class HttpTransportTests(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["attempt"]["surface"], "http")
         self.assertEqual(headers["cache-control"], "no-store")
+
+    def _assert_hinted_attempt_is_preserved(self, operation: str) -> None:
+        status, _headers, started = _post(
+            self.port, "/v1/ops/recall_start", {"item_id": "hash-lookup"}, headers=self.auth
+        )
+        self.assertEqual(status, 200, started)
+        token = started["attempt"]["attempt_token"]
+        status, _headers, hinted = _post(
+            self.port, "/v1/ops/recall_hint", {"attempt_token": token}, headers=self.auth
+        )
+        self.assertEqual(status, 200, hinted)
+        arguments = ({"item_id": "hash-lookup"} if operation == "recall_start" else {
+            "attempt_token": token, "submission_id": secrets.token_hex(16),
+        })
+        before = database_digest(self.workspace.db_path)
+        status, _headers, refused = _post(
+            self.port, f"/v1/ops/{operation}", arguments, headers=self.auth
+        )
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(refused["error"]["code"], "attempt-hinted")
+        self.assertEqual(refused["error"]["recovery"], "respond-and-record-or-wait-for-expiry")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        status, _headers, responded = _post(
+            self.port, "/v1/ops/recall_respond",
+            {"attempt_token": token, "response": "buckets"}, headers=self.auth,
+        )
+        self.assertEqual(status, 200, responded)
+        status, _headers, recorded = _post(self.port, "/v1/ops/recall_record", {
+            "attempt_token": token, "submission_id": secrets.token_hex(16),
+            "result": "partial", "confidence": 3,
+            "agent_help": "none", "graded_by": "learner",
+        }, headers=self.auth)
+        self.assertEqual(status, 200, recorded)
+        self.assertTrue(recorded["attempt"]["hint_used"])
+        self.assertEqual(recorded["attempt"]["support"], ["hint"])
+        stored = rows(self.workspace.db_path, "SELECT support_json FROM attempts")
+        self.assertEqual(len(stored), 1)
+        self.assertEqual([action["kind"] for action in json.loads(stored[0]["support_json"])],
+                         ["hint"])
+
+    def test_http_refuses_to_supersede_a_hinted_attempt_without_writes(self) -> None:
+        self._assert_hinted_attempt_is_preserved("recall_start")
+
+    def test_http_refuses_to_skip_a_hinted_attempt_without_writes(self) -> None:
+        self._assert_hinted_attempt_is_preserved("recall_skip")
+
+    def test_http_refuses_response_after_item_retirement_without_writes(self) -> None:
+        status, _headers, started = _post(
+            self.port, "/v1/ops/recall_start", {"item_id": "hash-lookup"}, headers=self.auth
+        )
+        self.assertEqual(status, 200, started)
+        token = started["attempt"]["attempt_token"]
+        self.workspace.retire_item("hash-lookup")
+        before = database_digest(self.workspace.db_path)
+        status, _headers, refused = _post(
+            self.port, "/v1/ops/recall_respond",
+            {"attempt_token": token, "response": "a hash table"}, headers=self.auth,
+        )
+        self.assertEqual(status, 404, refused)
+        self.assertEqual(refused["error"]["code"], "item-not-found")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertEqual(rows(self.workspace.db_path,
+                              "SELECT state, response, responded_at FROM pending_attempts"),
+                         [{"state": "open", "response": None, "responded_at": None}])
 
     def test_wrong_or_missing_token_gets_401_and_writes_nothing(self) -> None:
         before = database_digest(self.workspace.db_path)

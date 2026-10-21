@@ -94,6 +94,7 @@ _ERRORS: dict[str, tuple[int, str]] = {
     "attempt-expired": (410, "start-new-attempt"),
     "attempt-closed": (409, "start-new-attempt"),
     "attempt-awaiting-record": (409, "record-result"),
+    "attempt-hinted": (409, "respond-and-record-or-wait-for-expiry"),
     "response-required": (409, "respond-first"),
     "already-responded": (409, "reveal-answer"),
     "hint-unavailable": (409, "reveal-answer"),
@@ -349,8 +350,10 @@ REGISTRY: tuple[Operation, ...] = (
             "prompt to the learner and do not answer it for them. The answer stays hidden "
             "until recall_respond stores the learner's own response. `client` names your "
             "application in the stored evidence. An item has one live attempt at a time: "
-            "starting again closes an earlier attempt for the item that has no response "
-            "yet, and that attempt's token stops working. While an earlier attempt for the "
+            "starting again closes an earlier attempt with no response or hint, and that "
+            "attempt's token stops working. An unexpired open attempt with a hint refuses "
+            "the start with attempt-hinted: use recall_respond then recall_record, or wait "
+            "for it to expire. While an earlier attempt for the "
             "same item has a stored response that is not recorded yet, this fails with "
             "attempt-awaiting-record: finish that attempt with recall_record."
         ),
@@ -367,7 +370,10 @@ REGISTRY: tuple[Operation, ...] = (
         title="Show the hint",
         description=(
             "Show the item's hint, only if the learner asks for it, before they respond. "
-            "The hint is recorded as support used. Repeating the call returns the same hint."
+            "The hint is recorded as support used. Repeating the call returns the same hint. "
+            "While the attempt is open and unexpired, starting again or skipping fails "
+            "with attempt-hinted; finish "
+            "with recall_respond and recall_record, or wait for the attempt to expire."
         ),
         input_schema=_object({"attempt_token": _TOKEN}, ("attempt_token",)),
         output_schema=_closed({
@@ -386,7 +392,8 @@ REGISTRY: tuple[Operation, ...] = (
         description=(
             "Store the learner's own response, transcribed as they gave it, before the "
             "answer is revealed. Do not improve or complete it. An empty response is "
-            "allowed when the learner could not recall."
+            "allowed when the learner could not recall. A retired item refuses a new "
+            "response with item-not-found."
         ),
         input_schema=_object({
             "attempt_token": _TOKEN,
@@ -450,7 +457,9 @@ REGISTRY: tuple[Operation, ...] = (
         description=(
             "Skip an open attempt before the learner responds, when they choose not to "
             "answer. It appends a skip event, closes the attempt and leaves the due date "
-            "unchanged. After recall_respond stored a response, skipping fails with "
+            "unchanged. A hinted open attempt fails with attempt-hinted: finish with "
+            "recall_respond and recall_record, or wait for it to expire. "
+            "After recall_respond stored a response, skipping fails with "
             "attempt-awaiting-record: finish the attempt with recall_record instead."
         ),
         input_schema=_object({
@@ -624,6 +633,8 @@ class ServerCore:
     @staticmethod
     def _domain_error(message: str) -> OperationError:
         lowered = message.lower()
+        if "pending attempt has a hint" in lowered:
+            return _hinted_attempt()
         if "awaits recall_record" in lowered:
             return _awaiting_record()
         if "has expired" in lowered:
@@ -705,7 +716,7 @@ class ServerCore:
         return item
 
     def _require_skippable(self, row: dict[str, Any], now: datetime) -> None:
-        """Only an open attempt, with no stored response, can be skipped.
+        """Only an open attempt, with no response or hint, can be skipped.
 
         Once the learner responded (and may have seen the answer), the
         attempt is finished by recording it, so a failed recall cannot be
@@ -717,6 +728,8 @@ class ServerCore:
         if row["state"] != "open":
             raise self._closed_state_error(row)
         self._require_unexpired(row, now)
+        if row["hint_shown_at"] is not None:
+            raise _hinted_attempt(row["expires_at"])
 
     def _require_no_attempt_awaiting_record(self, item_id: str, now: datetime) -> None:
         """Refuse a new attempt while an earlier one awaits its record.
@@ -724,12 +737,20 @@ class ServerCore:
         The rule is per item, for any item version: an item has at most one
         live attempt (docs/12). An attempt that expires unrecorded records
         nothing (docs/22); once ``expires_at`` passes, the next start closes
-        it as expired. An unanswered open attempt does not block: the start
-        supersedes it, since it holds no response.
+        it as expired. An open attempt without a response or hint can be
+        superseded; a hint must survive until recording or expiry.
         """
         waiting = self.workspace.attempt_awaiting_record(item_id, now=now)
         if waiting is not None:
             raise _awaiting_record(waiting["expires_at"])
+        live = self.workspace.live_pending_attempt(item_id)
+        if (
+            live is not None
+            and live["state"] == "open"
+            and live["hint_shown_at"] is not None
+            and now <= _parse_time(live["expires_at"])
+        ):
+            raise _hinted_attempt(live["expires_at"])
 
     def _require_live(self, row: dict[str, Any]) -> None:
         """Refuse an attempt that is not its item's one live attempt."""
@@ -911,6 +932,7 @@ class ServerCore:
         self._require_after(now, row["created_at"], row["hint_shown_at"])
         self._require_live(row)
         self._current_item(row)
+        self.workspace.require_practice_ready(row["item_id"])
         self._check_deadline()
         row = self.workspace.record_pending_response(
             attempt_token=token, response=response, responded_at=now
@@ -1123,6 +1145,16 @@ class ServerCore:
                 subject_kind="item", subject_id=item_id
             ),
         }
+
+
+def _hinted_attempt(expires_at: str | None = None) -> OperationError:
+    message = (
+        "an open attempt for this item has a hint; finish it with recall_respond "
+        "and recall_record, or wait for it to expire"
+    )
+    if expires_at is not None:
+        message += f" (it expires at {expires_at})"
+    return _error("attempt-hinted", message)
 
 
 def _awaiting_record(expires_at: str | None = None) -> OperationError:
