@@ -708,6 +708,144 @@ class LimitTests(_CoreCase):
         )
 
 
+class HintEvidenceTests(_CoreCase):
+    def hinted(self) -> str:
+        token = self.start()
+        self.call("recall_hint", attempt_token=token)
+        return token
+
+    def assert_hinted(self, error: OperationError) -> None:
+        self.assertEqual(error.code, "attempt-hinted")
+        self.assertEqual(error.status, 409)
+        self.assertEqual(error.recovery, "respond-and-record-or-wait-for-expiry")
+        self.assertIn("recall_respond", str(error))
+        self.assertIn("recall_record", str(error))
+        self.assertIn("expire", str(error))
+
+    def test_hinted_start_refuses_before_workspace_write_on_both_surfaces(self) -> None:
+        self.hinted()
+        before = database_digest(self.workspace.db_path)
+        for surface in ("mcp", "http"):
+            with self.subTest(surface=surface), mock.patch.object(
+                self.workspace, "create_pending_attempt", side_effect=AssertionError("write")
+            ):
+                self.assert_hinted(self.error("recall_start", item_id="hash-lookup", surface=surface))
+                self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_hinted_skip_refuses_before_workspace_write(self) -> None:
+        token = self.hinted()
+        before = database_digest(self.workspace.db_path)
+        with mock.patch.object(
+            self.workspace, "record_review_skip", side_effect=AssertionError("write")
+        ):
+            self.assert_hinted(self.error(
+                "recall_skip", attempt_token=token, submission_id=_submission()
+            ))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_start_transaction_refuses_hint_arriving_after_preflight(self) -> None:
+        token = self.start()
+        original = self.workspace.create_pending_attempt
+        snapshots = []
+
+        def show_hint_then_start(**arguments):
+            other = WorkspaceService.open(self.workspace.root)
+            other.record_pending_hint(attempt_token=token, hint_shown_at=self.clock())
+            snapshots.append(database_digest(self.workspace.db_path))
+            return original(**arguments)
+
+        with mock.patch.object(self.workspace, "create_pending_attempt", show_hint_then_start):
+            self.assert_hinted(self.error("recall_start", item_id="hash-lookup"))
+        self.assertEqual(database_digest(self.workspace.db_path), snapshots[0])
+
+    def test_skip_transaction_refuses_hint_arriving_after_preflight(self) -> None:
+        token = self.start()
+        original = self.workspace.record_review_skip
+        snapshots = []
+
+        def show_hint_then_skip(**arguments):
+            other = WorkspaceService.open(self.workspace.root)
+            other.record_pending_hint(attempt_token=token, hint_shown_at=self.clock())
+            snapshots.append(database_digest(self.workspace.db_path))
+            return original(**arguments)
+
+        with mock.patch.object(self.workspace, "record_review_skip", show_hint_then_skip):
+            self.assert_hinted(self.error(
+                "recall_skip", attempt_token=token, submission_id=_submission()
+            ))
+        self.assertEqual(database_digest(self.workspace.db_path), snapshots[0])
+
+    def test_hint_from_earlier_item_version_blocks_start_after_restart(self) -> None:
+        token = _submission()
+        with sqlite3.connect(self.workspace.db_path) as db:
+            db.execute(
+                """INSERT INTO pending_attempts(
+                       attempt_token, item_id, item_content_hash, prompt_shown,
+                       surface, created_at, expires_at)
+                   VALUES (?, 'hash-lookup', ?, 'earlier prompt', 'mcp', ?, ?)""",
+                (token, "f" * 64, self.clock().isoformat(),
+                 (self.clock() + timedelta(minutes=60)).isoformat()),
+            )
+            db.execute(
+                "UPDATE pending_attempts SET hint_shown_at = ? WHERE attempt_token = ?",
+                (self.clock().isoformat(), token),
+            )
+        self.core = ServerCore(WorkspaceService.open(self.workspace.root), clock=self.clock)
+        before = database_digest(self.workspace.db_path)
+        self.assert_hinted(self.error("recall_start", item_id="hash-lookup", surface="http"))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+
+    def test_hinted_attempt_is_protected_through_expiry_boundary(self) -> None:
+        token = self.hinted()
+        hint_time = self.workspace.pending_attempt(token)["hint_shown_at"]
+        self.clock.advance(minutes=60)
+        before = database_digest(self.workspace.db_path)
+        self.assert_hinted(self.error("recall_start", item_id="hash-lookup"))
+        self.assert_hinted(self.error("recall_skip", attempt_token=token, submission_id=_submission()))
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.clock.advance(seconds=1)
+        self.assertEqual(self.error(
+            "recall_skip", attempt_token=token, submission_id=_submission()
+        ).code, "attempt-expired")
+        self.assertNotEqual(self.start(), token)
+        old = self.workspace.pending_attempt(token)
+        self.assertEqual(old["state"], "expired")
+        self.assertEqual(old["hint_shown_at"], hint_time)
+        self.assertEqual(rows(self.workspace.db_path, "SELECT * FROM attempts"), [])
+        self.assertEqual(self.scheduler_rows(), [])
+
+
+class RetiredResponseTests(_CoreCase):
+    def test_retired_item_refuses_response_before_workspace_write(self) -> None:
+        token = self.start()
+        self.workspace.retire_item("hash-lookup")
+        before = database_digest(self.workspace.db_path)
+        with mock.patch.object(
+            self.workspace, "record_pending_response", side_effect=AssertionError("write")
+        ):
+            error = self.error("recall_respond", attempt_token=token, response="buckets")
+        self.assertEqual(error.code, "item-not-found")
+        self.assertEqual(error.status, 404)
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.assertIsNone(self.workspace.pending_attempt(token)["response"])
+
+    def test_response_transaction_refuses_retirement_after_preflight(self) -> None:
+        token = self.start()
+        original = self.workspace.record_pending_response
+        snapshots = []
+
+        def retire_then_respond(**arguments):
+            WorkspaceService.open(self.workspace.root).retire_item("hash-lookup")
+            snapshots.append(database_digest(self.workspace.db_path))
+            return original(**arguments)
+
+        with mock.patch.object(self.workspace, "record_pending_response", retire_then_respond):
+            error = self.error("recall_respond", attempt_token=token, response="buckets")
+        self.assertEqual(error.code, "item-not-found")
+        self.assertEqual(database_digest(self.workspace.db_path), snapshots[0])
+        self.assertIsNone(self.workspace.pending_attempt(token)["response"])
+
+
 class AwaitingRecordTests(_CoreCase):
     """A stored response is finished only by recall_record (review P1)."""
 
@@ -1061,9 +1199,14 @@ class OneLiveAttemptTests(_CoreCase):
 
     # -- supersede ---------------------------------------------------------------
 
-    def test_start_supersedes_an_unanswered_open_attempt(self) -> None:
+    def test_start_preserves_a_hinted_open_attempt_until_expiry(self) -> None:
         a = self.start()
         self.call("recall_hint", attempt_token=a)
+        before = database_digest(self.workspace.db_path)
+        error = self.core_error("recall_start", {"item_id": "hash-lookup"}, "http")
+        self.assertEqual(error.code, "attempt-hinted")
+        self.assertEqual(database_digest(self.workspace.db_path), before)
+        self.clock.advance(minutes=61)
         b = self.core.call(
             "recall_start", {"item_id": "hash-lookup"}, surface="http"
         )["attempt"]["attempt_token"]

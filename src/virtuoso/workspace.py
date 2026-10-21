@@ -5423,10 +5423,10 @@ class WorkspaceService:
         `pending_attempt_token` closes the open split-recall row for the
         same item version in the same transaction (its state becomes
         `expired`), so a skipped attempt can no longer be recorded. Only an
-        open row can be skipped: once a response is stored the attempt is
-        finished by recording it, and migration 20 refuses the skip in the
-        database too. The skip row keeps the token, so a replay can prove
-        which attempt the skip closed.
+        open row without a hint can be skipped: once a response is stored
+        the attempt is finished by recording it, and migration 20 refuses
+        the skip in the database too. The skip row keeps the token, so a
+        replay can prove which attempt the skip closed.
         """
         if not isinstance(event_id, str) or not event_id.startswith("skip-"):
             raise WorkspaceError("review skip event id is invalid")
@@ -5452,6 +5452,15 @@ class WorkspaceService:
         try:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
+                if pending_attempt_token is not None:
+                    hinted = db.execute(
+                        """SELECT 1 FROM pending_attempts
+                           WHERE attempt_token = ? AND state = 'open'
+                             AND hint_shown_at IS NOT NULL""",
+                        (pending_attempt_token,),
+                    ).fetchone()
+                    if hinted is not None:
+                        raise WorkspaceError("pending attempt has a hint")
                 row = db.execute(
                     """SELECT content_hash, relative_path, entry_mode,
                               learning_unit_hash
@@ -5584,10 +5593,20 @@ class WorkspaceService:
                     raise WorkspaceError(
                         "pending attempt has a response and awaits recall_record"
                     )
+                hinted = db.execute(
+                    """SELECT 1 FROM pending_attempts
+                       WHERE item_id = ? AND state = 'open'
+                         AND hint_shown_at IS NOT NULL
+                         AND NOT ifnull(julianday(?) > julianday(expires_at), 0)""",
+                    (item_id, created),
+                ).fetchone()
+                if hinted is not None:
+                    raise WorkspaceError("pending attempt has a hint")
                 # In the same transaction as the insert: an expired response
                 # closes as expired and records nothing (docs/22), and an
-                # open attempt without a response is superseded, losing
-                # nothing. The database refuses the first before expires_at.
+                # open attempt can be superseded only without a hint or after
+                # expiry. The database refuses an early close of a response;
+                # the transaction check above protects an unexpired hint.
                 db.execute(
                     """UPDATE pending_attempts SET state = 'expired'
                        WHERE item_id = ? AND state = 'responded'""",
@@ -5669,17 +5688,27 @@ class WorkspaceService:
             raise WorkspaceError("pending attempt response must be text")
         if responded_at.tzinfo is None or responded_at.utcoffset() is None:
             raise WorkspaceError("pending attempt times must be timezone-aware")
-        self._update_pending_attempt(
-            """UPDATE pending_attempts
-               SET state = 'responded', response = ?, responded_at = ?
-               WHERE attempt_token = ? AND state = 'open'""",
-            (
-                response,
-                responded_at.astimezone(timezone.utc).isoformat(),
-                attempt_token,
-            ),
-            refusal="pending attempt is not open",
-        )
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                item = db.execute(
+                    """SELECT items.item_id, items.retired_at FROM items
+                       JOIN pending_attempts USING (item_id)
+                       WHERE attempt_token = ?""",
+                    (attempt_token,),
+                ).fetchone()
+                if item is not None and item["retired_at"] is not None:
+                    raise WorkspaceError(f"learning item is retired: {item['item_id']}")
+                cursor = db.execute(
+                    """UPDATE pending_attempts
+                       SET state = 'responded', response = ?, responded_at = ?
+                       WHERE attempt_token = ? AND state = 'open'""",
+                    (response, responded_at.astimezone(timezone.utc).isoformat(), attempt_token),
+                )
+                if cursor.rowcount != 1:
+                    raise WorkspaceError("pending attempt is not open")
+        except sqlite3.Error as exc:
+            raise WorkspaceError(f"pending attempt could not be updated: {exc}") from exc
         stored = self.pending_attempt(attempt_token)
         assert stored is not None
         return stored
@@ -6210,6 +6239,7 @@ class WorkspaceService:
 
     def doctor(self, now: datetime | None = None) -> dict[str, Any]:
         self._validate_owned_paths(require_database=True)
+        observed_at = now or datetime.now(timezone.utc)
         legacy_files = self._legacy_file_findings()
         config = self.configuration()
         stale_items: list[str] = []
@@ -6229,6 +6259,18 @@ class WorkspaceService:
             study_event_count = db.execute(
                 "SELECT COUNT(*) FROM study_events"
             ).fetchone()[0]
+            pending_rows = db.execute(
+                """SELECT attempt_token, item_id, created_at, responded_at,
+                          hint_shown_at, expires_at,
+                          julianday(created_at) > julianday(:now) AS future_created_at,
+                          julianday(responded_at) > julianday(:now) AS future_responded_at,
+                          julianday(hint_shown_at) > julianday(:now) AS future_hint_shown_at
+                   FROM pending_attempts
+                   WHERE state IN ('open', 'responded')
+                     AND julianday(expires_at) >= julianday(:now)
+                   ORDER BY item_id, attempt_token""",
+                {"now": observed_at.isoformat()},
+            ).fetchall()
             try:
                 learning_states = current_learning_states(db)
             except LearningStateDataError as exc:
@@ -6245,6 +6287,24 @@ class WorkspaceService:
                 ORDER BY l.item_id, l.source_id, l.source_relative_path
                 """
             ).fetchall()
+        # Clock skew can block completion until the clock catches up. Keep
+        # these diagnostics separate from health failures and preserve the
+        # stored times verbatim so the learner can inspect the discrepancy.
+        pending_warnings: list[dict[str, Any]] = []
+        for row in pending_rows:
+            future_fields = [
+                field for field in ("created_at", "responded_at", "hint_shown_at")
+                if row[f"future_{field}"]
+            ]
+            if future_fields:
+                pending_warnings.append({
+                    "reason": "future-timestamp",
+                    "future_fields": future_fields,
+                    **{field: row[field] for field in (
+                        "item_id", "attempt_token", "created_at", "responded_at",
+                        "hint_shown_at", "expires_at",
+                    )},
+                })
         for row in rows:
             path = self.root / row["relative_path"]
             if path.is_symlink():
@@ -6338,7 +6398,7 @@ class WorkspaceService:
             and not ledger_disagrees
         )
         workload = self._workload_counts(
-            now or datetime.now(timezone.utc),
+            observed_at,
             algorithm=algorithm,
             learning_context=learning_context,
         )
@@ -6363,6 +6423,7 @@ class WorkspaceService:
             "stale_items": stale_items,
             "stale_source_links": stale_source_links,
             "legacy_files": legacy_files,
+            "pending_attempt_warnings": pending_warnings,
             "workload": workload,
             "annotations": self._annotation_report(),
         }
