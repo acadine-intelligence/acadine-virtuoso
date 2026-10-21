@@ -43,3 +43,7 @@ Good prompts ask why or how ("Why does the worker retry with jitter instead of a
 - `queries workload --json`: due counts per focus.
 - `queries history --item ITEM --json`: one item's evidence.
 - `doctor --json`: workspace health.
+
+## Workspace portability
+
+When the human asks to move their workspace, use `export workspace --out FILE --json` with an archive path outside the workspace. It includes their Markdown, configuration, modules and evidence. Restore it with `import workspace --archive FILE --into DIR --json`; this command needs no `--workspace`, and `DIR` must be absent or empty. Check the returned `doctor.status`. Import never runs module code. Both commands return domain errors on stderr in the existing JSON error envelope.

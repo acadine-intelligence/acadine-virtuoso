@@ -8,7 +8,7 @@ Complete reference for the `virtuoso` command-line interface. Every command, fla
 virtuoso --workspace PATH <command> [subcommand] [flags]
 ```
 
-- `--workspace PATH` is required for every command except `--version`, and always comes before the command. It selects the learner workspace directory created by `init`.
+- `--workspace PATH` is required for every command except `--version` and `import workspace`, and always comes before the command. It selects the learner workspace directory created by `init`. Import takes its destination from `--into`.
 - `--version` prints the package version (`0.2.0` on `main`; `0.1.0` for the published release) and exits 0; no workspace is needed.
 - Most commands accept `--json`. On success, `--json` makes stdout a single JSON object (pretty-printed, sorted keys). Without it, output is human-readable `key: value` lines. Agents and scripts should always use `--json`.
 
@@ -17,7 +17,7 @@ virtuoso --workspace PATH <command> [subcommand] [flags]
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `LearningError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json` writes a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. `serve` returns 2 when the server extra is missing or HTTP has no valid token. |
+| 2 | Domain or contract error in the `VirtuosoError` family (`WorkspaceError`, `LearningError`, `PracticeError`, `ModuleError`, `SearchError`, `QueryError`, or `ReviewError`). Most commands keep stdout empty and write `Error: <plain actionable message>` to stderr. `review ... --json`, `export workspace --json`, and `import workspace --json` write a `virtuoso/review-error@0.1` object with a recovery value. SQLite errors use `Error: database unavailable: <message>`. Argparse usage errors and command paths that produce no result also return 2. `serve` returns 2 when the server extra is missing or HTTP has no valid token. |
 
 Commands either complete and return 0 or return 2 without a partial state change.
 
@@ -420,9 +420,37 @@ virtuoso --workspace PATH queries stale-links [--json]
 
 Output schema: `virtuoso/stale-links@0.1`. The top-level `links` array contains `item_id`, `source_id`, and `relative_path` for each linked source note whose current indexed hash no longer matches.
 
-## Export (read-only projections)
+## Export (read-only snapshots and projections)
 
-Exports write derived views of workspace state to a folder you choose. They read the workspace and never write to its database. Every run rewrites the whole target folder, so treat the folder as generated output.
+Exports read the workspace and never write to its database. `export workspace` writes a portable archive; `export obsidian` regenerates a folder containing a derived queue view.
+
+### `export workspace`
+
+```
+virtuoso --workspace PATH export workspace --out FILE [--json]
+```
+
+Writes one gzip-compressed tar archive containing `virtuoso.json`, the learner Markdown files under `items/`, `modules/` if present, and a consistent `.virtuoso/state.sqlite3` snapshot taken with the SQLite backup API. The database retains attempts, including `graded_by`, `surface` and `client`, study events, skips, annotations, scheduler history, and the rest of the stored workspace evidence. Module files travel with the archive; export and import never execute them.
+
+The root manifest is `virtuoso-export.json`, schema `virtuoso/workspace-export@0.1`. It records `virtuoso_version`, `database_schema_version`, `created_at`, a `files` array with each file's relative `path`, byte `size` and `sha256`, the included `directories`, and `excluded_paths`. SQLite WAL/SHM files and the derived `.virtuoso/search.sqlite3` index are excluded, as are other files outside the owned content above; the manifest names the excluded paths. Connected source folders stay under their owner's control and are not copied. Resolved annotator credential values are never persisted and do not enter the archive.
+
+`FILE` must be outside the workspace and its parent directory must already exist. Export refuses symlinks inside the workspace, writes a private temporary archive, then atomically replaces `FILE` with mode `0600`. The snapshot is transactionally consistent for SQLite; edits to Markdown and configuration should finish before export so they describe the same workspace revision.
+
+JSON output uses schema `virtuoso/workspace-export@0.1` with `archive`, `file_count`, and `created_at`.
+
+### `import workspace`
+
+```
+virtuoso import workspace --archive FILE --into DIR [--json]
+```
+
+Restores an exported archive into `DIR`, which must be absent or empty. No `--workspace` argument is needed. Import validates the full archive before publishing the restored workspace: every file and directory must be listed in the manifest, each file's size and SHA-256 must match, paths must be relative with no `..`, and symlinks, hard links, devices and FIFOs are refused. The archive is limited to 1 GiB of total member data including the manifest, a 4 MiB manifest, and 100,000 tar headers including extension headers. The manifest must list the required `items` and `.virtuoso` directories and every parent directory of an included file. Invalid archives exit 2 and leave `DIR` absent or empty; a nonempty destination is left unchanged.
+
+Restored directories have mode `0700` and files `0600`. Import opens the restored workspace with `WorkspaceService.open` and runs `doctor` without running module code. JSON output uses schema `virtuoso/workspace-import@0.1` with `workspace`, `file_count`, and the complete `doctor` report, including its `status` (`healthy` or `needs-attention`). The lexical index rebuilds on the next search; semantic embeddings require rerunning the external embedder and storing its vectors again.
+
+Connected sources may need reconnecting at their new local paths; `doctor` reports stale links when the original source files are unavailable. Module executable bits are not retained: use an interpreter in the module command or explicitly restore the local executable permission after reviewing the restored module.
+
+For either workspace command, domain failures with `--json` keep stdout empty and use the existing `virtuoso/review-error@0.1` envelope on stderr: `error.code` is `workspace-error`, `error.recovery` is `check-paths`, and `error.message` describes the failed validation. Without `--json`, stderr begins with `Error:`. Export and import remain CLI-only on every server transport.
 
 ### `export obsidian`
 
@@ -546,7 +574,7 @@ The 30-second limit is a deadline for the whole call. When it passes, the bindin
 | `workspace-busy` | 503 | Another writer holds the workspace. Retry the same request. |
 | `operation-timeout` | 504 | The call passed its 30-second deadline. A call that had not reached its write writes nothing; one already inside its write may have committed, so retry with the same `submission_id`. |
 
-Not exposed on any transport: `init`, `retire`, sources and scans, candidate decisions, scheduler configuration and switches, trusted modules and external schedulers, annotators, and exports. Whatever an operation returns (prompts, responses, answers) reaches the client's model provider under the learner's own account with that provider; the server sends nothing to a model itself.
+Not exposed on any transport: `init`, `retire`, sources and scans, candidate decisions, scheduler configuration and switches, trusted modules and external schedulers, annotators, workspace import, and exports. Whatever an operation returns (prompts, responses, answers) reaches the client's model provider under the learner's own account with that provider; the server sends nothing to a model itself.
 
 ## Retrieval
 
