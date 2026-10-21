@@ -1076,7 +1076,7 @@ class CredentialMigrationTests(unittest.TestCase):
                         with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
                             db.execute(statement)
                 still_there = db.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
-            self.assertEqual(versions[-1], 20)
+            self.assertEqual(versions[-1], 21)
             for columns in (annotation_columns, receipt_columns):
                 self.assertTrue({"credential_source", "credential_provider"} <= columns)
             self.assertEqual(annotation, [("annotation-v17", "receipt-v17", None, None)])

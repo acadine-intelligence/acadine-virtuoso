@@ -196,7 +196,7 @@ _SUPPORT_ACTION_KINDS = {
 }
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _QUESTION_ID = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
-_ANNOTATION_SUBJECT_KINDS = {"item"}
+_ANNOTATION_SUBJECT_KINDS = {"item", "candidate"}
 _ANNOTATION_PRIMITIVES = {"noul", "choice", "score"}
 _ANNOTATION_QUESTION_FIELDS: dict[str, type | tuple[type, ...]] = {
     "id": str,
@@ -812,10 +812,18 @@ class ModuleRunner:
             if not question["text"].strip():
                 raise ModuleError(f"{label}.text must be nonempty")
             cls._validate_string_list(question["options"], f"{label}.options")
-            if question["primitive"] == "choice" and len(question["options"]) < 2:
-                raise ModuleError(f"{label}.options must list at least two choices")
+            # An empty candidate workspace still supplies its sentinel option.
+            minimum = 1 if (
+                body["subject_kind"] == "candidate"
+                and question["id"] in {"focus", "covered_by"}
+            ) else 2
+            if question["primitive"] == "choice" and len(question["options"]) < minimum:
+                raise ModuleError(f"{label}.options must list at least {minimum} choices")
             if question["primitive"] != "choice" and question["options"]:
                 raise ModuleError(f"{label}.options must be empty unless primitive is choice")
+        if body["subject_kind"] == "candidate":
+            cls._validate_candidate_subject(body["subject"])
+            return
         for key, value in body["subject"].items():
             if not isinstance(key, str) or not _QUESTION_ID.fullmatch(key):
                 raise ModuleError("annotation.request.subject keys must be lowercase words")
@@ -825,6 +833,35 @@ class ModuleRunner:
                 )
             if isinstance(value, list):
                 cls._validate_string_list(value, f"annotation.request.subject.{key}")
+
+    @classmethod
+    def _validate_candidate_subject(cls, subject: dict[str, Any]) -> None:
+        label = "annotation.request.subject"
+        required = {
+            "title", "kind", "rationale", "focus_options", "covered_by_options",
+            "existing_items", "answer_in_prompt_applicable",
+        }
+        optional = {"prompt", "answer", "hint", "focus"}
+        if set(subject) - required - optional or required - set(subject):
+            raise ModuleError(f"{label} has invalid candidate fields")
+        for key in (required | optional) - {
+            "focus_options", "covered_by_options", "existing_items", "answer_in_prompt_applicable",
+        }:
+            if key in subject and not isinstance(subject[key], str):
+                raise ModuleError(f"{label}.{key} must be a string")
+        for key in ("focus_options", "covered_by_options"):
+            cls._validate_string_list(subject[key], f"{label}.{key}")
+        if not isinstance(subject["answer_in_prompt_applicable"], bool):
+            raise ModuleError(f"{label}.answer_in_prompt_applicable must be a boolean")
+        items = subject["existing_items"]
+        if not isinstance(items, list):
+            raise ModuleError(f"{label}.existing_items must be an array")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ModuleError(f"{label}.existing_items must contain objects")
+            _require_exact_keys(item, {"item_id", "title", "prompt"}, f"{label}.existing_items")
+            if any(not isinstance(value, str) for value in item.values()):
+                raise ModuleError(f"{label}.existing_items fields must be strings")
 
     @classmethod
     def _validate_annotation_answers(cls, answers: object) -> None:

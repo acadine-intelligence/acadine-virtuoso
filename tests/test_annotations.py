@@ -324,7 +324,7 @@ class AnnotationContractTests(unittest.TestCase):
         report = self.workspace.doctor()
         self.assertEqual(report["status"], "healthy")
         self.assertEqual(
-            report["annotations"], {"total": 1, "stale": 0, "stale_items": []}
+            report["annotations"], {"total": 1, "stale": 0, "stale_items": [], "stale_candidates": []}
         )
         with self._db() as db:
             db.execute(
@@ -334,7 +334,7 @@ class AnnotationContractTests(unittest.TestCase):
         report = self.workspace.doctor()
         self.assertEqual(
             report["annotations"],
-            {"total": 1, "stale": 1, "stale_items": ["testing-effect"]},
+            {"total": 1, "stale": 1, "stale_items": ["testing-effect"], "stale_candidates": []},
         )
         # The item index was edited under the test, so doctor may flag the item
         # itself. The annotation report alone must never flip health: the
@@ -342,7 +342,7 @@ class AnnotationContractTests(unittest.TestCase):
         with mock.patch.object(
             type(self.workspace),
             "_annotation_report",
-            return_value={"total": 0, "stale": 0, "stale_items": []},
+            return_value={"total": 0, "stale": 0, "stale_items": [], "stale_candidates": []},
         ):
             baseline = self.workspace.doctor()["status"]
         self.assertEqual(report["status"], baseline)
@@ -437,8 +437,8 @@ class AnnotationContractTests(unittest.TestCase):
             visit(tree)
         self.assertEqual(
             sorted(set(sql_readers)),
-            ["workspace.py:list_annotations"],
-            "only list_annotations may query the annotations table",
+            ["workspace.py:_migrate_unchecked", "workspace.py:list_annotations"],
+            "only the migration and list_annotations may query the annotations table",
         )
         self.assertEqual(
             sorted(set(callers)),
@@ -459,7 +459,7 @@ class AnnotationContractTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-        self.assertEqual(version, 20)
+        self.assertEqual(version, 21)
         self.assertIn("annotations", tables)
 
     def test_question_set_hash_is_stable_and_changes_with_wording(self) -> None:

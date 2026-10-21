@@ -81,11 +81,38 @@ V10_CANDIDATE_DECISIONS_REJECT_DELETE = """CREATE TRIGGER candidate_decisions_re
                 END"""
 
 
+def downgrade_candidate_annotations_to_v20(db: sqlite3.Connection) -> None:
+    """Restore the item-only annotation table before migration 21's rebuild."""
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'annotations'"
+    ).fetchone()
+    if row is not None and "'candidate'" in row[0]:
+        statement = row[0].replace(
+            'CREATE TABLE "annotations"', 'CREATE TABLE annotations', 1
+        ).replace("subject_kind IN ('item','candidate')", "subject_kind IN ('item')")
+        rows = db.execute("SELECT * FROM annotations ORDER BY rowid").fetchall()
+        guards = [
+            guard[0] for guard in db.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = 'annotations' "
+                "AND type IN ('index','trigger') AND sql IS NOT NULL"
+            )
+        ]
+        db.execute("DROP TABLE annotations")
+        db.execute(statement)
+        for values in rows:
+            placeholders = ",".join("?" for _ in values)
+            db.execute(f"INSERT INTO annotations VALUES ({placeholders})", values)
+        for guard in guards:
+            db.execute(guard)
+    db.execute("DELETE FROM schema_migrations WHERE version >= 21")
+
+
 def downgrade_skip_links_to_v19(db: sqlite3.Connection) -> None:
     """Remove migration 20: the skip-to-attempt link column, its index, and
     the triggers that keep a responded attempt from being skipped or
     restarted before it is recorded, and the one-live-attempt index with its
     creation and expiry triggers."""
+    downgrade_candidate_annotations_to_v20(db)
     for trigger in (
         "review_skips_require_unresponded_attempt",
         "review_skips_require_open_attempt",

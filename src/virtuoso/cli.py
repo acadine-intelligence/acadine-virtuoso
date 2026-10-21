@@ -571,10 +571,31 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     annotate_item.add_argument("--json", action="store_true")
+    annotate_candidate = annotate_commands.add_parser(
+        "candidate", help="record a model triage proposal for one review candidate"
+    )
+    annotate_candidate.add_argument("--candidate", required=True)
+    annotate_candidate.add_argument("--module", required=True, help="annotator module id")
+    annotate_candidate.add_argument(
+        "--question-set",
+        default="intake_triage_v1",
+        help="bundled question set id (see `annotate questions`)",
+    )
+    annotate_candidate.add_argument(
+        "--host-credential-stdin",
+        action="store_true",
+        help=(
+            "read the module's declared credential for this run from stdin "
+            "(one line, piped by a host agent; never stored)"
+        ),
+    )
+    annotate_candidate.add_argument("--json", action="store_true")
     annotate_list = annotate_commands.add_parser(
         "list", help="list recorded annotations, newest last, with stale flags"
     )
-    annotate_list.add_argument("--item")
+    annotate_subject = annotate_list.add_mutually_exclusive_group()
+    annotate_subject.add_argument("--item")
+    annotate_subject.add_argument("--candidate")
     annotate_list.add_argument("--json", action="store_true")
     annotate_questions = annotate_commands.add_parser(
         "questions", help="show the bundled question sets and their hashes"
@@ -1097,8 +1118,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 0
+            if args.annotate_command == "candidate":
+                _emit(
+                    service.annotate_candidate(
+                        candidate_id=args.candidate,
+                        module_id=args.module,
+                        question_set_id=args.question_set,
+                        surface="cli",
+                        host_credential=(
+                            _host_credential_reader
+                            if args.host_credential_stdin
+                            else None
+                        ),
+                    ),
+                    as_json=args.json,
+                )
+                return 0
             if args.annotate_command == "list":
-                _emit(service.list(item_id=args.item), as_json=args.json)
+                _emit(
+                    service.list(item_id=args.item, candidate_id=args.candidate),
+                    as_json=args.json,
+                )
                 return 0
             if args.annotate_command == "doctor":
                 _emit(service.doctor(), as_json=args.json)
@@ -1122,8 +1162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not args.yes:
                     print(
                         "Remote annotators receive the item title, focus, prompt, answer, "
-                        "hint, follow-up, learning context and entry mode, and may send them "
-                        "to a service the module names. Virtuoso passes nothing else, but a "
+                        "hint, follow-up, learning context and entry mode; candidate triage "
+                        "receives the candidate title, kind, rationale, proposed prompt, "
+                        "answer, hint and focus, focus and active item options, and existing "
+                        "item titles and prompts. Modules may send these to a service they "
+                        "name. Virtuoso passes nothing else, but a "
                         "module is a trusted local program and can read anything you can. "
                         "Install only modules you trust. Re-run with --yes to record consent "
                         "for this workspace.",
@@ -1269,16 +1312,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     run_id=args.run,
                     current_only=args.current_only,
                 )
+                candidate_payloads = [candidate.to_dict() for candidate in candidates]
+                if args.json:
+                    from .annotations import AnnotationService
+
+                    annotations = AnnotationService(workspace)
+                    for candidate_payload in candidate_payloads:
+                        triage = annotations.latest_candidate_proposal(
+                            str(candidate_payload["candidate_id"])
+                        )
+                        if triage is not None:
+                            candidate_payload["triage_proposal"] = triage
                 _emit(
                     {
                         "schema": "virtuoso/review-candidate-list@0.1",
-                        "candidates": [candidate.to_dict() for candidate in candidates],
+                        "candidates": candidate_payloads,
                     },
                     as_json=args.json,
                 )
                 return 0
             if args.candidate_command == "show":
-                _emit(service.get(args.id).to_dict(), as_json=args.json)
+                from .annotations import AnnotationService
+
+                candidate_payload = service.get(args.id).to_dict()
+                triage = AnnotationService(workspace).latest_candidate_proposal(args.id)
+                if args.json and triage is not None:
+                    candidate_payload["triage_proposal"] = triage
+                _emit(candidate_payload, as_json=args.json)
+                if not args.json and triage is not None:
+                    freshness = " (stale)" if triage["stale"] else ""
+                    print(f"Model proposal{freshness}: {triage['annotation_id']}")
+                    for question_id, answer in triage["answers"].items():
+                        print(
+                            f"  {question_id}: {answer['value']} "
+                            f"(confidence {answer['confidence']})"
+                        )
                 return 0
             if args.candidate_command == "decide":
                 edit_values = {

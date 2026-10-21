@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -67,8 +67,43 @@ ITEM_QUALITY_QUESTION_SET: dict[str, Any] = {
     ],
 }
 
+# Frozen static definitions: workspace-dependent options are supplied per run
+# and bound by the subject hash, never substituted into this set's identity.
+INTAKE_TRIAGE_QUESTION_SET: dict[str, Any] = {
+    "schema": QUESTION_SET_SCHEMA,
+    "id": "intake_triage_v1",
+    "subject_kind": "candidate",
+    "questions": [
+        {
+            "id": "focus",
+            "primitive": "choice",
+            "text": "Which supplied workspace focus best fits this candidate?",
+            "options": [],
+        },
+        {
+            "id": "entry_mode",
+            "primitive": "choice",
+            "text": "Is this candidate ready for recall, in need of learning first, or only a wish to park in the backlog?",
+            "options": ["recall-ready", "learn-first", "wish-only"],
+        },
+        {
+            "id": "covered_by",
+            "primitive": "choice",
+            "text": "Which supplied active item already covers this candidate, or none?",
+            "options": [],
+        },
+        {
+            "id": "answer_in_prompt",
+            "primitive": "noul",
+            "text": "Does the candidate prompt give away its answer? Ask only when both prompt and answer are present.",
+            "options": [],
+        },
+    ],
+}
+
 _QUESTION_SETS: dict[str, dict[str, Any]] = {
     ITEM_QUALITY_QUESTION_SET["id"]: ITEM_QUALITY_QUESTION_SET,
+    INTAKE_TRIAGE_QUESTION_SET["id"]: INTAKE_TRIAGE_QUESTION_SET,
 }
 
 
@@ -149,6 +184,51 @@ def item_subject(item: LearningItem) -> dict[str, Any]:
     return subject
 
 
+def candidate_subject(
+    candidate: Mapping[str, Any], *, focus_ids: list[str],
+    existing_items: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Allowlisted candidate text and comparison context; no existing answers."""
+    if "none-of-these" in focus_ids or any(item["item_id"] == "none" for item in existing_items):
+        raise WorkspaceError(
+            "workspace label conflicts with a reserved triage option: "
+            "focus none-of-these or active item id none"
+        )
+    subject = {key: candidate[key] for key in ("title", "kind", "rationale")}
+    proposal = candidate["proposal"]
+    draft = proposal.get("item", proposal)
+    for key in ("prompt", "answer", "hint", "focus"):
+        value = draft.get(key)
+        if isinstance(value, str) and value:
+            subject[key] = value
+    subject["focus_options"] = sorted(set(focus_ids)) + ["none-of-these"]
+    subject["covered_by_options"] = [
+        item["item_id"] for item in existing_items
+    ] + ["none"]
+    subject["existing_items"] = existing_items
+    subject["answer_in_prompt_applicable"] = bool(subject.get("prompt") and subject.get("answer"))
+    return subject
+
+
+def candidate_subject_hash(subject: Mapping[str, Any]) -> str:
+    canonical = json.dumps(subject, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _candidate_questions(question_set: QuestionSet, subject: dict[str, Any]) -> QuestionSet:
+    """Resolve options/applicability without changing the frozen set hash."""
+    questions = []
+    for question in question_set.questions:
+        question = dict(question)
+        question_id = question["id"]
+        if question_id == "answer_in_prompt" and not subject["answer_in_prompt_applicable"]:
+            continue
+        if question_id in {"focus", "covered_by"}:
+            question["options"] = list(subject[f"{question_id}_options"])
+        questions.append(question)
+    return replace(question_set, questions=tuple(questions))
+
+
 class AnnotationService:
     def __init__(self, workspace: WorkspaceService) -> None:
         self.workspace = workspace
@@ -170,10 +250,38 @@ class AnnotationService:
         host source. The resolved value goes to the module environment and
         nowhere else.
         """
+        return self._annotate(
+            subject_kind="item", subject_id=item_id, module_id=module_id,
+            question_set_id=question_set_id, surface=surface,
+            host_credential=host_credential, environ=environ,
+        )
+
+    def annotate_candidate(
+        self,
+        *,
+        candidate_id: str,
+        module_id: str,
+        question_set_id: str = INTAKE_TRIAGE_QUESTION_SET["id"],
+        surface: str = "cli",
+        host_credential: HostReader | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Append a triage proposal; never decide or materialize a candidate."""
+        return self._annotate(
+            subject_kind="candidate", subject_id=candidate_id, module_id=module_id,
+            question_set_id=question_set_id, surface=surface,
+            host_credential=host_credential, environ=environ,
+        )
+
+    def _annotate(
+        self, *, subject_kind: str, subject_id: str, module_id: str,
+        question_set_id: str, surface: str, host_credential: HostReader | None,
+        environ: Mapping[str, str] | None,
+    ) -> dict[str, Any]:
         question_set = QuestionSet.bundled(question_set_id)
-        if question_set.subject_kind != "item":
+        if question_set.subject_kind != subject_kind:
             raise AnnotationError(
-                f"question set {question_set_id} does not annotate items"
+                f"question set {question_set_id} does not annotate {subject_kind}s"
             )
         try:
             manifest = self.workspace.annotator_module_manifest(module_id)
@@ -191,7 +299,14 @@ class AnnotationService:
                 f"annotator {module_id} declares no credentials; omit --host-credential-stdin"
             )
         try:
-            item = self.workspace.load_item(item_id)
+            if subject_kind == "item":
+                item = self.workspace.load_item(subject_id)
+                subject = item_subject(item)
+                subject_hash = item.content_hash
+            else:
+                subject = self.workspace.candidate_annotation_subject(subject_id)
+                subject_hash = candidate_subject_hash(subject)
+                question_set = _candidate_questions(question_set, subject)
         except WorkspaceError as exc:
             raise AnnotationError(str(exc)) from exc
         # Resolve after consent and before the module starts. Nothing has been
@@ -212,7 +327,10 @@ class AnnotationService:
         try:
             return self._run_and_record(
                 manifest=manifest,
-                item=item,
+                subject_kind=subject_kind,
+                subject_id=subject_id,
+                subject_hash=subject_hash,
+                subject=subject,
                 question_set=question_set,
                 surface=surface,
                 resolved=resolved,
@@ -225,7 +343,10 @@ class AnnotationService:
         self,
         *,
         manifest: ModuleManifest,
-        item: LearningItem,
+        subject_kind: str,
+        subject_id: str,
+        subject_hash: str,
+        subject: dict[str, Any],
         question_set: QuestionSet,
         surface: str,
         resolved: tuple[ResolvedCredential, ...],
@@ -234,13 +355,13 @@ class AnnotationService:
             "schema": "virtuoso/module-request@0.1",
             "projections": {
                 "annotation.request": {
-                    "subject_kind": "item",
-                    "subject_id": item.item_id,
-                    "subject_hash": item.content_hash,
+                    "subject_kind": subject_kind,
+                    "subject_id": subject_id,
+                    "subject_hash": subject_hash,
                     "question_set_id": question_set.question_set_id,
                     "question_set_hash": question_set.question_set_hash,
                     "questions": list(question_set.questions),
-                    "subject": item_subject(item),
+                    "subject": subject,
                 }
             },
         }
@@ -261,9 +382,9 @@ class AnnotationService:
         self._check_answers(question_set, result.payload["answers"])
         try:
             record = self.workspace.record_annotation(
-                subject_kind="item",
-                subject_id=item.item_id,
-                subject_hash=item.content_hash,
+                subject_kind=subject_kind,
+                subject_id=subject_id,
+                subject_hash=subject_hash,
                 question_set_id=question_set.question_set_id,
                 question_set_hash=question_set.question_set_hash,
                 manifest=manifest,
@@ -362,11 +483,25 @@ class AnnotationService:
             "values_shown": False,
         }
 
-    def list(self, *, item_id: str | None = None) -> dict[str, Any]:
+    def latest_candidate_proposal(self, candidate_id: str) -> dict[str, Any] | None:
+        proposals = [
+            annotation for annotation in self.list(candidate_id=candidate_id)["annotations"]
+            if annotation["question_set_id"] == INTAKE_TRIAGE_QUESTION_SET["id"]
+        ]
+        if not proposals:
+            return None
+        return {**proposals[-1], "authority": "model-proposal"}
+
+    def list(
+        self, *, item_id: str | None = None, candidate_id: str | None = None,
+    ) -> dict[str, Any]:
+        if item_id is not None and candidate_id is not None:
+            raise AnnotationError("choose either an item or a candidate filter")
+        kind = "item" if item_id is not None else "candidate" if candidate_id is not None else None
         try:
             annotations = self.workspace.list_annotations(
-                subject_kind="item" if item_id is not None else None,
-                subject_id=item_id,
+                subject_kind=kind,
+                subject_id=item_id if item_id is not None else candidate_id,
             )
         except WorkspaceError as exc:
             raise AnnotationError(str(exc)) from exc

@@ -1,6 +1,6 @@
 # 21. Calibrated decision annotations
 
-Status: V1 shipped in #67; V3 to V7 proposed. Tracked by issue #65, with credentials in #68. Each slice ships as its own reviewed PR. `12-cli-reference.md` is the authority for shipped commands and fields; this record explains the design and the slices that remain.
+Status: V1 shipped in #67; V6 shipped; V3, V4, V5 and V7 proposed. Tracked by issue #65, with credentials in #68. Each slice ships as its own reviewed PR. `12-cli-reference.md` is the authority for shipped commands and fields; this record explains the design and the slices that remain.
 
 Related: design 19 (prerequisite navigation and diagnostics, issues #58 and #59) is adjacent and stays independent.
 
@@ -69,22 +69,26 @@ The hash of the question set's canonical JSON travels with every annotation, so 
 
 This replaces the earlier plan for versioned prose files (`questions/item-quality.md`) holding `answer_in_prompt`, `prompt_answerable_from_answer`, `yes_no_prompt`, `answer_is_definition_only` and `near_duplicate_of`. Bundling in code keeps the hash stable and the contract testable. Later question sets follow the same pattern: a new set id, never an edit to a shipped one. The leaked-answer and near-duplicate checks move to V6.
 
-## 4. Remaining slices, each one PR
+## 4. Follow-on slices, each one PR
 
-Order: V6, then V7, then V4. V3 and V5 wait until a workspace holds enough graded attempts to judge them.
+Order: V6 (shipped), then V7, then V4. V3 and V5 wait until a workspace holds enough graded attempts to judge them.
 
-### V6. Intake triage on capture (absorbs the earlier V2)
+### V6. Intake triage on capture — shipped (absorbs the earlier V2)
 
-When a topic, link, note or curriculum candidate arrives, an agent today guesses its focus and entry mode, and a candidate gets structural checks only.
+`annotate candidate --candidate ID --module MODULE_ID` now records a typed `intake_triage_v1` proposal for an existing review candidate. This slice covers structural and curriculum review candidates; it adds no other capture path.
 
 Questions over the captured text plus the workspace's focus list and existing item prompts:
 
 - `choice` `focus` over the workspace's focus ids plus `none-of-these`.
 - `choice` `entry_mode`: `recall-ready`, `learn-first`, or `wish-only` (no item yet, park in the backlog).
-- `choice` `covered_by` over the focus's existing item ids plus `none` (near-duplicate check).
+- `choice` `covered_by` over all active item ids plus `none` (near-duplicate check).
 - `noul` `answer_in_prompt` when the capture already carries a prompt and answer.
 
-Policy in code: a proposal row (focus, entry mode, covered-by, flags) attached to the candidate. The human still accepts, edits or skips. Nothing enters the item store on a model answer. Subject kind `candidate` arrives here, with its own projection and tests.
+Migration 21 admits subject kind `candidate` while preserving every existing annotation and the append-only triggers and indexes. Runs reuse the V1 runner, receipt transaction, remote-consent gate and credential handling. Repeated runs append. `candidate show` and `candidate list --json` show the latest annotation as a model proposal with a stale flag. `annotate list --candidate ID` exposes history; `doctor` counts stale candidate annotations. The human still accepts, edits, skips or rejects. No model answer creates an item, changes a candidate decision or feeds selection, composition or scheduling.
+
+The projection contains title, kind, rationale, proposed prompt, answer, hint and focus when present, workspace focus options, active item options, and existing items' ids, titles and prompts. It contains no attempts, schedules, paths or existing items' answers. Options and existing-item descriptions enter the subject hash, so changes make earlier proposals stale. The frozen four-question static definition uses the V1 canonical JSON hash; workspace options enter the request without changing that set hash.
+
+V6 resolves the initial sketch as follows: `covered_by` considers every active item, matching the implementation brief rather than filtering by a model-proposed focus. With no separate focus registry, focus options come from all indexed items, including retired items. If the candidate lacks a non-empty prompt and answer pair, `answer_in_prompt_applicable` is false and the request and response omit `answer_in_prompt`; the static question set still contains it. The core records no invented probability for missing material. Changed or missing active comparison files make prior proposals stale and block new runs until their content matches the index; an answer-only edit with an updated index does not stale the proposal because existing answers are excluded. The fallback labels `none-of-these` and `none` are reserved for triage: a colliding focus or active item id refuses annotation before execution, avoiding an ambiguous proposal. The bundled local rule annotator demonstrates the contract without a model or network call.
 
 ### V7. Focus ranking across the backlog and the item store (ranking over the backlog from #56)
 
@@ -120,7 +124,7 @@ Free-text replies such as "hmm, I think I need to see this first" can be read as
 ## 6. Decisions
 
 1. **Boundary.** Annotator is a trusted module kind. It reuses the fail-closed contract and keeps the core SDK-free. Agent-side only was rejected because it leaves no receipts and feeds no digests. A core dependency was rejected on the local-first rule.
-2. **Remote consent.** A workspace may run a remote module after `annotate allow-remote --yes`. Item text then leaves the machine for that workspace only. `--revoke` withdraws consent. The public default is off.
+2. **Remote consent.** A workspace may run a remote module after `annotate allow-remote --yes`. The declared item or candidate projection may then leave the machine for that workspace only. `--revoke` withdraws consent. The public default is off.
 3. **First tracer.** T1 item quality, because item data exists before attempt data does.
 4. **Self-grade exposure.** The V3 check runs only after the self-grade is recorded and appears only in a digest. Showing coverage at reveal time would anchor the grade and taint the evidence.
 5. **Order against #58 and #59.** Slices land independently. V1 touched `annotations.py`, `modules.py`, `workspace.py` (migration 17) and `cli.py`; design 19 works on the prerequisite map and probe tables.
