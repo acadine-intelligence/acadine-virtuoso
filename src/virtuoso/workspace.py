@@ -57,7 +57,7 @@ _TRANSFER_SCORER_KINDS = {"self", "human", "tool", "agent"}
 _TRANSFER_ASSISTANCE_LEVELS = {"none", "light", "substantial", "unknown"}
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_CURRENT_MIGRATION_VERSION = 20
+_CURRENT_MIGRATION_VERSION = 21
 
 
 class WorkspaceError(VirtuosoError):
@@ -2103,6 +2103,67 @@ class WorkspaceService:
                 BEGIN
                     SELECT RAISE(ABORT, 'pending attempt has a response and awaits recall_record');
                 END""",
+            # Migration 21: review-candidate triage remains annotation evidence.
+            # SQLite cannot alter a CHECK constraint, so copy all columns without
+            # reserializing them, then rebuild the append-only guards and index.
+            # The surrounding migration transaction makes the replacement atomic.
+            """CREATE TABLE annotations_v21 (
+                annotation_id TEXT PRIMARY KEY,
+                subject_kind TEXT NOT NULL CHECK(subject_kind IN ('item','candidate')),
+                subject_id TEXT NOT NULL CHECK(length(subject_id) BETWEEN 1 AND 128),
+                subject_hash TEXT NOT NULL CHECK(length(subject_hash) = 64),
+                question_set_id TEXT NOT NULL CHECK(length(question_set_id) BETWEEN 1 AND 64),
+                question_set_hash TEXT NOT NULL CHECK(length(question_set_hash) = 64),
+                module_id TEXT NOT NULL CHECK(length(module_id) BETWEEN 1 AND 64),
+                module_version TEXT NOT NULL CHECK(length(module_version) BETWEEN 1 AND 64),
+                module_network TEXT NOT NULL CHECK(module_network IN ('none','remote')),
+                module_receipt_id TEXT NOT NULL
+                    REFERENCES module_run_receipts(receipt_id)
+                    ON UPDATE RESTRICT
+                    ON DELETE RESTRICT,
+                answers_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                surface TEXT NOT NULL CHECK(length(surface) BETWEEN 1 AND 64),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                credential_provider TEXT
+                    CHECK(
+                        credential_provider IS NULL
+                        OR length(credential_provider) BETWEEN 1 AND 64
+                    ),
+                credential_source TEXT
+                    CHECK(
+                        (credential_source IS NULL) = (credential_provider IS NULL)
+                        AND (
+                            credential_source IS NULL
+                            OR credential_source IN ('host','env','keychain')
+                        )
+                        AND (credential_source IS NULL OR module_network = 'remote')
+                    )
+            )""",
+            """INSERT INTO annotations_v21(
+                annotation_id, subject_kind, subject_id, subject_hash,
+                question_set_id, question_set_hash, module_id, module_version,
+                module_network, module_receipt_id, answers_json, occurred_at,
+                surface, created_at, credential_provider, credential_source
+            ) SELECT annotation_id, subject_kind, subject_id, subject_hash,
+                question_set_id, question_set_hash, module_id, module_version,
+                module_network, module_receipt_id, answers_json, occurred_at,
+                surface, created_at, credential_provider, credential_source
+                FROM annotations""",
+            "DROP TABLE annotations",
+            "ALTER TABLE annotations_v21 RENAME TO annotations",
+            """CREATE INDEX annotations_by_subject
+                ON annotations(subject_kind, subject_id, occurred_at)""",
+            """CREATE TRIGGER annotations_reject_update
+                BEFORE UPDATE ON annotations
+                BEGIN
+                    SELECT RAISE(ABORT, 'annotations is append-only');
+                END""",
+            """CREATE TRIGGER annotations_reject_delete
+                BEFORE DELETE ON annotations
+                BEGIN
+                    SELECT RAISE(ABORT, 'annotations is append-only');
+                END""",
         )
         # Migration 8 adds item lifecycle: a nullable retirement timestamp.
         # ALTER TABLE ADD COLUMN appends the column, so fresh and migrated
@@ -2191,6 +2252,7 @@ class WorkspaceService:
                 18: statements[86:92],
                 19: statements[92:106],
                 20: statements[106:115],
+                21: statements[115:122],
             }
 
             def statements_through(version: int) -> tuple[str, ...]:
@@ -5861,6 +5923,53 @@ class WorkspaceService:
             raise failure
         return result
 
+    def candidate_annotation_subject(self, candidate_id: str) -> dict[str, Any]:
+        """Read one minimal candidate projection and its current option lists."""
+        with self._connect() as db:
+            db.execute("BEGIN")
+            return self._candidate_annotation_subject(db, candidate_id)
+
+    def _candidate_annotation_subject(
+        self, db: sqlite3.Connection, candidate_id: str,
+    ) -> dict[str, Any]:
+        from .annotations import candidate_subject
+
+        row = db.execute(
+            "SELECT title, kind, rationale, proposal_json FROM review_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise WorkspaceError(f"no review candidate with id: {candidate_id}")
+        # Focus has no independent registry: the workspace's indexed items
+        # define its known focuses, including those retained by retired items.
+        focus_ids = [row[0] for row in db.execute("SELECT DISTINCT focus FROM items ORDER BY focus")]
+        items = db.execute(
+            "SELECT item_id, title, relative_path, content_hash FROM items "
+            "WHERE retired_at IS NULL ORDER BY item_id"
+        ).fetchall()
+        existing_items = []
+        for item in items:
+            path = self.root / item["relative_path"]
+            try:
+                path.relative_to(self.items_dir)
+            except ValueError as exc:
+                raise WorkspaceError(f"item path escapes workspace: {item['item_id']}") from exc
+            raw = self._read_item_bytes(path, item_id=item["item_id"])
+            if hashlib.sha256(raw).hexdigest() != item["content_hash"]:
+                raise WorkspaceError("stale comparison item; indexed content must match before annotating candidates")
+            try:
+                prompt = self._section(raw.decode("utf-8"), "Prompt", required=True)
+            except UnicodeDecodeError as exc:
+                raise WorkspaceError("comparison item is not valid UTF-8") from exc
+            existing_items.append({
+                "item_id": item["item_id"], "title": item["title"], "prompt": prompt,
+            })
+        return candidate_subject(
+            {"title": row["title"], "kind": row["kind"], "rationale": row["rationale"],
+             "proposal": json.loads(row["proposal_json"])},
+            focus_ids=focus_ids, existing_items=existing_items,
+        )
+
     def record_annotation(
         self,
         *,
@@ -5882,10 +5991,10 @@ class WorkspaceService:
         A remote run that used a credential records which source resolved it
         and the provider. The credential value is never passed here.
 
-        The subject hash is re-checked inside the transaction so an item that
-        changed while the module ran produces no annotation.
+        The subject hash is re-checked inside the transaction so changed text
+        or candidate option lists produce no annotation or receipt.
         """
-        if subject_kind != "item":
+        if subject_kind not in {"item", "candidate"}:
             raise WorkspaceError(f"unsupported annotation subject kind: {subject_kind}")
         manifest_sha256 = getattr(manifest, "manifest_sha256", None)
         if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
@@ -5913,24 +6022,33 @@ class WorkspaceService:
         )
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT relative_path, content_hash, retired_at FROM items WHERE item_id = ?",
-                (subject_id,),
-            ).fetchone()
-            if row is None:
-                raise WorkspaceError(f"no learning item with id: {subject_id}")
-            if row["retired_at"] is not None:
-                raise WorkspaceError(f"item is retired: {subject_id}")
-            if row["content_hash"] != subject_hash:
-                raise WorkspaceError(
-                    f"item changed while the annotator ran: {subject_id}; run annotate again"
+            if subject_kind == "candidate":
+                from .annotations import candidate_subject_hash
+
+                current = self._candidate_annotation_subject(db, subject_id)
+                if candidate_subject_hash(current) != subject_hash:
+                    raise WorkspaceError(
+                        f"candidate or options changed while the annotator ran: {subject_id}; run annotate again"
+                    )
+            else:
+                row = db.execute(
+                    "SELECT relative_path, content_hash, retired_at FROM items WHERE item_id = ?",
+                    (subject_id,),
+                ).fetchone()
+                if row is None:
+                    raise WorkspaceError(f"no learning item with id: {subject_id}")
+                if row["retired_at"] is not None:
+                    raise WorkspaceError(f"item is retired: {subject_id}")
+                if row["content_hash"] != subject_hash:
+                    raise WorkspaceError(
+                        f"item changed while the annotator ran: {subject_id}; run annotate again"
+                    )
+                self._require_current_item_content_hash(
+                    item_id=subject_id,
+                    relative_path=row["relative_path"],
+                    expected_hash=subject_hash,
+                    action="annotating",
                 )
-            self._require_current_item_content_hash(
-                item_id=subject_id,
-                relative_path=row["relative_path"],
-                expected_hash=subject_hash,
-                action="annotating",
-            )
             db.execute(
                 """
                 INSERT INTO module_run_receipts(
@@ -6003,7 +6121,7 @@ class WorkspaceService:
     def list_annotations(
         self, *, subject_kind: str | None = None, subject_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Annotations in occurrence order, with a stale flag against current item hashes."""
+        """Annotations in occurrence order, with staleness against each subject projection."""
         clauses: list[str] = []
         params: list[str] = []
         if subject_kind is not None:
@@ -6014,6 +6132,7 @@ class WorkspaceService:
             params.append(subject_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as db:
+            db.execute("BEGIN")
             rows = db.execute(
                 f"""
                 SELECT a.*, i.content_hash AS current_hash
@@ -6025,6 +6144,19 @@ class WorkspaceService:
                 """,
                 params,
             ).fetchall()
+            candidate_hashes: dict[str, str | None] = {}
+            for row in rows:
+                candidate_id = row["subject_id"]
+                if row["subject_kind"] == "candidate" and candidate_id not in candidate_hashes:
+                    from .annotations import candidate_subject_hash
+
+                    try:
+                        current = self._candidate_annotation_subject(db, candidate_id)
+                        candidate_hashes[candidate_id] = candidate_subject_hash(current)
+                    except WorkspaceError:
+                        # Missing/unsynced comparison content is stale, not a
+                        # reason to hide the recorded proposal or fail doctor.
+                        candidate_hashes[candidate_id] = None
         annotations: list[dict[str, Any]] = []
         for row in rows:
             value = {
@@ -6033,7 +6165,11 @@ class WorkspaceService:
                 if key not in {"answers_json", "current_hash", "created_at"}
             }
             value["answers"] = json.loads(row["answers_json"])
-            value["stale"] = row["current_hash"] != row["subject_hash"]
+            current_hash = (
+                candidate_hashes[row["subject_id"]]
+                if row["subject_kind"] == "candidate" else row["current_hash"]
+            )
+            value["stale"] = current_hash != row["subject_hash"]
             value["claims_mastery"] = False
             annotations.append(value)
         return annotations
@@ -6370,11 +6506,15 @@ class WorkspaceService:
     def _annotation_report(self) -> dict[str, Any]:
         """Counts for doctor. Stale annotations are information, never a fault."""
         annotations = self.list_annotations()
-        stale = sorted({a["subject_id"] for a in annotations if a["stale"]})
         return {
             "total": len(annotations),
             "stale": sum(1 for a in annotations if a["stale"]),
-            "stale_items": stale,
+            "stale_items": sorted({
+                a["subject_id"] for a in annotations if a["stale"] and a["subject_kind"] == "item"
+            }),
+            "stale_candidates": sorted({
+                a["subject_id"] for a in annotations if a["stale"] and a["subject_kind"] == "candidate"
+            }),
         }
 
     @staticmethod

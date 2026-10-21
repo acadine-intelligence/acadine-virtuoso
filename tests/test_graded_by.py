@@ -100,7 +100,7 @@ class MigrationNineteenTests(_Fixture):
         versions = [row[0] for row in _rows(
             self.workspace.db_path, "SELECT version FROM schema_migrations ORDER BY version"
         )]
-        self.assertEqual(versions, list(range(1, 21)))
+        self.assertEqual(versions, list(range(1, 22)))
         columns = {row[1]: row for row in _rows(
             self.workspace.db_path, "PRAGMA table_info(attempts)"
         )}
@@ -151,7 +151,7 @@ class MigrationNineteenTests(_Fixture):
         self.assertEqual(_scheduler_rows(reopened.db_path), state_before)
         self.assertEqual(_proposal_rows(reopened.db_path), proposals_before)
         self.assertEqual(
-            _rows(reopened.db_path, "SELECT MAX(version) FROM schema_migrations"), [(20,)]
+            _rows(reopened.db_path, "SELECT MAX(version) FROM schema_migrations"), [(21,)]
         )
         self.assertEqual(_rows(reopened.db_path, "SELECT COUNT(*) FROM pending_attempts"), [(0,)])
 

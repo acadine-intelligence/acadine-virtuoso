@@ -1287,7 +1287,7 @@ class OneLiveAttemptTests(_CoreCase):
         reopened.doctor()
         self.assertEqual(
             rows(reopened.db_path, "SELECT MAX(version) AS v FROM schema_migrations"),
-            [{"v": 20}],
+            [{"v": 21}],
         )
         self.assertEqual(
             {token[0]: state for token, state, _ in self.states()},
@@ -1323,7 +1323,7 @@ class SkipReplayOwnershipTests(_CoreCase):
         reopened.doctor()
         self.assertEqual(
             rows(reopened.db_path, "SELECT MAX(version) AS v FROM schema_migrations"),
-            [{"v": 20}],
+            [{"v": 21}],
         )
         upgraded = rows(reopened.db_path, "SELECT * FROM review_skips")
         self.assertEqual(
