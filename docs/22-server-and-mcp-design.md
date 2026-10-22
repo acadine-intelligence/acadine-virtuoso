@@ -1,6 +1,6 @@
 # Server and MCP design
 
-Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). Migration 19 also carries the attempt `client` column and the pending-attempt hint, recording time and expiry rules. The phase 1 security review added migration 20: a skip stores the pending attempt it closed, an item holds at most one live pending attempt, and the database refuses a skip or a new start while an attempt has an unrecorded response. Phase 1 server core is built: `virtuoso serve` over stdio and token-authenticated HTTP, the operation registry, both bindings, the split recall contract with `recall_hint`, and the limits and error envelope. `12-cli-reference.md` documents the shipped command and operations. `export workspace` is not built yet and follows in its own change. Phases 2 to 4 are not started.
+Status: proposal, 2026-10-09; review findings applied 2026-10-18. Tracking issue: #69. The "Core changes" section is built (migration 19, `practice --administer --graded-by`, the surface allow lists, and the 0.2 query schemas). Migration 19 also carries the attempt `client` column and the pending-attempt hint, recording time and expiry rules. The phase 1 security review added migration 20: a skip stores the pending attempt it closed, an item holds at most one live pending attempt, and the database refuses a skip or a new start while an attempt has an unrecorded response. Phase 1 server core is built: `virtuoso serve` over stdio and token-authenticated HTTP, the operation registry, both bindings, the split recall contract with `recall_hint`, and the limits and error envelope. `12-cli-reference.md` documents the shipped command and operations. CLI `export workspace` and `import workspace` are built: one validated archive carries the owned Markdown, configuration, modules and a SQLite backup snapshot, and import reports `doctor` health. Phases 2 to 4 are not started.
 
 ## Decision
 
@@ -114,7 +114,7 @@ Phase 1 changes the core in at least these places. The phase 1 implementation PR
 
 ### Not exposed
 
-These stay CLI-only, on every transport: workspace `init`, item `retire`, source connection and scans, candidate import decisions, scheduler configuration and switches, trusted modules and external schedulers, and annotator configuration. Phase 2 may add `item_add`, because capturing a concept from a conversation is a core journey, but only for the single-item form with human-owned Markdown.
+These stay CLI-only, on every transport: workspace `init`, workspace export and import, item `retire`, source connection and scans, candidate import decisions, scheduler configuration and switches, trusted modules and external schedulers, and annotator configuration. Phase 2 may add `item_add`, because capturing a concept from a conversation is a core journey, but only for the single-item form with human-owned Markdown.
 
 The server never passes `allow_trusted=True`. A workspace configured with an external scheduler rejects remote recall writes with an error that names the CLI path.
 
@@ -141,8 +141,8 @@ Each principal maps to its own workspace root, its own SQLite database, and its 
 Hosting moves learner prose and evidence off the learner's machine. That is a real change to the product's local-first promise, so the hosted mode carries these obligations:
 
 - **Opt-in.** The standalone CLI never contacts a server. Self-hosting remains a complete option.
-- **Export.** `virtuoso export workspace --out FILE`, a new subcommand beside `export obsidian`, writes the complete workspace (Markdown, database, configuration) as one archive. The hosted operator exposes the same export to the learner. An exported workspace opens with the local CLI unchanged.
-- **Import.** A learner can move a local workspace to a hosted one, and back, without losing evidence.
+- **Export.** `virtuoso --workspace PATH export workspace --out FILE` ships beside `export obsidian` and writes one private `.tar.gz` archive containing owned Markdown, configuration, modules and a consistent SQLite backup snapshot. Its versioned manifest hashes every included file and names excluded paths, including the rebuildable search index. The future hosted operator must make the same export available to the learner. Export stays CLI-only in the server transports. An exported workspace opens with the local CLI unchanged.
+- **Import.** `virtuoso import workspace --archive FILE --into DIR` ships for absent or empty local destinations, validates archive paths, member types, sizes and hashes before publishing files, and reports the restored workspace's `doctor` status. Import never runs module code. Hosted operator import remains future work; the archive preserves evidence in either direction.
 - **Deletion.** The operator deletes a learner's workspace on request, including backups within a stated period. The repository cannot enforce this. It is an operator obligation, and a self-hoster owns it for their own backups.
 - **Client models see returned text.** Whatever a tool returns (prompts, responses, answers) reaches the client's model provider under the learner's own account with that provider. The server sends nothing to any model itself. The documentation states this plainly.
 

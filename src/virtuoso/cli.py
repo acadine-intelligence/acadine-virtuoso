@@ -84,7 +84,9 @@ def _parser() -> argparse.ArgumentParser:
         prog="virtuoso", description="Local-first learning and active recall"
     )
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument(
+        "--workspace", type=Path, help="workspace path (required except for import)"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init", help="create a simple-mode workspace")
@@ -314,7 +316,7 @@ def _parser() -> argparse.ArgumentParser:
     scheduler_history.add_argument("--json", action="store_true")
 
     export = commands.add_parser(
-        "export", help="write read-only projections of workspace state"
+        "export", help="write a workspace archive or read-only projection"
     )
     export_commands = export.add_subparsers(dest="export_command", required=True)
     export_obsidian = export_commands.add_parser(
@@ -327,6 +329,22 @@ def _parser() -> argparse.ArgumentParser:
         help="target folder outside the workspace; rewritten on every run",
     )
     export_obsidian.add_argument("--json", action="store_true")
+    export_workspace = export_commands.add_parser(
+        "workspace", help="write a portable workspace archive"
+    )
+    export_workspace.add_argument(
+        "--out", required=True, help="archive file outside the workspace"
+    )
+    export_workspace.add_argument("--json", action="store_true")
+
+    import_command = commands.add_parser("import", help="restore a workspace archive")
+    import_commands = import_command.add_subparsers(dest="import_command", required=True)
+    import_workspace = import_commands.add_parser(
+        "workspace", help="validate and restore an archive into an empty directory"
+    )
+    import_workspace.add_argument("--archive", required=True)
+    import_workspace.add_argument("--into", required=True)
+    import_workspace.add_argument("--json", action="store_true")
 
     search = commands.add_parser(
         "search", help="lexical (FTS5) and semantic (embedding kNN) retrieval"
@@ -709,8 +727,19 @@ def _host_credential_reader() -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.workspace is None and args.command != "import":
+        parser.error("the following arguments are required: --workspace")
     try:
+        if args.command == "import":
+            from .workspace_archive import import_workspace
+
+            _emit(
+                import_workspace(Path(args.archive), Path(args.into)),
+                as_json=args.json,
+            )
+            return 0
         if args.command == "init":
             workspace = WorkspaceService.init(args.workspace)
             _emit(
@@ -998,9 +1027,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "export":
-            from .obsidian_export import ObsidianExporter, ObsidianExportError
+            if args.export_command == "workspace":
+                from .workspace_archive import export_workspace
+
+                _emit(export_workspace(workspace, Path(args.out)), as_json=args.json)
+                return 0
 
             if args.export_command == "obsidian":
+                from .obsidian_export import ObsidianExporter, ObsidianExportError
+
                 try:
                     result = ObsidianExporter(workspace).export(Path(args.out))
                 except ObsidianExportError as exc:
@@ -1490,6 +1525,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(exc.to_payload(), sort_keys=True), file=sys.stderr)
         return 2
     except VirtuosoError as exc:
+        if getattr(args, "json", False) and (
+            args.command == "import"
+            or (args.command == "export" and args.export_command == "workspace")
+        ):
+            error = ReviewError(str(exc), code="workspace-error", recovery="check-paths")
+            print(json.dumps(error.to_payload(), sort_keys=True), file=sys.stderr)
+            return 2
         if args.command == "review":
             message = str(exc)
             lowered = message.lower()
