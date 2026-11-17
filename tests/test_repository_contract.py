@@ -332,6 +332,8 @@ class PublicRepositoryContractTests(unittest.TestCase):
                 "virtuoso_next",
                 "virtuoso_transfer_record",
                 "virtuoso_status",
+                "virtuoso_gaps",
+                "virtuoso_grill",
             },
         )
         for tool in registered_tools:

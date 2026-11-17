@@ -23,6 +23,10 @@ DEFAULT_WORKSPACE = str(Path.home() / ".virtuoso" / "workspace")
 TIMEOUT_S = 30
 _PRODUCT_ID_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 _PRODUCT_ID = re.compile(_PRODUCT_ID_PATTERN)
+_GAP_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+_GAP_ID = re.compile(_GAP_ID_PATTERN)
+_GAP_GRADES = ("knows", "partial", "wrong")
+_GAP_LIMIT_MAX = 500
 
 
 def _workspace(ctx) -> str:
@@ -174,6 +178,39 @@ def virtuoso_status(ctx) -> str:
     return _run(ctx, "doctor")
 
 
+def virtuoso_gaps(ctx, project: str | None = None, limit: int | None = None) -> str:
+    """Ranked understanding gaps: features the learner has not explained back."""
+    args = ["gaps"]
+    if project is not None:
+        if not isinstance(project, str) or not project.strip():
+            return _error("project must be a non-empty string")
+        args.append(f"--project={project.strip()}")
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _GAP_LIMIT_MAX:
+            return _error(f"limit must be an integer from 1 to {_GAP_LIMIT_MAX}")
+        args.append(f"--limit={limit}")
+    return _run(ctx, *args)
+
+
+def virtuoso_grill(ctx, gap_id: str, grade: str | None = None, note: str = "") -> str:
+    """Show a gap's grill question, or record the learner's explanation grade."""
+    if not isinstance(gap_id, str) or not _GAP_ID.fullmatch(gap_id):
+        return _error(
+            "gap id must be letters, digits, '.', '_', ':' or '-' and start with a letter or digit"
+        )
+    args = ["grill", gap_id]
+    if grade is None:
+        if note:
+            return _error("note needs a grade")
+        return _run(ctx, *args)
+    if grade not in _GAP_GRADES:
+        return _error("grade must be knows|partial|wrong")
+    args.append(f"--grade={grade}")
+    if note:
+        args.append(f"--note={note}")
+    return _run(ctx, *args)
+
+
 # ---------- registration ----------
 
 _TOOLS = (
@@ -249,6 +286,44 @@ _TOOLS = (
         },
         virtuoso_status,
         "🩺",
+    ),
+    (
+        "virtuoso_gaps",
+        {
+            "name": "virtuoso_gaps",
+            "description": "List the learner's understanding gaps ranked by priority: features and tools they have not yet explained back. Wrong and partial grades rank higher; known items return when stale. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project name to restrict the list."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": _GAP_LIMIT_MAX, "description": "Optional maximum number of gaps."},
+                },
+            },
+        },
+        virtuoso_gaps,
+        "🕳",
+    ),
+    (
+        "virtuoso_grill",
+        {
+            "name": "virtuoso_grill",
+            "description": "Inverse grill for one understanding gap. Without grade: return the grill question and source of truth (read-only); ask the learner to explain it in their own words. With grade: record how well the learner explained it (knows, partial or wrong). Grade only from the learner's own explanation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gap_id": {
+                        "type": "string",
+                        "pattern": _GAP_ID_PATTERN,
+                        "description": "Gap id from virtuoso_gaps.",
+                    },
+                    "grade": {"type": "string", "enum": list(_GAP_GRADES), "description": "Optional result of the learner's explanation."},
+                    "note": {"type": "string", "description": "Optional note stored with the grade."},
+                },
+                "required": ["gap_id"],
+            },
+        },
+        virtuoso_grill,
+        "🔥",
     ),
 )
 

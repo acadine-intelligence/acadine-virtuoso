@@ -376,6 +376,33 @@ virtuoso --workspace PATH attempts [--json]
 
 JSON output: `{"attempts": [...], "proposals": [...], "skips": [...], "study_events": [...]}`. Attempts carry `result`, `confidence`, `agent_help`, `open_notes`, `initial_latency_ms`, `started_at`/`completed_at`, `administered` (0 direct, 1 agent-administered; administered rows have NULL latency and timing), `graded_by` (`learner` or `agent`; an agent grade is always administered), `surface` (the recording client such as `cli`, or `null` when unknown, including every attempt recorded before migration 19), `client` (the client name a caller supplies beside the surface, for example an MCP client's name; `null` when none was given, including every CLI attempt and every attempt recorded before migration 19), and `support_json` (the ordered support actions). Proposals carry `algorithm`, `algorithm_version` (`6.3.2` for `fsrs`, `sm2-1990/1` for `sm2`), `learning_context`, `configuration`, `due_at` and `rationale`. Proposals made under a previous algorithm stay listed after a `scheduler switch`. Skips carry the item hash, timestamp, and source surface. Study events carry the exact item and learning-unit hashes, occurrence time, and source surface. Study and skip events never change scheduler state.
 
+## Understanding gaps
+
+An inverse grill-me queue: features and tools the learner has not yet explained back. An extractor writes gap items as JSON files; Virtuoso ranks them and records grill results. These commands read `GAPS_DIR` (default `WORKSPACE/gaps`, override with `--gaps-dir`) and need no initialized learning database.
+
+Each `GAPS_DIR/*.json` file except `state.json` holds a JSON list of items: `id`, `project`, `title`, `unsure_of`, `evidence` (list of `{session, date, note}`), `recurrences`, `first_seen`, `last_seen`, `severity`, `score`, `grill_question`, `source_of_truth`. `id`, `project`, `title` and `grill_question` are required. Ids are unique across files. An invalid file or a duplicate id fails the command with exit 2.
+
+`GAPS_DIR/state.json` holds one entry per graded item: `status` (`unverified`, `knows`, `partial`, `wrong`), `last_grilled`, `fingerprint` and an append-only `history`. Only `grill --grade` writes it, by atomic replacement.
+
+Rank score = base × recurrence × recency × status × never-grilled, where base is `score` (else a severity weight), recurrence is `1 + log2(1 + recurrences) / 4`, recency halves every 30 days since `last_seen` (floor 0.25), status is 2.0 for `wrong`, 1.5 for `partial`, 1.0 for `unverified` and 0.1 for `knows`, and never-grilled items get 1.25. A `knows` grade goes stale, and ranks as `unverified`, 30 days after the grill, when the gap is seen again after the grill, or when its title, `unsure_of`, grill question or source of truth changes.
+
+### `gaps`
+
+```
+virtuoso --workspace PATH gaps [--project P] [--limit N] [--gaps-dir DIR] [--json]
+```
+
+Read-only. JSON output: `{"schema": "virtuoso/gap-queue@0.1", "gaps_dir", "project", "count", "gaps": [...]}`, highest rank first. Each gap has `rank`, `id`, `project`, `title`, `status`, `effective_status`, `stale`, `stale_reason`, `rank_score` and `factors`.
+
+### `grill`
+
+```
+virtuoso --workspace PATH grill ID [--gaps-dir DIR] [--json]
+virtuoso --workspace PATH grill ID --grade knows|partial|wrong [--note TEXT] [--gaps-dir DIR] [--json]
+```
+
+Without `--grade`, read-only: prints the grill question and source of truth (`virtuoso/gap-grill@0.1`). With `--grade`, records the result of the learner's own explanation and returns `virtuoso/gap-grade@0.1` with the new status. `--note` without `--grade` fails with exit 2. Grill grades do not change scheduler state.
+
 ## Read-only analytics
 
 Every `queries` command opens SQLite in read-only mode and leaves workspace state unchanged. Use `--json` for the versioned response contract.

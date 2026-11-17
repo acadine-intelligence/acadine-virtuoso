@@ -11,3 +11,5 @@ provides_tools:
   - virtuoso_next
   - virtuoso_transfer_record
   - virtuoso_status
+  - virtuoso_gaps
+  - virtuoso_grill
