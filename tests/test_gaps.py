@@ -209,9 +209,43 @@ class StateMergeTests(GapTestCase):
 
     def test_corrupt_state_fails_closed(self) -> None:
         self.write("a.json", [gap("one")])
-        (self.dir / "state.json").write_text('{"items": {"one": {"status": "great"}}}')
+        (self.dir / "state.json").write_text(
+            '{"schema": "virtuoso/gap-state@0.1", "items": {"one": {"status": "great"}}}'
+        )
         with self.assertRaisesRegex(GapError, "unknown status"):
             gaps.ranked_gaps(self.dir, now=NOW)
+
+    def test_state_without_schema_is_never_overwritten(self) -> None:
+        self.write("a.json", [gap("one")])
+        original = '{"grades": {"one": "knows"}}'
+        (self.dir / "state.json").write_text(original)
+        with self.assertRaisesRegex(GapError, "expected schema"):
+            gaps.record_grade(self.dir, "one", "knows", now=NOW)
+        self.assertEqual((self.dir / "state.json").read_text(), original)
+
+    def test_orphan_temp_file_does_not_break_loading(self) -> None:
+        self.write("a.json", [gap("one")])
+        gaps.record_grade(self.dir, "one", "partial", now=NOW)
+        (self.dir / ".state-orphan.tmp").write_text("{}")
+        self.assertEqual(len(gaps.ranked_gaps(self.dir, now=NOW)), 1)
+
+    def test_numeric_severity_strings_are_bounded(self) -> None:
+        for bad in ("NaN", "Infinity", "-2", "9", 0):
+            with self.subTest(severity=bad):
+                item = gap("one", severity=bad)
+                item.pop("score", None)
+                self.write("a.json", [item])
+                with self.assertRaisesRegex(GapError, "severity"):
+                    gaps.ranked_gaps(self.dir, now=NOW)
+        item = gap("one", severity=4)
+        item.pop("score", None)
+        self.write("a.json", [item])
+        self.assertEqual(gaps.ranked_gaps(self.dir, now=NOW)[0].item.base_score(), 4.0)
+
+    def test_zero_recurrences_get_no_boost(self) -> None:
+        self.write("a.json", [gap("one", recurrences=0)])
+        ranked = gaps.ranked_gaps(self.dir, now=NOW)[0]
+        self.assertEqual(ranked.to_payload()["factors"]["recurrence"], 1.0)
 
 
 class GapCliTests(GapTestCase):

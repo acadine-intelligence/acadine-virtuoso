@@ -23,6 +23,8 @@ import math
 import os
 import re
 import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -92,9 +94,11 @@ class GapItem:
             return self.score
         if self.severity is not None:
             try:
-                return float(self.severity)
+                numeric = float(self.severity)
             except ValueError:
-                pass
+                numeric = None
+            if numeric is not None:
+                return numeric
             return SEVERITY_SCORES.get(self.severity.lower(), DEFAULT_SEVERITY_SCORE)
         return DEFAULT_SEVERITY_SCORE
 
@@ -162,10 +166,18 @@ def _severity(raw: dict[str, Any], *, where: str) -> str | None:
     """Accept a named severity or a number from 1 to 5."""
     value = raw.get("severity")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if not math.isfinite(value) or not 1 <= value <= 5:
-            raise GapError(f"{where}: field 'severity' must be between 1 and 5")
-        return str(value)
-    return _optional_text(raw, "severity", where=where)
+        numeric: float | None = float(value)
+    else:
+        text = _optional_text(raw, "severity", where=where)
+        if text is None or text.lower() in SEVERITY_SCORES:
+            return text
+        try:
+            numeric = float(text)
+        except ValueError:
+            return text
+    if numeric is None or not math.isfinite(numeric) or not 1 <= numeric <= 5:
+        raise GapError(f"{where}: field 'severity' must be between 1 and 5")
+    return str(value) if not isinstance(value, str) else value.strip()
 
 
 def _optional_day(raw: dict[str, Any], key: str, *, where: str) -> str | None:
@@ -217,8 +229,8 @@ def _parse_item(raw: object, *, where: str) -> GapItem:
         raise GapError(f"{where}: field 'recurrences' must be a non-negative integer")
     score = raw.get("score")
     if score is not None:
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or score < 0:
-            raise GapError(f"{where}: field 'score' must be a non-negative number")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1e9:
+            raise GapError(f"{where}: field 'score' must be a number from 0 to 1e9")
         score = float(score)
     return GapItem(
         gap_id=gap_id,
@@ -280,8 +292,14 @@ def load_state(gaps_dir: Path) -> dict[str, dict[str, Any]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise GapError(f"{STATE_FILE_NAME}: cannot read grill state: {exc}") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("items", {}), dict):
-        raise GapError(f"{STATE_FILE_NAME}: expected an object with an 'items' object")
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema") != STATE_SCHEMA
+        or not isinstance(raw.get("items"), dict)
+    ):
+        raise GapError(
+            f"{STATE_FILE_NAME}: expected schema '{STATE_SCHEMA}' with an 'items' object"
+        )
     items: dict[str, dict[str, Any]] = {}
     for gap_id, entry in raw.get("items", {}).items():
         if not isinstance(entry, dict):
@@ -298,11 +316,25 @@ def load_state(gaps_dir: Path) -> dict[str, dict[str, Any]]:
     return items
 
 
+@contextmanager
+def _state_lock(gaps_dir: Path) -> Iterator[None]:
+    """Serialise read-modify-write of the grill state across processes."""
+    import fcntl
+
+    lock_path = Path(gaps_dir).expanduser() / ".state.lock"
+    with open(lock_path, "a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _write_state(gaps_dir: Path, items: dict[str, dict[str, Any]]) -> None:
     path = state_path(gaps_dir)
     payload = {"schema": STATE_SCHEMA, "items": items}
     text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -362,7 +394,7 @@ def rank_item(item: GapItem, entry: dict[str, Any] | None, now: datetime) -> Ran
     stale = stale_reason is not None
     effective_status = "unverified" if stale else status
     base = item.base_score()
-    recurrence = 1.0 + math.log2(1 + max(item.recurrences, 1)) / 4.0
+    recurrence = 1.0 + math.log2(1 + max(item.recurrences, 0)) / 4.0
     recency = recency_factor(item.last_seen, now)
     status_factor = STATUS_FACTORS[effective_status]
     never_factor = NEVER_GRILLED_FACTOR if never_grilled else 1.0
@@ -456,30 +488,31 @@ def record_grade(
             raise GapError(f"note must be at most {MAX_NOTE_LENGTH} characters")
     current = _now(now)
     item = _find(gaps_dir, gap_id)
-    state = load_state(gaps_dir)
-    entry = dict(state.get(gap_id, {}))
-    previous = entry.get("status", "unverified")
-    at = current.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    history = list(entry.get("history", []))
-    record: dict[str, Any] = {
-        "at": at,
-        "grade": grade,
-        "previous_status": previous,
-        "fingerprint": item.fingerprint(),
-    }
-    if note is not None:
-        record["note"] = note
-    history.append(record)
-    entry.update(
-        {
-            "status": grade,
-            "last_grilled": at,
+    with _state_lock(gaps_dir):
+        state = load_state(gaps_dir)
+        entry = dict(state.get(gap_id, {}))
+        previous = entry.get("status", "unverified")
+        at = current.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        history = list(entry.get("history", []))
+        record: dict[str, Any] = {
+            "at": at,
+            "grade": grade,
+            "previous_status": previous,
             "fingerprint": item.fingerprint(),
-            "history": history,
         }
-    )
-    state[gap_id] = entry
-    _write_state(gaps_dir, state)
+        if note is not None:
+            record["note"] = note
+        history.append(record)
+        entry.update(
+            {
+                "status": grade,
+                "last_grilled": at,
+                "fingerprint": item.fingerprint(),
+                "history": history,
+            }
+        )
+        state[gap_id] = entry
+        _write_state(gaps_dir, state)
     ranked = rank_item(item, entry, current)
     payload = ranked.to_payload()
     payload.update(
