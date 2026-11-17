@@ -89,3 +89,11 @@ so a valid free-text value that starts with `-` remains data.
   HTTP authentication and plugin enablement checks. The plugin starts no server.
 - `desktop/plugin.js` is the shipped, uncompiled ESM module. npm dependencies
   support tests only and are unnecessary on the interface machine.
+
+## Slash commands
+
+On messaging platforms (Discord, Telegram) and the CLI the plugin adds:
+
+- `/gaps [project] [limit]` lists ranked understanding gaps.
+- `/grill <id>` shows the grill question and the source of truth.
+- `/grill <id> knows|partial|wrong [note]` records your grade.

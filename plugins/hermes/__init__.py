@@ -328,8 +328,86 @@ _TOOLS = (
 )
 
 
+# ---------- slash commands (/gaps, /grill) for chat platforms ----------
+
+_GAPS_USAGE = "Usage: /gaps [project] [limit]  e.g. /gaps xray 5"
+_GRILL_USAGE = "Usage: /grill <id> [knows|partial|wrong] [note]"
+
+
+def _unwrap(raw: str) -> tuple[dict, str | None]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, "virtuoso returned invalid JSON"
+    if not payload.get("success"):
+        return {}, str(payload.get("error") or "virtuoso failed")
+    return payload.get("data") or {}, None
+
+
+def gaps_command(ctx, raw_args: str = "") -> str:
+    """Render ``/gaps [project] [limit]`` as chat text."""
+    project: str | None = None
+    limit = 10
+    for token in (raw_args or "").split():
+        if token.isdigit():
+            limit = int(token)
+        elif project is None:
+            project = token
+        else:
+            return _GAPS_USAGE
+    data, err = _unwrap(virtuoso_gaps(ctx, project=project, limit=limit))
+    if err:
+        return f"Gaps unavailable: {err}"
+    rows = data.get("gaps") or []
+    if not rows:
+        return "No open understanding gaps."
+    lines = [f"Understanding gaps ({len(rows)}), highest first:"]
+    for row in rows:
+        lines.append(
+            f"{row.get('rank', '-')}. {row.get('title')} "
+            f"({row.get('project')}, {row.get('effective_status') or row.get('status')}) "
+            f"`{row.get('id')}`"
+        )
+    lines.append("Next: /grill <id> to get the question.")
+    return "\n".join(lines)
+
+
+def grill_command(ctx, raw_args: str = "") -> str:
+    """Render ``/grill <id> [grade] [note]`` as chat text."""
+    parts = (raw_args or "").split(maxsplit=2)
+    if not parts:
+        return _GRILL_USAGE
+    gap_id = parts[0]
+    grade = parts[1].lower() if len(parts) > 1 else None
+    note = parts[2] if len(parts) > 2 else ""
+    data, err = _unwrap(virtuoso_grill(ctx, gap_id=gap_id, grade=grade, note=note))
+    if err:
+        return f"Grill failed: {err}\n{_GRILL_USAGE}"
+    if grade is not None:
+        status = data.get("effective_status") or data.get("status") or grade
+        return f"Recorded `{gap_id}` as {grade}. Status now: {status}."
+    lines = [
+        f"{data.get('title')} (`{data.get('id')}`)",
+        f"Question: {data.get('grill_question')}",
+        f"Check against: {data.get('source_of_truth')}",
+        f"Explain it in your own words, then: /grill {gap_id} knows|partial|wrong",
+    ]
+    return "\n".join(lines)
+
+
 def register(ctx) -> None:
     """Register Virtuoso tools. Called once when enabled via ``plugins.enabled``."""
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command(
+            "gaps", handler=lambda raw="": gaps_command(ctx, raw),
+            description="List ranked understanding gaps", args_hint="[project] [limit]",
+        )
+        register_command(
+            "grill", handler=lambda raw="": grill_command(ctx, raw),
+            description="Get a gap's grill question or record a grade",
+            args_hint="<id> [knows|partial|wrong] [note]",
+        )
     for name, schema, handler, emoji in _TOOLS:
         def _make(h):
             def _handler(args, **_kw):

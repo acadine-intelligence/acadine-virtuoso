@@ -546,3 +546,55 @@ class GapToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandContext(FakeContext):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commands: dict[str, dict[str, object]] = {}
+
+    def register_command(self, name: str, **kwargs: object) -> None:
+        self.commands[name] = kwargs
+
+
+class SlashCommandTests(unittest.TestCase):
+    def _ok(self, data: dict[str, object]) -> str:
+        return json.dumps({"success": True, "data": data})
+
+    def test_registers_gaps_and_grill_commands(self) -> None:
+        ctx = CommandContext()
+        plugin.register(ctx)
+        self.assertEqual(set(ctx.commands), {"gaps", "grill"})
+        self.assertIn("virtuoso_gaps", ctx.tools)
+
+    def test_register_without_command_support_still_registers_tools(self) -> None:
+        ctx = FakeContext()
+        plugin.register(ctx)
+        self.assertIn("virtuoso_gaps", ctx.tools)
+
+    def test_gaps_command_parses_project_and_limit(self) -> None:
+        row = {"rank": 1, "id": "XG-A", "title": "A thing", "project": "xray",
+               "effective_status": "unverified"}
+        with patch.object(plugin, "_run", return_value=self._ok({"gaps": [row]})) as run:
+            text = plugin.gaps_command(FakeContext(), "xray 3")
+        self.assertIn("--project=xray", run.call_args.args)
+        self.assertIn("--limit=3", run.call_args.args)
+        self.assertIn("1. A thing (xray, unverified) `XG-A`", text)
+
+    def test_gaps_command_rejects_extra_words(self) -> None:
+        self.assertTrue(plugin.gaps_command(FakeContext(), "a b").startswith("Usage"))
+
+    def test_grill_command_shows_question_and_records_grade(self) -> None:
+        item = {"id": "XG-A", "title": "A thing", "grill_question": "Why?",
+                "source_of_truth": "worker/route.py"}
+        with patch.object(plugin, "_run", return_value=self._ok(item)):
+            text = plugin.grill_command(FakeContext(), "XG-A")
+        self.assertIn("Question: Why?", text)
+        with patch.object(plugin, "_run", return_value=self._ok({"status": "partial"})) as run:
+            text = plugin.grill_command(FakeContext(), "XG-A partial missed the codex route")
+        self.assertIn("--grade=partial", run.call_args.args)
+        self.assertIn("Recorded `XG-A` as partial", text)
+
+    def test_grill_command_errors_are_readable(self) -> None:
+        self.assertTrue(plugin.grill_command(FakeContext(), "").startswith("Usage"))
+        self.assertIn("grade must be", plugin.grill_command(FakeContext(), "XG-A maybe"))
