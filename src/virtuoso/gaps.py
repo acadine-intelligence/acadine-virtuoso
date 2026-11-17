@@ -91,6 +91,10 @@ class GapItem:
         if self.score is not None:
             return self.score
         if self.severity is not None:
+            try:
+                return float(self.severity)
+            except ValueError:
+                pass
             return SEVERITY_SCORES.get(self.severity.lower(), DEFAULT_SEVERITY_SCORE)
         return DEFAULT_SEVERITY_SCORE
 
@@ -154,6 +158,16 @@ def _optional_text(raw: dict[str, Any], key: str, *, where: str) -> str | None:
     return value.strip() or None
 
 
+def _severity(raw: dict[str, Any], *, where: str) -> str | None:
+    """Accept a named severity or a number from 1 to 5."""
+    value = raw.get("severity")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(value) or not 1 <= value <= 5:
+            raise GapError(f"{where}: field 'severity' must be between 1 and 5")
+        return str(value)
+    return _optional_text(raw, "severity", where=where)
+
+
 def _optional_day(raw: dict[str, Any], key: str, *, where: str) -> str | None:
     value = _optional_text(raw, key, where=where)
     if value is not None:
@@ -215,7 +229,7 @@ def _parse_item(raw: object, *, where: str) -> GapItem:
         recurrences=recurrences,
         first_seen=_optional_day(raw, "first_seen", where=where),
         last_seen=_optional_day(raw, "last_seen", where=where),
-        severity=_optional_text(raw, "severity", where=where),
+        severity=_severity(raw, where=where),
         score=score,
         grill_question=_require_text(raw, "grill_question", where=where),
         source_of_truth=_require_text(raw, "source_of_truth", where=where, default=""),
