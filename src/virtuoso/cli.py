@@ -597,6 +597,35 @@ def _parser() -> argparse.ArgumentParser:
     )
     annotate_doctor.add_argument("--json", action="store_true")
 
+    gaps = commands.add_parser(
+        "gaps", help="rank the understanding gaps to explain back next"
+    )
+    gaps.add_argument("--project", help="only gaps for this project")
+    gaps.add_argument("--limit", type=int, help="show at most this many gaps")
+    gaps.add_argument(
+        "--gaps-dir",
+        type=Path,
+        help="directory of gap JSON files and state.json (default WORKSPACE/gaps)",
+    )
+    gaps.add_argument("--json", action="store_true")
+
+    grill = commands.add_parser(
+        "grill", help="show a gap's grill question or record the learner's grade"
+    )
+    grill.add_argument("gap_id", metavar="ID", help="gap id from `virtuoso gaps`")
+    grill.add_argument(
+        "--grade",
+        choices=("knows", "partial", "wrong"),
+        help="record how well the learner explained the gap",
+    )
+    grill.add_argument("--note", help="optional note stored with the grade")
+    grill.add_argument(
+        "--gaps-dir",
+        type=Path,
+        help="directory of gap JSON files and state.json (default WORKSPACE/gaps)",
+    )
+    grill.add_argument("--json", action="store_true")
+
     serve = commands.add_parser(
         "serve",
         help="serve learning operations over MCP and HTTP (needs the [server] extra)",
@@ -708,6 +737,71 @@ def _host_credential_reader() -> str:
     return parse_host_value(sys.stdin.buffer.read(MAX_VALUE_BYTES + 3))
 
 
+def _gaps_dir(args: argparse.Namespace) -> Path:
+    from .gaps import default_gaps_dir
+
+    if args.gaps_dir is not None:
+        return Path(args.gaps_dir).expanduser()
+    return default_gaps_dir(args.workspace)
+
+
+def _gaps_command(args: argparse.Namespace) -> int:
+    """Run `virtuoso gaps` and `virtuoso grill`. They need no learning database."""
+    from . import gaps
+
+    directory = _gaps_dir(args)
+    if args.command == "gaps":
+        ranked = gaps.ranked_gaps(directory, project=args.project, limit=args.limit)
+        rows = [gap.to_payload(rank=index) for index, gap in enumerate(ranked, 1)]
+        if args.json:
+            _emit(
+                {
+                    "schema": "virtuoso/gap-queue@0.1",
+                    "gaps_dir": str(directory),
+                    "project": args.project,
+                    "count": len(rows),
+                    "gaps": rows,
+                },
+                as_json=True,
+            )
+            return 0
+        if not rows:
+            print("No understanding gaps found.")
+            return 0
+        for row in rows:
+            marker = f"{row['effective_status']}{' (stale)' if row['stale'] else ''}"
+            print(
+                f"{row['rank']:>3}. [{row['rank_score']:.2f}] {row['id']}"
+                f" ({row['project']}) {row['title']} - {marker}"
+            )
+        return 0
+    if args.grade is None:
+        if args.note is not None:
+            raise gaps.GapError("--note needs --grade")
+        payload = gaps.grill_prompt(directory, args.gap_id)
+        if args.json:
+            _emit(payload, as_json=True)
+            return 0
+        print(f"{payload['id']} ({payload['project']}): {payload['title']}")
+        print(f"Status: {payload['effective_status']}")
+        print(f"Question: {payload['grill_question']}")
+        print(f"Source of truth: {payload['source_of_truth'] or '(none recorded)'}")
+        print(
+            "Explain it in your own words, then record the result with"
+            f" `virtuoso grill {payload['id']} --grade knows|partial|wrong`."
+        )
+        return 0
+    payload = gaps.record_grade(directory, args.gap_id, args.grade, note=args.note)
+    if args.json:
+        _emit(payload, as_json=True)
+        return 0
+    print(
+        f"Recorded {payload['grade']} for {payload['id']}"
+        f" (was {payload['previous_status']})."
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -720,6 +814,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "serve":
             return _serve(args)
+        if args.command in ("gaps", "grill"):
+            return _gaps_command(args)
 
         workspace = WorkspaceService.open(args.workspace)
         if args.command == "add":

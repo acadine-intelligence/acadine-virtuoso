@@ -14,6 +14,8 @@ connected backend, where the workspace stays. See the [installation guide](../..
 - `virtuoso_next`: single recommended learning or practice action
 - `virtuoso_transfer_record`: record a real-project transfer event with an optional artifact reference
 - `virtuoso_status`: workspace health
+- `virtuoso_gaps`: ranked understanding gaps (features not yet explained back), optional `project` and `limit`
+- `virtuoso_grill`: one gap's grill question and source of truth, or, with `grade` (`knows`, `partial`, `wrong`) and an optional `note`, the recorded result of the learner's own explanation
 
 The tools check the configured executable with `shutil.which()`. Without an
 executable setting they look for `virtuoso` on the backend PATH. If it is
@@ -81,7 +83,17 @@ so a valid free-text value that starts with `-` remains data.
   learning items, Obsidian SR owns flashcards, the project system owns priority.
 - Agent tools do not expose a rating shortcut. The Desktop page records an
   explicit human response through the CLI's measured direct-review contract.
+- `virtuoso_grill` grades only the understanding-gap queue in the gaps
+  directory. It writes no attempt, review rating or scheduler state.
 - `dashboard/plugin_api.py` exports the scoped REST router. Hermes supplies its
   HTTP authentication and plugin enablement checks. The plugin starts no server.
 - `desktop/plugin.js` is the shipped, uncompiled ESM module. npm dependencies
   support tests only and are unnecessary on the interface machine.
+
+## Slash commands
+
+On messaging platforms (Discord, Telegram) and the CLI the plugin adds:
+
+- `/gaps [project] [limit]` lists ranked understanding gaps.
+- `/grill <id>` shows the grill question and the source of truth.
+- `/grill <id> knows|partial|wrong [note]` records your grade.

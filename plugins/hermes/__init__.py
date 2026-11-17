@@ -23,6 +23,10 @@ DEFAULT_WORKSPACE = str(Path.home() / ".virtuoso" / "workspace")
 TIMEOUT_S = 30
 _PRODUCT_ID_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 _PRODUCT_ID = re.compile(_PRODUCT_ID_PATTERN)
+_GAP_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+_GAP_ID = re.compile(_GAP_ID_PATTERN)
+_GAP_GRADES = ("knows", "partial", "wrong")
+_GAP_LIMIT_MAX = 500
 
 
 def _workspace(ctx) -> str:
@@ -174,6 +178,39 @@ def virtuoso_status(ctx) -> str:
     return _run(ctx, "doctor")
 
 
+def virtuoso_gaps(ctx, project: str | None = None, limit: int | None = None) -> str:
+    """Ranked understanding gaps: features the learner has not explained back."""
+    args = ["gaps"]
+    if project is not None:
+        if not isinstance(project, str) or not project.strip():
+            return _error("project must be a non-empty string")
+        args.append(f"--project={project.strip()}")
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _GAP_LIMIT_MAX:
+            return _error(f"limit must be an integer from 1 to {_GAP_LIMIT_MAX}")
+        args.append(f"--limit={limit}")
+    return _run(ctx, *args)
+
+
+def virtuoso_grill(ctx, gap_id: str, grade: str | None = None, note: str = "") -> str:
+    """Show a gap's grill question, or record the learner's explanation grade."""
+    if not isinstance(gap_id, str) or not _GAP_ID.fullmatch(gap_id):
+        return _error(
+            "gap id must be letters, digits, '.', '_', ':' or '-' and start with a letter or digit"
+        )
+    args = ["grill", gap_id]
+    if grade is None:
+        if note:
+            return _error("note needs a grade")
+        return _run(ctx, *args)
+    if grade not in _GAP_GRADES:
+        return _error("grade must be knows|partial|wrong")
+    args.append(f"--grade={grade}")
+    if note:
+        args.append(f"--note={note}")
+    return _run(ctx, *args)
+
+
 # ---------- registration ----------
 
 _TOOLS = (
@@ -250,11 +287,127 @@ _TOOLS = (
         virtuoso_status,
         "🩺",
     ),
+    (
+        "virtuoso_gaps",
+        {
+            "name": "virtuoso_gaps",
+            "description": "List the learner's understanding gaps ranked by priority: features and tools they have not yet explained back. Wrong and partial grades rank higher; known items return when stale. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project name to restrict the list."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": _GAP_LIMIT_MAX, "description": "Optional maximum number of gaps."},
+                },
+            },
+        },
+        virtuoso_gaps,
+        "🕳",
+    ),
+    (
+        "virtuoso_grill",
+        {
+            "name": "virtuoso_grill",
+            "description": "Inverse grill for one understanding gap. Without grade: return the grill question and source of truth (read-only); ask the learner to explain it in their own words. With grade: record how well the learner explained it (knows, partial or wrong). Grade only from the learner's own explanation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gap_id": {
+                        "type": "string",
+                        "pattern": _GAP_ID_PATTERN,
+                        "description": "Gap id from virtuoso_gaps.",
+                    },
+                    "grade": {"type": "string", "enum": list(_GAP_GRADES), "description": "Optional result of the learner's explanation."},
+                    "note": {"type": "string", "description": "Optional note stored with the grade."},
+                },
+                "required": ["gap_id"],
+            },
+        },
+        virtuoso_grill,
+        "🔥",
+    ),
 )
+
+
+# ---------- slash commands (/gaps, /grill) for chat platforms ----------
+
+_GAPS_USAGE = "Usage: /gaps [project] [limit]  e.g. /gaps xray 5"
+_GRILL_USAGE = "Usage: /grill <id> [knows|partial|wrong] [note]"
+
+
+def _unwrap(raw: str) -> tuple[dict, str | None]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, "virtuoso returned invalid JSON"
+    if not payload.get("success"):
+        return {}, str(payload.get("error") or "virtuoso failed")
+    return payload.get("data") or {}, None
+
+
+def gaps_command(ctx, raw_args: str = "") -> str:
+    """Render ``/gaps [project] [limit]`` as chat text."""
+    project: str | None = None
+    limit = 10
+    for token in (raw_args or "").split():
+        if token.isdigit():
+            limit = int(token)
+        elif project is None:
+            project = token
+        else:
+            return _GAPS_USAGE
+    data, err = _unwrap(virtuoso_gaps(ctx, project=project, limit=limit))
+    if err:
+        return f"Gaps unavailable: {err}"
+    rows = data.get("gaps") or []
+    if not rows:
+        return "No open understanding gaps."
+    lines = [f"Understanding gaps ({len(rows)}), highest first:"]
+    for row in rows:
+        lines.append(
+            f"{row.get('rank', '-')}. {row.get('title')} "
+            f"({row.get('project')}, {row.get('effective_status') or row.get('status')}) "
+            f"`{row.get('id')}`"
+        )
+    lines.append("Next: /grill <id> to get the question.")
+    return "\n".join(lines)
+
+
+def grill_command(ctx, raw_args: str = "") -> str:
+    """Render ``/grill <id> [grade] [note]`` as chat text."""
+    parts = (raw_args or "").split(maxsplit=2)
+    if not parts:
+        return _GRILL_USAGE
+    gap_id = parts[0]
+    grade = parts[1].lower() if len(parts) > 1 else None
+    note = parts[2] if len(parts) > 2 else ""
+    data, err = _unwrap(virtuoso_grill(ctx, gap_id=gap_id, grade=grade, note=note))
+    if err:
+        return f"Grill failed: {err}\n{_GRILL_USAGE}"
+    if grade is not None:
+        status = data.get("effective_status") or data.get("status") or grade
+        return f"Recorded `{gap_id}` as {grade}. Status now: {status}."
+    lines = [
+        f"{data.get('title')} (`{data.get('id')}`)",
+        f"Question: {data.get('grill_question')}",
+        f"Check against: {data.get('source_of_truth')}",
+        f"Explain it in your own words, then: /grill {gap_id} knows|partial|wrong",
+    ]
+    return "\n".join(lines)
 
 
 def register(ctx) -> None:
     """Register Virtuoso tools. Called once when enabled via ``plugins.enabled``."""
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command(
+            "gaps", handler=lambda raw="": gaps_command(ctx, raw),
+            description="List ranked understanding gaps", args_hint="[project] [limit]",
+        )
+        register_command(
+            "grill", handler=lambda raw="": grill_command(ctx, raw),
+            description="Get a gap's grill question or record a grade",
+            args_hint="<id> [knows|partial|wrong] [note]",
+        )
     for name, schema, handler, emoji in _TOOLS:
         def _make(h):
             def _handler(args, **_kw):

@@ -423,5 +423,178 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("--artifact=report.md", run.call_args.args)
 
 
+class GapToolTests(unittest.TestCase):
+    def ok(self) -> str:
+        return json.dumps({"success": True, "data": {}})
+
+    def test_gap_tools_are_registered_with_schemas(self) -> None:
+        ctx = FakeContext()
+        plugin.register(ctx)
+        self.assertIn("virtuoso_gaps", ctx.tools)
+        grill = ctx.tools["virtuoso_grill"]["schema"]
+        assert isinstance(grill, dict)
+        parameters = grill["parameters"]
+        assert isinstance(parameters, dict)
+        self.assertEqual(parameters["required"], ["gap_id"])
+        properties = parameters["properties"]
+        assert isinstance(properties, dict)
+        grade = properties["grade"]
+        assert isinstance(grade, dict)
+        self.assertEqual(grade["enum"], ["knows", "partial", "wrong"])
+
+    def test_gaps_forwards_project_and_limit(self) -> None:
+        with patch.object(plugin, "_run", return_value=self.ok()) as run:
+            self.assertTrue(result(plugin.virtuoso_gaps(FakeContext()))["success"])
+            plugin.virtuoso_gaps(FakeContext(), project="-builder", limit=5)
+        self.assertEqual(
+            run.call_args_list,
+            [call(ANY, "gaps"), call(ANY, "gaps", "--project=-builder", "--limit=5")],
+        )
+
+    def test_gaps_rejects_bad_arguments_before_spawn(self) -> None:
+        with patch.object(plugin, "_run", return_value=self.ok()) as run:
+            for kwargs in ({"project": " "}, {"limit": 0}, {"limit": True}, {"limit": "3"}):
+                with self.subTest(kwargs=kwargs):
+                    self.assertIs(
+                        result(plugin.virtuoso_gaps(FakeContext(), **kwargs))["success"],
+                        False,
+                    )
+        run.assert_not_called()
+
+    def test_grill_prompt_and_grade_forwarding(self) -> None:
+        ctx = FakeContext()
+        plugin.register(ctx)
+        handler = cast(Callable[[dict[str, object]], str], ctx.tools["virtuoso_grill"]["handler"])
+        with patch.object(plugin, "_run", return_value=self.ok()) as run:
+            handler({"gap_id": "retry-policy", "grade": None})
+            handler({"gap_id": "retry-policy", "grade": "wrong", "note": "-confused"})
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(ANY, "grill", "retry-policy"),
+                call(ANY, "grill", "retry-policy", "--grade=wrong", "--note=-confused"),
+            ],
+        )
+
+    def test_grill_rejects_bad_arguments_before_spawn(self) -> None:
+        with patch.object(plugin, "_run", return_value=self.ok()) as run:
+            cases = (
+                {"gap_id": "--grade=knows"},
+                {"gap_id": "bad id"},
+                {"gap_id": "one", "grade": "maybe"},
+                {"gap_id": "one", "note": "orphan note"},
+            )
+            for kwargs in cases:
+                with self.subTest(kwargs=kwargs):
+                    self.assertIs(
+                        result(plugin.virtuoso_grill(FakeContext(), **kwargs))["success"],
+                        False,
+                    )
+        run.assert_not_called()
+
+    def test_grill_round_trip_through_the_real_cli(self) -> None:
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "gaps").mkdir()
+            (workspace / "gaps" / "a.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "retry-policy",
+                            "project": "builder",
+                            "title": "Retry policy",
+                            "grill_question": "When does it give up?",
+                            "source_of_truth": "docs/retry.md",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            launcher = workspace / "virtuoso"
+            launcher.write_text(
+                f"#!{sys.executable}\nimport sys\nfrom virtuoso.cli import main\n"
+                "raise SystemExit(main())\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o700)
+            ctx = FakeContext(str(workspace))
+            ctx.get_config = lambda key: (
+                str(launcher) if key == "executable" else str(workspace)
+            )
+            listed = result(plugin.virtuoso_gaps(ctx))
+            self.assertIs(listed["success"], True, listed)
+            data = listed["data"]
+            assert isinstance(data, dict)
+            self.assertEqual(data["count"], 1)
+            prompt = result(plugin.virtuoso_grill(ctx, gap_id="retry-policy"))
+            prompt_data = prompt["data"]
+            assert isinstance(prompt_data, dict)
+            self.assertEqual(prompt_data["grill_question"], "When does it give up?")
+            graded = result(
+                plugin.virtuoso_grill(ctx, gap_id="retry-policy", grade="partial")
+            )
+            graded_data = graded["data"]
+            assert isinstance(graded_data, dict)
+            self.assertEqual(graded_data["status"], "partial")
+            missing = result(plugin.virtuoso_grill(ctx, gap_id="absent"))
+            self.assertIs(missing["success"], False)
+            self.assertIn("unknown gap id", str(missing["error"]))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandContext(FakeContext):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commands: dict[str, dict[str, object]] = {}
+
+    def register_command(self, name: str, **kwargs: object) -> None:
+        self.commands[name] = kwargs
+
+
+class SlashCommandTests(unittest.TestCase):
+    def _ok(self, data: dict[str, object]) -> str:
+        return json.dumps({"success": True, "data": data})
+
+    def test_registers_gaps_and_grill_commands(self) -> None:
+        ctx = CommandContext()
+        plugin.register(ctx)
+        self.assertEqual(set(ctx.commands), {"gaps", "grill"})
+        self.assertIn("virtuoso_gaps", ctx.tools)
+
+    def test_register_without_command_support_still_registers_tools(self) -> None:
+        ctx = FakeContext()
+        plugin.register(ctx)
+        self.assertIn("virtuoso_gaps", ctx.tools)
+
+    def test_gaps_command_parses_project_and_limit(self) -> None:
+        row = {"rank": 1, "id": "XG-A", "title": "A thing", "project": "xray",
+               "effective_status": "unverified"}
+        with patch.object(plugin, "_run", return_value=self._ok({"gaps": [row]})) as run:
+            text = plugin.gaps_command(FakeContext(), "xray 3")
+        self.assertIn("--project=xray", run.call_args.args)
+        self.assertIn("--limit=3", run.call_args.args)
+        self.assertIn("1. A thing (xray, unverified) `XG-A`", text)
+
+    def test_gaps_command_rejects_extra_words(self) -> None:
+        self.assertTrue(plugin.gaps_command(FakeContext(), "a b").startswith("Usage"))
+
+    def test_grill_command_shows_question_and_records_grade(self) -> None:
+        item = {"id": "XG-A", "title": "A thing", "grill_question": "Why?",
+                "source_of_truth": "worker/route.py"}
+        with patch.object(plugin, "_run", return_value=self._ok(item)):
+            text = plugin.grill_command(FakeContext(), "XG-A")
+        self.assertIn("Question: Why?", text)
+        with patch.object(plugin, "_run", return_value=self._ok({"status": "partial"})) as run:
+            text = plugin.grill_command(FakeContext(), "XG-A partial missed the codex route")
+        self.assertIn("--grade=partial", run.call_args.args)
+        self.assertIn("Recorded `XG-A` as partial", text)
+
+    def test_grill_command_errors_are_readable(self) -> None:
+        self.assertTrue(plugin.grill_command(FakeContext(), "").startswith("Usage"))
+        self.assertIn("grade must be", plugin.grill_command(FakeContext(), "XG-A maybe"))
